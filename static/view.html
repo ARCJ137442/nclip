@@ -1,291 +1,82 @@
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Title}}</title>
-    <link rel="stylesheet" href="/static/style.css?v={{.Version}}">
-</head>
-
-<body>
-    <div class="container{{if or .Error (not .Paste)}} no-paste{{end}}">
-        <header>
-            <h1>
-                <a href="/"
-                    style="text-decoration: none; color: inherit; display: inline-flex; align-items: center; gap: 0.5rem;">
-                    <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                        style="width: 2rem; height: 2rem; flex-shrink: 0;">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    NCLIP
-                </a>
-            </h1>
-            <p>Open Source Clipboard Service</p>
-        </header>
-
-        <main>
-            <div id="paste-view-section">
-                {{/* Show a prominent banner when there's an explicit error or when no paste data is available
-                (covers non-existing slug and second read of burn-after-read). */}}
-                {{/* If there's an error or no paste, show a large friendly banner and a single content area.
-                When a paste exists, show the normal details + content. */}}
-                {{if or .Error (not .Paste)}}
-                <div class="alert alert-error banner" style="margin-bottom:1.5rem;">
-                    <div class="alert-body">
-                        <div class="alert-title banner-heading">Page not found or deleted</div>
-                        <div class="alert-message">The paste you requested is missing or has been deleted.</div>
-                        <div style="margin-top:0.75rem; display:flex; gap:0.75rem; align-items:center;">
-                            <a id="new-paste-btn" class="btn btn-primary" href="/">+ New Paste</a>
-                        </div>
-                    </div>
-                </div>
-                {{else}}
-                <div class="paste-info">
-                    <h2>Paste Details</h2>
-                    <div class="info-grid">
-                        <div class="info-item">
-                            <label>ID:</label>
-                            <span>{{.Paste.ID}}</span>
-                        </div>
-                        <div class="info-item">
-                            <label>Size:</label>
-                            <span>{{.Paste.Size}} bytes</span>
-                        </div>
-                        <div class="info-item">
-                            <label>Type:</label>
-                            <span>{{.Paste.ContentType}}</span>
-                        </div>
-                        <div class="info-item">
-                            <label>Created:</label>
-                            <span>{{.Paste.CreatedAt.Format "2006-01-02 15:04:05"}}</span>
-                        </div>
-                        {{if .Paste.ExpiresAt}}
-                        <div class="info-item">
-                            <label>Expires:</label>
-                            <span>{{.Paste.ExpiresAt.Format "2006-01-02 15:04:05"}}</span>
-                        </div>
-                        {{end}}
-                        {{if .Paste.BurnAfterRead}}
-                        <div class="info-item burn-notice">
-                            <label>⚠️ Burn After Read:</label>
-                            <span>This paste will be deleted after viewing</span>
-                        </div>
-                        {{end}}
-                    </div>
-                </div>
-
-                <div class="content-section">
-                    <div class="action-buttons">
-                        <a href="/raw/{{.Paste.ID}}" class="btn btn-secondary" download>Download</a>
-                        {{if .IsText}}
-                        <button id="copy-content" class="btn btn-secondary">Copy</button>
-                        {{end}}
-                        <button id="delete-paste" class="btn btn-danger" data-slug="{{.Paste.ID}}">
-                            <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                            Delete
-                        </button>
-                        <a href="/" class="btn btn-primary">New Paste</a>
-                    </div>
-                    {{if .UploadAuth}}
-                    <div class="form-group api-key-row" style="margin-top: 0.75rem;">
-                        <label for="api-key-input">API Key <small>(required for delete)</small></label>
-                        <input type="text" id="api-key-input" placeholder="Enter API key to delete this paste" style="width:100%;" />
-                    </div>
-                    {{end}}
-                    <h3 style="margin-top: 1.25rem;">
-                        {{if .IsPreview}}
-                        Content Preview (Truncated) — <a href="/raw/{{.Paste.ID}}"
-                            style="font-size: 0.85em; color: #666; text-decoration: none; font-weight: normal; border-bottom: 1px dashed #999;"
-                            onmouseover="this.style.color='#333'; this.style.borderBottom='1px solid #333'"
-                            onmouseout="this.style.color='#666'; this.style.borderBottom='1px dashed #999'">Raw Data View</a>
-                        {{else}}
-                        Content
-                        {{end}}
-                    </h3>
-                    {{if .IsText}}
-                    <div class="content-display">
-                        <pre id="content-text"><code>{{.Content}}</code></pre>
-                    </div>
-                    {{else}}
-                    <div class="binary-notice">
-                        <p>This is a binary file. <a href="/raw/{{.Paste.ID}}">Download</a> to view.</p>
-                    </div>
-                    {{end}}
-                </div>
-                {{end}}
-
-
-                <!-- Upload form, hidden by default -->
-                <div class="card upload-section" id="upload-section" style="display:none; margin-top:2rem;">
-                    <h2>
-                        <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                        </svg>
-                        Paste Content
-                    </h2>
-                    <div class="form-group">
-                        <label for="text-content">Text Content</label>
-                        <textarea id="text-content" placeholder="Paste your text here..."></textarea>
-                        <div class="form-controls">
-                            <div class="checkbox-wrapper">
-                                <input type="checkbox" id="burn-text">
-                                <label for="burn-text">Burn after reading</label>
-                            </div>
-                            <button id="upload-text" class="btn btn-primary">
-                                <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M12 4v16m8-8H4" />
-                                </svg>
-                                Paste Text
-                            </button>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label for="file-input">File Upload</label>
-                        <input type="file" id="file-input">
-                        <div class="form-controls">
-                            <div class="checkbox-wrapper">
-                                <input type="checkbox" id="burn-file">
-                                <label for="burn-file">Burn after reading</label>
-                            </div>
-                            <button id="upload-file" class="btn btn-primary">
-                                <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                        d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                </svg>
-                                Upload File
-                            </button>
-                        </div>
-                    </div>
-                </div>
-        </main>
-
-        <footer>
-            <p>
-                NCLIP -
-                <a href="https://github.com/johnwmail/nclip" target="_blank" rel="noopener"
-                    style="text-decoration: none; color: inherit; font-weight: bold;">
-                    Open Source Clipboard Project
-                </a><br>
-                <small>Version: {{.Version}}</small>
-                <!-- BuildTime: {{.BuildTime}} -->
-                <!-- CommitHash: {{.CommitHash}} -->
-            </p>
-        </footer>
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>nclip</title>
+    <link rel="stylesheet" href="/static/style.css?v={{.Version}}" />
+  </head>
+  <body data-page="receive" {{if .Paste}}data-slug="{{.Paste.ID}}" {{end}}>
+    <div class="workspace">
+      {{template "app-header" .}}
+      <main>
+        {{if .Paste}}
+        <section class="panel receive-panel">
+          <div class="section-heading">
+            <h1 id="receive-title" data-i18n="contents">收到一份内容</h1>
+            <p id="receive-subtitle"></p>
+          </div>
+          <div id="receive-gate" hidden>
+            <p data-i18n="oneTimeHint"></p>
+            <p class="hint" data-i18n="oneTimeNetwork"></p>
+            <button id="receive" class="button primary" data-icon="clipboard">
+              <span data-i18n="receive">接收并销毁</span>
+            </button>
+          </div>
+          <div id="received-items" class="items"></div>
+          <div id="receive-actions" class="result-actions">
+            <button
+              id="retry"
+              class="button secondary"
+              data-i18n="retry"
+              hidden
+            >
+              重试加载</button
+            ><a
+              id="download-all"
+              class="button secondary"
+              href="/raw/{{.Paste.ID}}"
+              download
+              data-i18n="downloadAll"
+              hidden
+              >打包下载</a
+            ><a href="/" class="button secondary" data-i18n="newShare"
+              >再传一份</a
+            ><button id="delete-share" class="button danger" data-i18n="delete">
+              删除分享
+            </button>
+          </div>
+          <details id="metadata" class="metadata">
+            <summary data-i18n="details">详细信息</summary>
+            <dl id="metadata-values"></dl>
+          </details>
+        </section>
+        {{if and .IsText (not .Paste.BurnAfterRead)}}<noscript
+          ><section class="panel">
+            <h2>
+              {{if .IsPreview}}Content Preview (Truncated){{else}}Content{{end}}
+            </h2>
+            <pre>{{.Content}}</pre>
+            <a href="/raw/{{.Paste.ID}}" download>Download</a>
+          </section></noscript
+        >{{end}} {{else}}
+        <section class="panel empty-state">
+          <span data-icon="file"></span>
+          <h1 data-i18n="notFound">内容不存在或已失效</h1>
+          <p data-i18n="notFoundHint"></p>
+          <a href="/" class="button primary" data-i18n="newShare">再传一份</a>
+        </section>
+        {{end}}
+        <div
+          id="status"
+          class="status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        ></div>
+      </main>
+      {{template "app-footer" .}}
     </div>
-
-    <script>
-        // Copy content functionality - text only
-        document.getElementById('copy-content')?.addEventListener('click', function () {
-            const contentText = document.getElementById('content-text');
-            if (contentText) {
-                const textToCopy = contentText.textContent || contentText.innerText;
-                copyTextContent(textToCopy);
-            }
-        });
-
-        function copyTextContent(text) {
-            // Try modern clipboard API first
-            if (navigator.clipboard && window.isSecureContext) {
-                navigator.clipboard.writeText(text).then(function () {
-                    showCopySuccess();
-                }).catch(function (err) {
-                    console.error('Clipboard API failed:', err);
-                    fallbackCopy(text);
-                });
-            } else {
-                // Fallback for older browsers or non-HTTPS
-                fallbackCopy(text);
-            }
-        }
-
-        function showCopySuccess() {
-            const btn = document.getElementById('copy-content');
-            if (btn) {
-                btn.textContent = 'Copied!';
-                btn.classList.add('btn-success');
-                setTimeout(function () {
-                    btn.textContent = 'Copy';
-                    btn.classList.remove('btn-success');
-                }, 2000);
-            }
-        }
-
-        function fallbackCopy(text) {
-            const textArea = document.createElement('textarea');
-            textArea.value = text;
-            textArea.style.position = 'fixed';
-            textArea.style.left = '-999999px';
-            textArea.style.top = '-999999px';
-            document.body.appendChild(textArea);
-            textArea.focus();
-            textArea.select();
-
-            try {
-                const successful = document.execCommand('copy');
-                if (successful) {
-                    showCopySuccess();
-                } else {
-                    console.error('Fallback copy failed');
-                    alert('Copy failed. Please select and copy manually.');
-                }
-            } catch (err) {
-                console.error('Fallback copy error:', err);
-                alert('Copy failed. Please select and copy manually.');
-            } finally {
-                document.body.removeChild(textArea);
-            }
-        }
-    </script>
-    <script>
-        // Delete paste functionality
-        (function() {
-            const deleteBtn = document.getElementById('delete-paste');
-            if (!deleteBtn) return;
-
-            const slug = deleteBtn.getAttribute('data-slug');
-            if (!slug) return;
-
-            deleteBtn.addEventListener('click', function() {
-                const apiKeyInput = document.getElementById('api-key-input');
-                const headers = {};
-                if (apiKeyInput) {
-                    const key = apiKeyInput.value.trim();
-                    if (key) {
-                        headers['Authorization'] = 'Bearer ' + key;
-                    }
-                }
-
-                deleteBtn.disabled = true;
-                deleteBtn.textContent = 'Deleting...';
-
-                fetch('/' + slug, { method: 'DELETE', headers: headers })
-                    .then(function(response) {
-                        if (!response.ok) {
-                            return response.json().then(function(data) {
-                                throw new Error(data.error || 'Delete failed');
-                            });
-                        }
-                        return response.json();
-                    })
-                    .then(function() {
-                        window.location.href = '/';
-                    })
-                    .catch(function(err) {
-                        alert('Delete failed: ' + err.message);
-                        deleteBtn.disabled = false;
-                        deleteBtn.textContent = 'Delete';
-                    });
-            });
-        })();
-    </script>
-    <!-- No auto-redirect for missing paste pages (user requested removal) -->
-</body>
-
+    <script type="module" src="/static/script.js?v={{.Version}}"></script>
+  </body>
 </html>

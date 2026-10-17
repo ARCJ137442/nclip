@@ -79,7 +79,7 @@ test_large_content_preview() {
     fi
     
     # Should show download link
-    if [[ "$html_response" == *"Raw Data View"* ]]; then
+    if [[ "$html_response" == *"/raw/$slug"* ]]; then
         success "Large content shows raw data link"
     else
         error "Large content missing raw data link"

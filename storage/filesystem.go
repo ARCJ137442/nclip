@@ -148,8 +148,12 @@ func (fs *FilesystemStore) Delete(id string) error {
 	}
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
-	_ = os.Remove(contentPath)
-	_ = os.Remove(metaPath)
+	if err := os.Remove(contentPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete content: %w", err)
+	}
+	if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete metadata: %w", err)
+	}
 	return nil
 }
 
@@ -190,7 +194,7 @@ func (fs *FilesystemStore) StoreContent(id string, content []byte) error {
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	if utils.IsDebugEnabled() {
-		log.Printf("[DEBUG] StoreContent: id=%s, content_len=%d, first_bytes=%q", id, len(content), string(content[:min(32, len(content))]))
+		log.Printf("[DEBUG] StoreContent: id=%s, content_len=%d", id, len(content))
 	}
 	if err := os.MkdirAll(fs.dataDir, 0o755); err != nil {
 		log.Printf("[ERROR] FS StoreContent: failed to create data directory %s: %v", fs.dataDir, err)
@@ -201,13 +205,6 @@ func (fs *FilesystemStore) StoreContent(id string, content []byte) error {
 		return err
 	}
 	return nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func (fs *FilesystemStore) GetContent(id string) ([]byte, error) {

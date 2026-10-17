@@ -1,0 +1,47 @@
+name: Share preview
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/clipboard-sharing]
+permissions:
+  contents: read
+jobs:
+  verify-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l .)"
+      - run: go test -race ./...
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.15.0
+      - run: node --test scripts/clipboard.test.mjs
+      - name: Legacy HTTP integration in temporary storage
+        run: |
+          go build -o /tmp/nclip-integration .
+          export NCLIP_DATA_DIR=$(mktemp -d)
+          export NCLIP_PORT=18111 NCLIP_URL=http://127.0.0.1:18111
+          export NCLIP_BUFFER_SIZE=5242880 NCLIP_UPLOAD_AUTH=false GIN_MODE=release
+          /tmp/nclip-integration > /tmp/nclip-integration.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          bash scripts/integration-test.sh
+      - name: Build fixed-commit preview image
+        run: |
+          docker build --build-arg VERSION=arc-${GITHUB_SHA::7} --build-arg GIT_COMMIT=$GITHUB_SHA --build-arg BUILD_TIME=$(date -u +%FT%TZ) -t nclip:arc-${GITHUB_SHA::7} .
+          docker save nclip:arc-${GITHUB_SHA::7} | gzip > nclip-image.tar.gz
+          sha256sum nclip-image.tar.gz > nclip-image.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nclip-preview-${{ github.sha }}
+          path: |
+            nclip-image.tar.gz
+            nclip-image.sha256
+          retention-days: 7

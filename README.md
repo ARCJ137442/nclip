@@ -435,3 +435,6 @@ bash scripts/integration-tests.sh
 ---
 
 ⭐ **Star this repository if you find it useful!**
+# ARC sharing UI
+
+This fork adds a unified clipboard/file composer, Chinese/English UI, light/dark/system appearance, multi-format sharing and confirmed one-time receiving. See [ARC sharing and maintenance](Documents/ARC-SHARING.md) for API, storage, compatibility, tests and release details.

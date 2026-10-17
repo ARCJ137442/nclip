@@ -2,6 +2,8 @@ package services
 
 import (
 	"fmt"
+	"hash/fnv"
+	"sync"
 	"time"
 
 	"github.com/johnwmail/nclip/config"
@@ -14,6 +16,9 @@ import (
 type PasteService struct {
 	store  storage.PasteStore
 	config *config.Config
+	// All destructive readers in this process share these bounded lock stripes.
+	// This is a single-instance guarantee, not a distributed S3 transaction.
+	consumeLocks [256]sync.Mutex
 }
 
 // NewPasteService creates a new paste service
@@ -32,12 +37,14 @@ type CreatePasteRequest struct {
 	CustomSlug    string
 	BurnAfterRead bool
 	TTL           time.Duration
+	Share         *models.ShareManifest
 }
 
 // CreatePasteResponse represents the response from creating a paste
 type CreatePasteResponse struct {
-	Slug string
-	URL  string
+	Slug      string
+	URL       string
+	ExpiresAt time.Time
 }
 
 // GenerateSlug generates a unique slug for a paste
@@ -109,7 +116,8 @@ func (s *PasteService) CreatePaste(req CreatePasteRequest) (*CreatePasteResponse
 		}
 	}
 
-	expiresAt := time.Now().Add(req.TTL)
+	createdAt := time.Now()
+	expiresAt := createdAt.Add(req.TTL)
 
 	contentType := req.ContentType
 	if contentType == "" {
@@ -117,25 +125,57 @@ func (s *PasteService) CreatePaste(req CreatePasteRequest) (*CreatePasteResponse
 	}
 	paste := &models.Paste{
 		ID:            slug,
-		CreatedAt:     time.Now(),
+		CreatedAt:     createdAt,
 		ExpiresAt:     &expiresAt,
 		Size:          int64(len(req.Content)),
 		ContentType:   contentType,
 		BurnAfterRead: req.BurnAfterRead,
 		ReadCount:     0,
+		Share:         req.Share,
 	}
 
 	if err := s.store.StoreContent(slug, req.Content); err != nil {
 		return nil, fmt.Errorf("failed to store content: %w", err)
 	}
 	if err := s.store.Store(paste); err != nil {
+		if cleanupErr := s.store.Delete(slug); cleanupErr != nil {
+			return nil, fmt.Errorf("failed to store metadata: %w; cleanup failed: %v", err, cleanupErr)
+		}
 		return nil, fmt.Errorf("failed to store metadata: %w", err)
 	}
 
 	return &CreatePasteResponse{
-		Slug: slug,
-		URL:  "", // Will be set by handler based on request context
+		Slug:      slug,
+		URL:       "", // Will be set by handler based on request context
+		ExpiresAt: expiresAt,
 	}, nil
+}
+
+// ConsumePaste reads and validates a complete paste, then deletes a burn paste
+// before handing its bytes to the HTTP layer. A lost response cannot be replayed.
+func (s *PasteService) ConsumePaste(slug string) (*models.Paste, []byte, error) {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(slug))
+	lock := &s.consumeLocks[h.Sum32()%uint32(len(s.consumeLocks))]
+	lock.Lock()
+	defer lock.Unlock()
+	paste, err := s.GetPaste(slug)
+	if err != nil {
+		return nil, nil, err
+	}
+	content, err := s.GetPasteContent(slug)
+	if err != nil {
+		return nil, nil, err
+	}
+	if int64(len(content)) != paste.Size {
+		return nil, nil, fmt.Errorf("size_mismatch")
+	}
+	if paste.BurnAfterRead {
+		if err := s.store.Delete(slug); err != nil {
+			return nil, nil, fmt.Errorf("consume delete: %w", err)
+		}
+	}
+	return paste, content, nil
 }
 
 // GetPaste retrieves a paste by slug
