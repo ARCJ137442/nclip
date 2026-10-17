@@ -1,0 +1,56 @@
+{{define "app-header"}}
+<header class="app-header">
+  <a class="brand" href="/" aria-label="nclip"
+    ><span class="brand-symbol" data-icon="clipboard"></span
+    ><strong>nclip</strong><small>{{.Version}}</small></a
+  >
+  <details id="settings" class="settings">
+    <summary aria-label="Settings" data-icon="settings">
+      <span class="sr-only" data-i18n="settings">设置</span>
+    </summary>
+    <div class="settings-body">
+      <label
+        ><span data-i18n="language">语言</span
+        ><select id="language">
+          <option value="system" data-i18n="system">跟随系统</option>
+          <option value="zh">中文</option>
+          <option value="en">English</option>
+        </select></label
+      ><label
+        ><span data-i18n="theme">外观</span
+        ><select id="theme">
+          <option value="system" data-i18n="system">跟随系统</option>
+          <option value="light" data-i18n="light">浅色</option>
+          <option value="dark" data-i18n="dark">深色</option>
+        </select></label
+      ><label class="check"
+        ><input id="suggestions" type="checkbox" /><span data-i18n="recommend"
+          >剪贴板推荐</span
+        ></label
+      >
+      <p class="hint" data-i18n="recommendHint"></p>
+    </div>
+  </details>
+</header>
+{{if .UploadAuth}}<label class="api-key"
+  ><span>API Key</span
+  ><input
+    id="api-key"
+    type="password"
+    autocomplete="off"
+    spellcheck="false"
+    aria-label="API Key" /></label
+>{{end}}{{end}} {{define "app-footer"}}
+<footer>
+  <span data-i18n="tagline">把内容，传到另一端。</span
+  ><a
+    href="https://github.com/ARCJ137442/nclip"
+    target="_blank"
+    rel="noopener"
+    data-i18n="source"
+    >开源维护</a
+  >
+</footer>
+<noscript
+  ><p data-i18n="enableJS">请启用 JavaScript 使用粘贴与接收功能。</p></noscript
+>{{end}}

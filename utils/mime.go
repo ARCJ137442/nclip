@@ -81,6 +81,10 @@ func DetectContentType(filename string, content []byte) string {
 	if filename != "" {
 		ext := strings.ToLower(filepath.Ext(filename))
 		if mimeType := mime.TypeByExtension(ext); mimeType != "" {
+			// Windows registers this alias; use the canonical ZIP MIME on every host.
+			if mimeType == "application/x-zip-compressed" {
+				return "application/zip"
+			}
 			return mimeType
 		}
 	}

@@ -85,8 +85,8 @@ func TestViewLargeShowsPreview(t *testing.T) {
 	}
 }
 
-// Integration-style test: burn-after-read preview reads prefix from temp file and deletes it
-func TestBurnAfterReadPreviewDeletesTemp(t *testing.T) {
+// Opening a browser confirmation page must not consume or expose a burn paste.
+func TestBurnAfterReadBrowserWaitsForConfirmation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	cfg := &config.Config{MaxRenderSize: 10}
 	store := NewMockStore(cfg.DataDir)
@@ -122,8 +122,10 @@ func TestBurnAfterReadPreviewDeletesTemp(t *testing.T) {
 		t.Fatalf("expected 200 OK, got %d", w.Code)
 	}
 
-	// after request, original file should be gone (moved then deleted by handler)
-	if _, err := os.Stat(filepath.Join(dataDir, "BURN2")); !os.IsNotExist(err) {
-		t.Fatalf("expected original content removed after burn, stat err: %v", err)
+	if _, err := os.Stat(filepath.Join(dataDir, "BURN2")); err != nil {
+		t.Fatalf("expected content retained before confirmation, stat err: %v", err)
+	}
+	if strings.Contains(w.Body.String(), strings.Repeat("B", 10)) {
+		t.Fatal("confirmation page exposed content")
 	}
 }

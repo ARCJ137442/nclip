@@ -469,6 +469,7 @@ func TestBurnAfterRead(t *testing.T) {
 	// Read the paste once
 	w2 := httptest.NewRecorder()
 	req2, _ := http.NewRequest("GET", "/"+pasteID, nil)
+	req2.Header.Set("User-Agent", "curl") // Direct CLI reads still consume immediately.
 	router.ServeHTTP(w2, req2)
 
 	if w2.Code != http.StatusOK {
@@ -478,6 +479,7 @@ func TestBurnAfterRead(t *testing.T) {
 	// Try to read again - should be gone
 	w3 := httptest.NewRecorder()
 	req3, _ := http.NewRequest("GET", "/"+pasteID, nil)
+	req3.Header.Set("User-Agent", "curl")
 	router.ServeHTTP(w3, req3)
 
 	if w3.Code != http.StatusNotFound {
@@ -781,7 +783,7 @@ func TestNotFoundBrowser(t *testing.T) {
 	}
 
 	body := w.Body.String()
-	if !strings.Contains(body, "<!DOCTYPE html>") {
+	if !strings.Contains(strings.ToLower(body), "<!doctype html>") {
 		t.Errorf("Expected body to contain <!DOCTYPE html>, but it did not.")
 	}
 }
