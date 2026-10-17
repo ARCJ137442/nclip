@@ -80,25 +80,22 @@ func (h *AccountHandler) recordFailure(ip string) {
 	h.failures[ip] = item
 }
 
-func (h *AccountHandler) authenticate(c *gin.Context, username, password string) (accounts.Authentication, bool) {
+func (h *AccountHandler) authenticate(c *gin.Context, username, password string) (accounts.Authentication, error) {
 	if h.blocked(c.ClientIP()) {
-		c.Header("Retry-After", "900")
-		c.AbortWithStatusJSON(429, gin.H{"error": "login_throttled"})
-		return accounts.Authentication{}, false
+		return accounts.Authentication{}, accounts.ErrInput("login_throttled")
 	}
 	select {
 	case h.passwordSlots <- struct{}{}:
 		defer func() { <-h.passwordSlots }()
 	default:
-		c.AbortWithStatusJSON(429, gin.H{"error": "login_throttled"})
-		return accounts.Authentication{}, false
+		return accounts.Authentication{}, accounts.ErrInput("login_throttled")
 	}
 	auth, err := h.store.Authenticate(username, password)
 	if err != nil {
 		h.recordFailure(c.ClientIP())
-		return accounts.Authentication{}, false
+		return accounts.Authentication{}, err
 	}
-	return auth, true
+	return auth, nil
 }
 
 func (h *AccountHandler) requestUser(c *gin.Context) (accounts.User, accounts.Session, bool) {
@@ -114,8 +111,12 @@ func (h *AccountHandler) requestUser(c *gin.Context) (accounts.User, accounts.Se
 	if !ok {
 		return accounts.User{}, accounts.Session{}, false
 	}
-	auth, ok := h.authenticate(c, username, password)
-	return auth.User, accounts.Session{}, ok
+	auth, err := h.authenticate(c, username, password)
+	if errors.Is(err, accounts.ErrInput("login_throttled")) {
+		c.Header("Retry-After", "900")
+		c.AbortWithStatusJSON(429, gin.H{"error": "login_throttled"})
+	}
+	return auth.User, accounts.Session{}, err == nil
 }
 
 func publicPath(path string) bool {

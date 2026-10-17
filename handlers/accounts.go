@@ -75,21 +75,18 @@ func (h *AccountHandler) Login(c *gin.Context) {
 		input.Password = c.PostForm("password")
 		input.Next = c.PostForm("next")
 	}
-	auth, ok := h.authenticate(c, input.Username, input.Password)
-	if c.IsAborted() {
-		return
-	}
-	if !ok {
-		if jsonClient {
-			c.JSON(401, gin.H{"error": "invalid_credentials"})
-		} else {
-			h.loginPage(c, "invalid_credentials", 401)
+	auth, err := h.authenticate(c, input.Username, input.Password)
+	if err != nil {
+		status := 401
+		if errors.Is(err, accounts.ErrInput("login_throttled")) {
+			status = 429
 		}
+		h.loginFailure(c, err.Error(), status, jsonClient)
 		return
 	}
 	raw, session, err := h.store.NewSession(auth)
 	if err != nil {
-		c.JSON(500, gin.H{"error": "session_failed"})
+		h.loginFailure(c, "session_failed", 500, jsonClient)
 		return
 	}
 	http.SetCookie(c.Writer, &http.Cookie{Name: h.cookieName(c), Value: raw, Path: "/", HttpOnly: true, Secure: h.secureCookie(c), SameSite: http.SameSiteLaxMode, Expires: session.ExpiresAt, MaxAge: int(time.Until(session.ExpiresAt).Seconds())})
@@ -99,6 +96,17 @@ func (h *AccountHandler) Login(c *gin.Context) {
 		return
 	}
 	c.Redirect(303, next)
+}
+
+func (h *AccountHandler) loginFailure(c *gin.Context, code string, status int, jsonClient bool) {
+	if status == 429 {
+		c.Header("Retry-After", "900")
+	}
+	if jsonClient {
+		c.JSON(status, gin.H{"error": code})
+		return
+	}
+	h.loginPage(c, code, status)
 }
 
 // Logout invalidates the server session before clearing the browser cookie.
