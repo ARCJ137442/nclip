@@ -1,8 +1,6 @@
 package handlers
 
 import (
-	"archive/zip"
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -10,10 +8,8 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
-	"path"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/johnwmail/nclip/config"
@@ -21,9 +17,6 @@ import (
 	"github.com/johnwmail/nclip/models"
 	"github.com/johnwmail/nclip/utils"
 )
-
-const maxShareItems = 32
-const maxManifestBytes = 64 * 1024
 
 // SharesHandler adapts multipart clipboard messages to the existing paste store.
 type SharesHandler struct {
@@ -39,215 +32,89 @@ func NewSharesHandler(service *services.PasteService, cfg *config.Config) *Share
 // UIConfig contains only public, authoritative settings used by the composer.
 func (h *SharesHandler) UIConfig(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	c.JSON(http.StatusOK, gin.H{"upload_max_bytes": h.config.BufferSize, "default_ttl_seconds": int64(h.config.DefaultTTL.Seconds()), "max_items": maxShareItems, "upload_auth": h.config.UploadAuth, "clipboard_formats": []string{"text/plain", "text/html", "image/png"}})
+	c.JSON(200, gin.H{"upload_max_bytes": h.config.BufferSize, "default_ttl_seconds": int64(h.config.DefaultTTL.Seconds()), "max_items": maxShareItems, "upload_auth": h.config.UploadAuth, "clipboard_formats": []string{"text/plain", "text/html", "image/png"}})
 }
 
 func shareError(c *gin.Context, status int, code string) { c.JSON(status, gin.H{"error": code}) }
 
-func validPartKey(key string) bool {
-	if len(key) == 0 || len(key) > 40 {
-		return false
-	}
-	for _, ch := range key {
-		if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
-			return false
-		}
-	}
-	return true
+type shareUpload struct {
+	manifest     models.ShareManifest
+	manifestSeen bool
+	parts        map[string][]byte
+	size         int64
 }
 
-func cleanShareName(name string) string {
-	name = path.Base(strings.ReplaceAll(name, "\\", "/"))
-	name = strings.Map(func(r rune) rune {
-		if r < 32 || r == 127 {
-			return -1
-		}
-		return r
-	}, name)
-	if name == "." || name == "" || name == "/" {
-		return "content"
-	}
-	if len(name) > 200 {
-		name = string([]rune(name)[:min(len([]rune(name)), 60)])
-	}
-	return name
-}
-
-func validateManifest(m *models.ShareManifest) error {
-	if m.Version != 1 || len(m.Items) == 0 || len(m.Items) > maxShareItems {
-		return fmt.Errorf("invalid_manifest")
-	}
-	seen := map[string]bool{}
-	for i := range m.Items {
-		item := &m.Items[i]
-		item.Name = cleanShareName(item.Name)
-		if item.Kind != "clipboard" && item.Kind != "file" {
+func (u *shareUpload) add(key string, data []byte, max int64) error {
+	if key == "manifest" {
+		if u.manifestSeen || json.Unmarshal(data, &u.manifest) != nil {
 			return fmt.Errorf("invalid_manifest")
 		}
-		if len(item.Parts) == 0 || len(item.Parts) > 3 || item.Kind == "file" && len(item.Parts) != 1 {
-			return fmt.Errorf("invalid_manifest")
-		}
-		formats := map[string]bool{}
-		for j := range item.Parts {
-			p := &item.Parts[j]
-			if !validPartKey(p.Key) || p.Key == "manifest" || p.Key == "archive" || seen[p.Key] {
-				return fmt.Errorf("invalid_manifest")
-			}
-			seen[p.Key] = true
-			mt, _, err := mime.ParseMediaType(p.MIME)
-			if err != nil || formats[mt] {
-				return fmt.Errorf("invalid_manifest")
-			}
-			formats[mt] = true
-			p.MIME = mt
-			if item.Kind == "clipboard" && mt != "text/plain" && mt != "text/html" && mt != "image/png" {
-				return fmt.Errorf("unsupported_format")
-			}
-			entryName := item.Name
-			if item.Kind == "clipboard" {
-				entryName = "clipboard" + utils.ExtensionByMime(p.MIME)
-			}
-			p.Entry = fmt.Sprintf("items/%02d/%02d-%s", i, j, entryName)
-		}
+		u.manifestSeen = true
+		return nil
+	}
+	if !validPartKey(key) || u.parts[key] != nil || len(u.parts) >= maxShareItems*3 {
+		return fmt.Errorf("invalid_parts")
+	}
+	u.parts[key] = data
+	u.size += int64(len(data))
+	if u.size > max {
+		return fmt.Errorf("content_too_large")
 	}
 	return nil
 }
 
-// Create accepts a JSON manifest plus named binary fields. The entire request,
-// including multipart overhead, is bounded; no clipboard data enters log output.
-func (h *SharesHandler) Create(c *gin.Context) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.config.BufferSize)
+func readShareUpload(c *gin.Context, max int64) (*shareUpload, bool) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, max)
 	r, err := c.Request.MultipartReader()
 	if err != nil {
 		shareError(c, 400, "invalid_multipart")
-		return
+		return nil, false
 	}
-	var m models.ShareManifest
-	parts := map[string][]byte{}
-	manifestSeen := false
-	var total int64
+	u := &shareUpload{parts: map[string][]byte{}}
 	for {
-		p, readErr := r.NextPart()
-		if readErr == io.EOF {
+		p, err := r.NextPart()
+		if err == io.EOF {
 			break
 		}
-		if readErr != nil {
+		if err != nil {
 			shareError(c, 413, "request_too_large_or_invalid")
-			return
+			return nil, false
 		}
 		key := p.FormName()
-		limit := h.config.BufferSize
+		limit := max
 		if key == "manifest" {
 			limit = maxManifestBytes
 		}
-		data, readErr := io.ReadAll(io.LimitReader(p, limit+1))
-		if readErr != nil || int64(len(data)) > limit {
+		data, err := io.ReadAll(io.LimitReader(p, limit+1))
+		if err != nil || int64(len(data)) > limit {
 			shareError(c, 413, "request_too_large")
-			return
+			return nil, false
 		}
-		if key == "manifest" {
-			if manifestSeen || json.Unmarshal(data, &m) != nil {
-				shareError(c, 400, "invalid_manifest")
-				return
-			}
-			manifestSeen = true
-		} else {
-			if !validPartKey(key) || parts[key] != nil || len(parts) >= maxShareItems*3 {
-				shareError(c, 400, "invalid_parts")
-				return
-			}
-			parts[key] = data
-			total += int64(len(data))
-			if total > h.config.BufferSize {
-				shareError(c, 413, "content_too_large")
-				return
-			}
+		if err := u.add(key, data, max); err != nil {
+			shareError(c, 400, err.Error())
+			return nil, false
 		}
 	}
-	if !manifestSeen {
+	if !u.manifestSeen {
 		shareError(c, 400, "invalid_manifest")
-		return
+		return nil, false
 	}
-	if err := validateManifest(&m); err != nil {
-		shareError(c, 400, err.Error())
-		return
+	return u, true
+}
+
+func shareTTL(c *gin.Context, defaultTTL time.Duration) (time.Duration, error) {
+	v := c.GetHeader("X-TTL")
+	if v == "" {
+		return defaultTTL, nil
 	}
-	used := 0
-	for i := range m.Items {
-		for j := range m.Items[i].Parts {
-			p := &m.Items[i].Parts[j]
-			data, ok := parts[p.Key]
-			if !ok || len(data) == 0 {
-				shareError(c, 400, "empty_or_missing_part")
-				return
-			}
-			if m.Items[i].Kind == "clipboard" {
-				if strings.HasPrefix(p.MIME, "text/") && !utf8.Valid(data) || p.MIME == "image/png" && http.DetectContentType(data) != "image/png" {
-					shareError(c, 400, "invalid_clipboard_data")
-					return
-				}
-			}
-			p.Size = int64(len(data))
-			used++
-		}
+	ttl, err := time.ParseDuration(v)
+	if err != nil || ttl < time.Hour || ttl > 7*24*time.Hour {
+		return 0, fmt.Errorf("invalid_ttl")
 	}
-	if used != len(parts) {
-		shareError(c, 400, "unexpected_part")
-		return
-	}
-	ttl := h.config.DefaultTTL
-	if v := c.GetHeader("X-TTL"); v != "" {
-		ttl, err = time.ParseDuration(v)
-		if err != nil || ttl < time.Hour || ttl > 7*24*time.Hour {
-			shareError(c, 400, "invalid_ttl")
-			return
-		}
-	}
-	contentType := "application/zip"
-	var content []byte
-	if len(m.Items) == 1 && len(m.Items[0].Parts) == 1 {
-		m.Encoding = "raw"
-		part := &m.Items[0].Parts[0]
-		part.Entry = ""
-		content = parts[part.Key]
-		contentType = part.MIME
-	} else {
-		m.Encoding = "zip-v1"
-		var buf bytes.Buffer
-		zw := zip.NewWriter(&buf)
-		for _, item := range m.Items {
-			for _, part := range item.Parts {
-				w, writeErr := zw.CreateHeader(&zip.FileHeader{Name: part.Entry, Method: zip.Store})
-				if writeErr == nil {
-					_, writeErr = w.Write(parts[part.Key])
-				}
-				if writeErr != nil {
-					shareError(c, 500, "archive_failed")
-					return
-				}
-			}
-		}
-		manifest, marshalErr := json.Marshal(m)
-		if marshalErr != nil {
-			shareError(c, 500, "archive_failed")
-			return
-		}
-		w, writeErr := zw.Create("manifest.json")
-		if writeErr == nil {
-			_, writeErr = w.Write(manifest)
-		}
-		if writeErr != nil || zw.Close() != nil {
-			shareError(c, 500, "archive_failed")
-			return
-		}
-		content = buf.Bytes()
-	}
-	burn := c.GetHeader("X-Burn") == "true"
-	resp, err := h.service.CreatePaste(services.CreatePasteRequest{Content: content, ContentType: contentType, TTL: ttl, BurnAfterRead: burn, Share: &m})
-	if err != nil {
-		shareError(c, 500, "store_failed")
-		return
-	}
+	return ttl, nil
+}
+
+func (h *SharesHandler) shareURL(c *gin.Context, slug string) string {
 	base := strings.TrimRight(h.config.URL, "/")
 	if base == "" {
 		scheme := "http"
@@ -256,22 +123,41 @@ func (h *SharesHandler) Create(c *gin.Context) {
 		}
 		base = scheme + "://" + c.Request.Host
 	}
-	c.JSON(http.StatusCreated, gin.H{"slug": resp.Slug, "url": base + "/" + resp.Slug, "burn_after_read": burn, "expires_at": resp.ExpiresAt})
+	return base + "/" + slug
 }
 
-func manifestFor(p *models.Paste) models.ShareManifest {
-	if p.Share != nil {
-		return *p.Share
+// Create accepts a manifest and named binary fields. HTTP framing and content
+// are independently bounded; no clipboard body is included in application logs.
+func (h *SharesHandler) Create(c *gin.Context) {
+	u, ok := readShareUpload(c, h.config.BufferSize)
+	if !ok {
+		return
 	}
-	kind := "file"
-	contentType, _, err := mime.ParseMediaType(p.ContentType)
+	if err := validateManifest(&u.manifest); err != nil {
+		shareError(c, 400, err.Error())
+		return
+	}
+	if err := validateSharePayload(&u.manifest, u.parts); err != nil {
+		shareError(c, 400, err.Error())
+		return
+	}
+	ttl, err := shareTTL(c, h.config.DefaultTTL)
 	if err != nil {
-		contentType = "application/octet-stream"
+		shareError(c, 400, err.Error())
+		return
 	}
-	if strings.HasPrefix(contentType, "text/") || contentType == "image/png" {
-		kind = "clipboard"
+	content, contentType, err := encodeStoredShare(&u.manifest, u.parts)
+	if err != nil {
+		shareError(c, 500, "archive_failed")
+		return
 	}
-	return models.ShareManifest{Version: 1, Encoding: "raw", Items: []models.ShareItem{{Kind: kind, Name: p.ID + utils.ExtensionByMime(contentType), Parts: []models.SharePart{{Key: "original", MIME: contentType, Size: p.Size}}}}}
+	burn := c.GetHeader("X-Burn") == "true"
+	resp, err := h.service.CreatePaste(services.CreatePasteRequest{Content: content, ContentType: contentType, TTL: ttl, BurnAfterRead: burn, Share: &u.manifest})
+	if err != nil {
+		shareError(c, 500, "store_failed")
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"slug": resp.Slug, "url": h.shareURL(c, resp.Slug), "burn_after_read": burn, "expires_at": resp.ExpiresAt})
 }
 
 func (h *SharesHandler) get(c *gin.Context) (*models.Paste, bool) {
@@ -297,61 +183,56 @@ func (h *SharesHandler) Metadata(c *gin.Context) {
 	c.JSON(200, gin.H{"id": p.ID, "size": p.Size, "created_at": p.CreatedAt, "expires_at": p.ExpiresAt, "burn_after_read": p.BurnAfterRead, "manifest": manifestFor(p)})
 }
 
-func unpackShare(p *models.Paste, content []byte) (models.ShareManifest, map[string][]byte, error) {
-	m := manifestFor(p)
-	parts := map[string][]byte{}
-	if int64(len(content)) != p.Size {
-		return m, nil, fmt.Errorf("size_mismatch")
-	}
-	if m.Encoding == "raw" {
-		if len(m.Items) != 1 || len(m.Items[0].Parts) != 1 {
-			return m, nil, fmt.Errorf("invalid_archive")
-		}
-		parts[m.Items[0].Parts[0].Key] = content
-		return m, parts, nil
-	}
-	if m.Encoding != "zip-v1" {
-		return m, nil, fmt.Errorf("unsupported_version")
-	}
-	zr, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
-	if err != nil {
-		return m, nil, err
-	}
-	entries := map[string]*zip.File{}
-	for _, f := range zr.File {
-		entries[f.Name] = f
-	}
-	for _, item := range m.Items {
-		for _, part := range item.Parts {
-			f := entries[part.Entry]
-			if f == nil || part.Size < 0 || part.Size > int64(len(content)) {
-				return m, nil, fmt.Errorf("invalid_archive")
-			}
-			r, openErr := f.Open()
-			if openErr != nil {
-				return m, nil, openErr
-			}
-			data, readErr := io.ReadAll(io.LimitReader(r, part.Size+1))
-			closeErr := r.Close()
-			if readErr != nil || closeErr != nil || int64(len(data)) != part.Size {
-				return m, nil, fmt.Errorf("invalid_archive")
-			}
-			parts[part.Key] = data
-		}
-	}
-	return m, parts, nil
-}
-
 // Content preloads ordinary messages; one-time messages require explicit POST.
 func (h *SharesHandler) Content(c *gin.Context) { h.sendContent(c, false) }
 
-// Receive consumes once. Browser clipboard success is a separate, client-side fact.
+// Receive consumes once; browser clipboard success is a separate client fact.
 func (h *SharesHandler) Receive(c *gin.Context) {
 	if c.GetHeader("X-Nclip-Confirm") != "1" {
 		shareError(c, 400, "confirmation_required")
 		return
 	}
 	h.sendContent(c, true)
+}
+
+func writeShareFile(mw *multipart.Writer, key, contentType string, data []byte) error {
+	header := make(textproto.MIMEHeader)
+	// ASCII filenames work with browser formData(); real names live in the manifest.
+	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": key, "filename": key}))
+	header.Set("Content-Type", contentType)
+	w, err := mw.CreatePart(header)
+	if err != nil {
+		return err
+	}
+	_, err = w.Write(data)
+	return err
+}
+
+func writeShareResponse(c *gin.Context, p *models.Paste, m models.ShareManifest, parts map[string][]byte, content []byte) error {
+	manifest, err := json.Marshal(m)
+	if err != nil {
+		return err
+	}
+	c.Header("X-Content-Type-Options", "nosniff")
+	mw := multipart.NewWriter(c.Writer)
+	c.Header("Content-Type", mw.FormDataContentType())
+	if err := mw.WriteField("manifest", string(manifest)); err != nil {
+		return err
+	}
+	for _, item := range m.Items {
+		for _, part := range item.Parts {
+			if err := writeShareFile(mw, part.Key, part.MIME, parts[part.Key]); err != nil {
+				return err
+			}
+		}
+	}
+	// After consume /raw is gone. Include the ZIP for an in-memory download.
+	if p.BurnAfterRead && m.Encoding == "zip-v1" {
+		if err := writeShareFile(mw, "archive", "application/zip", content); err != nil {
+			return err
+		}
+	}
+	return mw.Close()
 }
 
 func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
@@ -368,61 +249,20 @@ func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 		shareError(c, 404, "not_found")
 		return
 	}
-	// Prepare and validate the archive before the irreversible consume operation.
+	// Validate the full archive before the irreversible consume operation.
 	m, parts, err := unpackShare(p, content)
 	if err != nil {
 		shareError(c, 500, "invalid_archive_or_size")
 		return
 	}
 	if p.BurnAfterRead {
-		_, _, err = h.service.ConsumePaste(p.ID)
-		if err != nil {
+		if _, _, err = h.service.ConsumePaste(p.ID); err != nil {
 			shareError(c, 404, "not_found_or_consumed")
 			return
 		}
 	}
-	c.Header("X-Content-Type-Options", "nosniff")
-	mw := multipart.NewWriter(c.Writer)
-	c.Header("Content-Type", mw.FormDataContentType())
-	manifest, err := json.Marshal(m)
-	if err != nil {
-		shareError(c, 500, "invalid_manifest")
-		return
-	}
-	if err := mw.WriteField("manifest", string(manifest)); err != nil {
-		return
-	}
-	for _, item := range m.Items {
-		for _, part := range item.Parts {
-			header := make(textproto.MIMEHeader)
-			// Browser formData() does not consistently recognize RFC 5987 filename*.
-			// Use the ASCII part key on the wire; the manifest retains the real name.
-			header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": part.Key, "filename": part.Key}))
-			header.Set("Content-Type", part.MIME)
-			w, writeErr := mw.CreatePart(header)
-			if writeErr != nil {
-				return
-			}
-			if _, writeErr = w.Write(parts[part.Key]); writeErr != nil {
-				return
-			}
-		}
-	}
-	// After consume, /raw no longer exists. Include the original ZIP so the
-	// browser can offer a standard bundle download without a client ZIP library.
-	if p.BurnAfterRead && m.Encoding == "zip-v1" {
-		header := make(textproto.MIMEHeader)
-		header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": "archive", "filename": p.ID + ".zip"}))
-		header.Set("Content-Type", "application/zip")
-		w, writeErr := mw.CreatePart(header)
-		if writeErr != nil {
-			return
-		}
-		if _, writeErr = w.Write(content); writeErr != nil {
-			return
-		}
-	}
-	if err := mw.Close(); err != nil {
-		return
+	if err := writeShareResponse(c, p, m, parts, content); err != nil {
+		// The response may be partial, so do not append JSON or replay consumption.
+		_ = c.Error(err)
 	}
 }
