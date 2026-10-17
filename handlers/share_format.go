@@ -24,7 +24,9 @@ func validPartKey(key string) bool {
 		return false
 	}
 	for _, ch := range key {
-		if !(ch >= 'a' && ch <= 'z' || ch >= '0' && ch <= '9' || ch == '-') {
+		lower := ch >= 'a' && ch <= 'z'
+		digit := ch >= '0' && ch <= '9'
+		if !lower && !digit && ch != '-' {
 			return false
 		}
 	}
