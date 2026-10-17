@@ -9,6 +9,7 @@ go vet ./...
 go test -race ./...
 golangci-lint run
 node --test scripts/clipboard.test.mjs scripts/accounts.test.mjs
+node scripts/check-public-docs.mjs
 ```
 
 The `Share preview` workflow also checks formatting, runs Linux race/lint and legacy HTTP integration, then builds and exports a fixed-commit Docker archive. See [human operations](OPERATIONS.zh-CN.md) for obtaining and retaining that artifact.
@@ -73,6 +74,6 @@ python3 scripts/share-smoke.py http://127.0.0.1:18081 \
   --username admin --password-file /path/to/fixture-password --large
 ```
 
-The password is read from a file, not passed as a command argument. When verifying a configured HTTPS origin through loopback, `--origin https://your-test-host` supplies the intended origin. The helper creates/removes only its own slugs; it checks text/raw/CLI, rich multi-part bundles, confirmed one-time receiving, ZIP retention and twenty competing destructive reads with one winner. `--large` adds 32 logical items totaling 9.375 MiB and an 11 MiB rejection. Inspect Docker memory/OOM state and report actual measurements; do not claim a sampled value is a peak.
+The password is read from a file, not passed as a command argument. When verifying a configured HTTPS origin through loopback, `--origin https://clipboard.example.com` supplies the intended origin. The helper creates/removes only its own slugs; it checks text/raw/CLI, rich multi-part bundles, confirmed one-time receiving, ZIP retention and twenty competing destructive reads with one winner. `--large` adds 32 logical items totaling 9.375 MiB and an 11 MiB rejection. Inspect Docker memory/OOM state and report actual measurements; do not claim a sampled value is a peak.
 
 Use this on an isolated instance, then verify production with disposable manually created shares and known ordinary legacy links. Never consume somebody else's one-time content as a health check.

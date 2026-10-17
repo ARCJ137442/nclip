@@ -6,6 +6,7 @@ node_modules
 data
 pastes
 .private
+*-private
 private
 .env
 .env.*

@@ -1,6 +1,6 @@
 # ARC clipboard sharing
 
-The maintained source is the `ARCJ137442/nclip` fork. This feature starts at upstream commit `cc15b11eea6ae7ce12e58e7e584e6fc5170eb4a5`. Production is one server process with filesystem storage; one-time consumption is serialized **within that process**, not across independent Lambda/S3 instances.
+The maintained source is the `ARCJ137442/nclip` fork. The supported filesystem deployment uses one server process; one-time consumption is serialized **within that process**, not across independent Lambda/S3 instances.
 
 ## User workflow
 
@@ -12,11 +12,11 @@ The maintained source is the `ARCJ137442/nclip` fork. This feature starts at ups
 
 ## HTTP contract
 
-Account-mode deployments enforce independent permissions for all new and legacy endpoints. Private sharing requires login and download permission; senders may explicitly opt into public sharing. See [ACCOUNTS.md](ACCOUNTS.md). In standalone mode, the legacy upload-key option remains available. Proxy Basic Auth was used before account migration and must be restored before reverting to an image without account enforcement.
+Account-mode deployments enforce independent permissions for all new and legacy endpoints. Private sharing requires login and download permission; senders may explicitly opt into public sharing. See [ACCOUNTS.md](ACCOUNTS.md). In standalone mode, the legacy upload-key option remains available. When migrating from an externally authenticated deployment, restore its authentication gate before reverting to an image without account enforcement.
 
 | Endpoint | Behavior |
 |---|---|
-| `GET /api/v1/ui-config` | Public upload limit, default TTL, maximum items, upload-auth flag and clipboard formats. No secrets. |
+| `GET /api/v1/ui-config` | Non-secret upload/TTL/item limits and formats. Account mode requires login; it is not an anonymous capability endpoint. |
 | `POST /api/v1/shares` | Multipart request containing a JSON `manifest` field and named binary parts. Returns 201 with `slug`, `url`, `expires_at`, `burn_after_read`. |
 | `GET /api/v1/shares/:slug` | Metadata and manifest, without reading or consuming content. |
 | `GET /api/v1/shares/:slug/content` | Multipart message for an ordinary share. Returns 409 for a one-time share. |
@@ -64,6 +64,4 @@ NCLIP_TEST_URL=http://127.0.0.1:18080 node scripts/browser-test.mjs
 
 The `Share preview` Actions workflow runs vet, formatting, race and clipboard checks, builds a fixed-commit image, and exports a checksum plus Docker archive as a seven-day build artifact. It does not publish a registry image, create a release, or deploy automatically. The repository's pre-existing `v*` workflows publish releases/images; do not use such tags merely to build a preview.
 
-Before production replacement: record the exact old image/container configuration, inspect `/path/to/private-operations` conventions, back up and verify `/srv/nclip/data`, test with separate data on a loopback-only temporary port under the production 128 MiB limit, and exercise ordinary/burn/batch/max-size flows. Reuse mounts, environment, network, limits and proxy settings. Preserve the old container/image for rollback. Failed health, old-link access or upload checks require immediate rollback. Test cleanup must never scan/delete unrelated production data.
-
-For the actual deployment inventory and a human-operated release/backup/rollback procedure, see [人工维护手册](OPERATIONS.zh-CN.md). Include the hidden account directory in backups; account-mode rollback to a legacy image needs the proxy gate restored first.
+Generic release, backup and rollback procedures live in [人工维护](OPERATIONS.zh-CN.md); private instance inventory stays outside this repository. Include hidden account state in backups and restore an external authentication gate before any rollback to an unguarded legacy image.

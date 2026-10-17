@@ -1,6 +1,6 @@
 # Accounts and access
 
-This iteration replaces the deployment's reverse-proxy Basic Auth prompt with an ordinary HTML login form (`username`, `password`, `autocomplete=username/current-password`). Bitwarden and browser password managers can recognize the native form; it submits normally without relying on JavaScript input events.
+Account mode provides an ordinary HTML login form (`username`, `password`, `autocomplete=username/current-password`). Bitwarden and browser password managers can recognize the native form; it submits normally without relying on JavaScript input events.
 
 ## Model and behavior
 
@@ -16,9 +16,9 @@ Existing and new shares default to authenticated users with download permission.
 
 ## Initialization and persistence
 
-Enable `NCLIP_ACCOUNTS=true`, set `NCLIP_ADMIN_USERNAME`, and mount a private bootstrap secret file named by `NCLIP_ADMIN_PASSWORD_FILE`. The secret is read **only when no account database exists**. Existing databases are never reseeded by a stale environment setting or secret. The deployment migrates the old access username/password to this initial all-permissions administrator.
+Enable `NCLIP_ACCOUNTS=true`, set `NCLIP_ADMIN_USERNAME`, and mount a private bootstrap secret file named by `NCLIP_ADMIN_PASSWORD_FILE`. The secret is read **only when no account database exists**. Existing databases are never reseeded by a stale environment setting or secret. Choose the initial credentials privately; do not publish them in migration notes.
 
-Accounts and sessions are stored under `/data/.accounts/accounts.json`, atomically replaced with file mode 0600 in a 0700 directory. Clipboard listings never traverse this private subdirectory. Passwords use bcrypt cost 12, with 8–72 byte passwords; session authentication stores only SHA-256 token hashes. No raw passwords/session tokens go into browser storage or account JSON. The private account file must be included in data backups.
+Accounts and sessions are stored under `.accounts/accounts.json` inside the configured data directory, atomically replaced with file mode 0600 in a 0700 directory. Clipboard listings never traverse this private subdirectory. Passwords use bcrypt cost 12, with 8–72 byte passwords; session authentication stores only SHA-256 token hashes. No raw passwords/session tokens go into browser storage or account JSON. The private account file must be included in data backups.
 
 This mode requires a **single persistent filesystem server**. It intentionally does not add distributed account coordination for Lambda/S3. Leave accounts disabled to retain the upstream standalone behavior and legacy upload-key option; account mode itself uses per-user sessions/permissions rather than global upload keys.
 

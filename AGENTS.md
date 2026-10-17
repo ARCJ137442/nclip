@@ -8,6 +8,7 @@ This repository is PUBLIC. Use example.com/example credentials in public docs.
 Keep real domains, hosts, ports, usernames, local paths, deployment snapshots,
 backups and credentials outside the checkout. Check commits, PR bodies, logs
 and artifacts for disclosure before publishing; `.gitignore` alone is not a scan.
+Run `node scripts/check-public-docs.mjs` before publishing documentation/artifacts.
 
 - Keep Go + native HTML/CSS/JS. Users, independent permissions and per-share
   public opt-in are sufficient; do not invent ownership, groups or ACLs.

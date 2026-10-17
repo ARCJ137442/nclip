@@ -42,7 +42,6 @@ go.work
 # JetBrains IDEA
 .idea
 
-*.log
 *.pid
 *.zip
 bootstrap
@@ -52,6 +51,7 @@ core.*
 
 # Private deployment material belongs outside the public checkout.
 .private/
+*-private/
 private/
 .env
 .env.*
