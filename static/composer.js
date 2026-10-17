@@ -1,5 +1,6 @@
 import { $, status, failure, authHeaders, renderItems } from "./ui.js";
 import { preferences } from "./preferences.js";
+import { access, can } from "./access.js";
 import { t, sizeLabel } from "./i18n.js";
 import {
   readClipboard,
@@ -176,12 +177,20 @@ export async function startComposer() {
     try {
       const response = await request("/api/v1/shares", {
         method: "POST",
-        headers: { ...authHeaders(), "X-Burn": String($("burn").checked) },
+        headers: {
+          ...authHeaders(),
+          "X-Burn": String($("burn").checked),
+          "X-Nclip-Visibility": $("public-share").checked
+            ? "public"
+            : "authenticated",
+        },
         body: form,
       });
       const result = await response.json();
       $("share-url").value = result.url;
       $("open-share").href = result.url;
+      $("open-share").hidden =
+        access.enabled && !can("download") && !result.public;
       $("composer").hidden = true;
       $("result").hidden = false;
       $("result-message").textContent = t("sentManual");
@@ -240,6 +249,7 @@ export async function startComposer() {
     $("rich-hint").hidden = true;
     $("path-hint").hidden = true;
     $("burn").checked = false;
+    $("public-share").checked = false;
     $("result").hidden = true;
     $("composer").hidden = false;
     void renderDraft();

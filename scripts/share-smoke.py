@@ -17,6 +17,8 @@ import http.client
 import json
 from email.message import Message
 from email.parser import BytesParser
+from http.cookies import SimpleCookie
+from pathlib import Path
 import urllib.error
 import urllib.request
 import urllib.parse
@@ -35,9 +37,23 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("base")
     parser.add_argument("--large", action="store_true")
+    parser.add_argument('--username', default='admin')
+    parser.add_argument('--password-file')
+    parser.add_argument('--origin', help='Public configured origin when testing via loopback')
     args = parser.parse_args()
     base = args.base.rstrip("/")
     created: set[str] = set()
+    csrf_token = ''
+    session_cookie = ''
+
+    def request_headers(method: str, extra: dict[str, str] | None = None) -> dict[str, str]:
+        result = dict(extra) if extra else {}
+        if session_cookie:
+            result['Cookie'] = session_cookie
+        if method not in ('GET', 'HEAD') and csrf_token:
+            result['X-CSRF-Token'] = csrf_token
+            result['Origin'] = args.origin if args.origin else base
+        return result
 
     def request(
         path: str,
@@ -46,7 +62,7 @@ def main() -> None:
         headers: dict[str, str] | None = None,
     ) -> tuple[int, Message, bytes]:
         req = urllib.request.Request(
-            base + path, data=body, method=method, headers=headers if headers else {}
+            base + path, data=body, method=method, headers=request_headers(method, headers)
         )
         try:
             with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as response:
@@ -123,7 +139,9 @@ def main() -> None:
                     'POST',
                     '/api/v1/shares',
                     b'x' * (11 * 1024 * 1024),
-                    {'Content-Type': 'multipart/form-data; boundary=oversize'},
+                    request_headers(
+                        'POST', {'Content-Type': 'multipart/form-data; boundary=oversize'}
+                    ),
                 )
             except (BrokenPipeError, ConnectionResetError):
                 # A valid early 413 can arrive while the OS is still sending the body.
@@ -135,6 +153,23 @@ def main() -> None:
             connection.close()
 
     try:
+        if args.password_file:
+            target = urllib.parse.urlsplit(base)
+            assert target.scheme == 'https' or target.hostname in ('localhost', '127.0.0.1')
+            password = Path(args.password_file).read_text().rstrip('\r\n')
+            code, headers, data = request(
+                '/api/v1/login',
+                'POST',
+                json.dumps({'username': args.username, 'password': password}).encode(),
+                {
+                    'Content-Type': 'application/json',
+                    'Origin': args.origin if args.origin else base,
+                },
+            )
+            assert code == 200, code
+            cookie = SimpleCookie(headers['Set-Cookie'])
+            session_cookie = '; '.join(f'{key}={value.value}' for key, value in cookie.items())
+            csrf_token = json.loads(data)['csrf_token']
         assert request("/health")[0] == 200
         status, _, data = request("/api/v1/ui-config")
         config = json.loads(data)

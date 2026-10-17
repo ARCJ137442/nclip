@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>登录 · nclip</title>
+    <link rel="stylesheet" href="/static/style.css?v={{.Version}}" />
+  </head>
+  <body data-page="login">
+    <div class="workspace">
+      {{template "app-header" .}}
+      <main class="login-layout">
+        <section class="panel login-panel">
+          <div class="section-heading">
+            <span class="eyebrow" data-i18n="privateSpace">你的私有剪贴板</span>
+            <h1 data-i18n="loginTitle">登录 nclip</h1>
+            <p data-i18n="loginHint">登录后，继续传递内容。</p>
+          </div>
+          <form id="login-form" action="/login" method="post" autocomplete="on">
+            <input type="hidden" name="next" value="{{.Next}}" />
+            <label class="field" for="username"
+              ><span data-i18n="username">用户名</span
+              ><input
+                id="username"
+                name="username"
+                type="text"
+                autocomplete="username"
+                autocapitalize="none"
+                spellcheck="false"
+                required
+                minlength="3"
+                maxlength="64"
+                value="{{.Username}}"
+                autofocus
+            /></label>
+            <label class="field" for="password"
+              ><span data-i18n="password">密码</span
+              ><input
+                id="password"
+                name="password"
+                type="password"
+                autocomplete="current-password"
+                required
+                maxlength="72"
+            /></label>
+            <div
+              id="login-error"
+              class="form-error"
+              role="alert"
+              data-code="{{.LoginError}}"
+            >
+              {{if .LoginError}}登录未成功，请检查账号密码后重试。{{end}}
+            </div>
+            <button
+              type="submit"
+              id="login-submit"
+              class="button primary full-width"
+              data-i18n="login"
+            >
+              登录
+            </button>
+            <p class="hint" data-i18n="loginAccountHint">
+              账号由管理员创建，可使用密码管理器自动填充。
+            </p>
+          </form>
+        </section>
+      </main>
+      {{template "app-footer" .}}
+    </div>
+    <script type="module" src="/static/script.js?v={{.Version}}"></script>
+  </body>
+</html>

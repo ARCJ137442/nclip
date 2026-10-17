@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>接收 · nclip</title>
+    <link rel="stylesheet" href="/static/style.css?v={{.Version}}" />
+  </head>
+  <body data-page="download">
+    <div class="workspace">
+      {{template "app-header" .}}
+      <main>
+        {{template "receive-entry" .}}
+        <div
+          id="status"
+          class="status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        ></div>
+      </main>
+      {{template "app-footer" .}}
+    </div>
+    <script type="module" src="/static/script.js?v={{.Version}}"></script>
+  </body>
+</html>

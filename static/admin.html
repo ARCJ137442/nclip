@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>管理 · nclip</title>
+    <link rel="stylesheet" href="/static/style.css?v={{.Version}}" />
+  </head>
+  <body data-page="admin">
+    <div class="workspace admin-workspace">
+      {{template "app-header" .}}
+      <main>
+        <div class="section-heading admin-heading">
+          <div>
+            <span class="eyebrow">nclip</span>
+            <h1 data-i18n="administration">管理</h1>
+          </div>
+          <button id="new-user" class="button primary" data-icon="add">
+            <span data-i18n="createUser">创建用户</span>
+          </button>
+        </div>
+        <div class="admin-tabs" role="tablist" aria-label="Administration">
+          <button
+            id="users-tab"
+            type="button"
+            role="tab"
+            aria-selected="true"
+            aria-controls="users-panel"
+            data-i18n="users"
+          >
+            用户</button
+          ><button
+            id="shares-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="shares-panel"
+            data-i18n="allShares"
+          >
+            分享内容
+          </button>
+        </div>
+        <section
+          id="users-panel"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="users-tab"
+        >
+          <div class="list-toolbar">
+            <label class="search-field"
+              ><span class="sr-only" data-i18n="searchUsers">搜索用户</span
+              ><input
+                id="user-search"
+                type="search"
+                data-i18n-placeholder="searchUsers"
+                placeholder="搜索用户"
+                autocomplete="off" /></label
+            ><span id="user-count" class="hint"></span>
+          </div>
+          <div id="user-list" class="admin-list"></div>
+        </section>
+        <section
+          id="shares-panel"
+          class="panel"
+          role="tabpanel"
+          aria-labelledby="shares-tab"
+          hidden
+        >
+          <form id="share-search-form" class="list-toolbar">
+            <label class="search-field"
+              ><span class="sr-only" data-i18n="searchShares"
+                >分享码、文件名或类型</span
+              ><input
+                id="share-search"
+                type="search"
+                data-i18n-placeholder="searchShares"
+                autocomplete="off" /></label
+            ><button class="button secondary" type="submit" data-i18n="search">
+              搜索</button
+            ><span id="share-count" class="hint"></span>
+          </form>
+          <div id="share-list" class="admin-list"></div>
+          <div class="pagination">
+            <button
+              id="previous-page"
+              class="button secondary"
+              data-i18n="previous"
+            >
+              上一页</button
+            ><span id="page-number"></span
+            ><button id="next-page" class="button secondary" data-i18n="next">
+              下一页
+            </button>
+          </div>
+        </section>
+        <div
+          id="status"
+          class="status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        ></div>
+      </main>
+      {{template "app-footer" .}}
+    </div>
+    <dialog
+      id="user-dialog"
+      class="editor-dialog"
+      aria-labelledby="user-dialog-title"
+    >
+      <form id="user-form" autocomplete="off">
+        <div class="dialog-heading">
+          <h2 id="user-dialog-title" data-i18n="createUser">创建用户</h2>
+          <button
+            id="close-user-dialog"
+            type="button"
+            class="button secondary"
+            data-i18n="cancel"
+          >
+            取消
+          </button>
+        </div>
+        <label class="field"
+          ><span data-i18n="username">用户名</span
+          ><input
+            id="edit-username"
+            name="new_username"
+            type="text"
+            required
+            minlength="3"
+            maxlength="64"
+            autocapitalize="none"
+            spellcheck="false"
+            autocomplete="off"
+        /></label>
+        <label class="field"
+          ><span data-i18n="newPassword">新密码</span
+          ><input
+            id="edit-password"
+            name="new_password"
+            type="password"
+            autocomplete="new-password"
+            maxlength="72"
+          /><small id="password-hint" class="hint" data-i18n="newPasswordHint"
+            >至少 8 字节；修改用户时留空则保持原密码。</small
+          ></label
+        >
+        <fieldset class="permissions">
+          <legend data-i18n="permissions">权限</legend>
+          <label class="check"
+            ><input id="permission-upload" type="checkbox" /><span
+              data-i18n="permissionUpload"
+              >上传</span
+            ></label
+          ><label class="check"
+            ><input id="permission-download" type="checkbox" /><span
+              data-i18n="permissionDownload"
+              >下载</span
+            ></label
+          ><label class="check"
+            ><input id="permission-manage" type="checkbox" /><span
+              data-i18n="permissionManage"
+              >管理</span
+            ></label
+          >
+          <p class="hint" data-i18n="managePermissionHint">
+            管理用户及全部分享；上传和下载分别授权。
+          </p>
+        </fieldset>
+        <label class="check"
+          ><input id="edit-disabled" type="checkbox" /><span
+            data-i18n="disabledAccount"
+            >停用账号</span
+          ></label
+        >
+        <p id="user-form-error" class="form-error" role="alert"></p>
+        <div class="dialog-actions">
+          <button
+            id="save-user"
+            class="button primary"
+            type="submit"
+            data-i18n="save"
+          >
+            保存
+          </button>
+        </div>
+      </form>
+    </dialog>
+    <dialog
+      id="confirm-dialog"
+      class="editor-dialog"
+      aria-labelledby="confirm-title"
+    >
+      <h2 id="confirm-title" data-i18n="confirmDelete">确认删除</h2>
+      <p id="confirm-description"></p>
+      <p id="confirm-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button id="confirm-cancel" class="button secondary" data-i18n="cancel">
+          取消</button
+        ><button
+          id="confirm-delete"
+          class="button danger"
+          data-i18n="deleteAction"
+        >
+          删除
+        </button>
+      </div>
+    </dialog>
+    <script type="module" src="/static/script.js?v={{.Version}}"></script>
+  </body>
+</html>

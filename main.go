@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -19,6 +20,7 @@ import (
 	"github.com/johnwmail/nclip/handlers"
 	"github.com/johnwmail/nclip/handlers/retrieval"
 	"github.com/johnwmail/nclip/handlers/upload"
+	"github.com/johnwmail/nclip/internal/accounts"
 	"github.com/johnwmail/nclip/internal/services"
 	"github.com/johnwmail/nclip/storage"
 	"github.com/johnwmail/nclip/utils"
@@ -68,6 +70,7 @@ func main() {
 
 	// Print the NCLIP_UPLOAD_AUTH settings at startup
 	log.Printf("Upload Authentication Enabled: %v", cfg.UploadAuth)
+	log.Printf("Account Login Enabled: %v", cfg.AccountsEnabled)
 	if cfg.UploadAuth {
 		// Print the number of configured API keys without exposing them
 		// Count and log the number of non-empty API keys (do not print the keys themselves)
@@ -79,19 +82,6 @@ func main() {
 			}
 		}
 		log.Printf("Configured API Keys: %d", numKeys)
-	}
-
-	// Aggressive logging: print all environment variables
-	if utils.IsDebugEnabled() {
-		log.Printf("[DEBUG] ENVIRONMENT VARIABLES:")
-		for _, e := range os.Environ() {
-			log.Printf("[ENV] %s", e)
-		}
-	}
-
-	// Aggressive logging: print config
-	if utils.IsDebugEnabled() {
-		log.Printf("[DEBUG] Loaded config: %+v", cfg)
 	}
 
 	// Initialize storage backend based on deployment mode
@@ -221,6 +211,17 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	systemHandler := handlers.NewSystemHandler()
 	webuiHandler := handlers.NewWebUIHandler(cfg)
 	sharesHandler := handlers.NewSharesHandler(pasteService, cfg)
+	var accountHandler *handlers.AccountHandler
+	if cfg.AccountsEnabled {
+		if isLambdaEnvironment() {
+			panic("accounts require a single server with persistent local storage")
+		}
+		accountStore, err := accounts.Open(filepath.Join(cfg.DataDir, ".accounts"), cfg.AdminUsername, cfg.AdminPasswordFile)
+		if err != nil {
+			panic(fmt.Errorf("initialize accounts: %w", err))
+		}
+		accountHandler = handlers.NewAccountHandler(accountStore, store, cfg)
+	}
 
 	// Create Gin router
 	router := gin.New()
@@ -233,6 +234,12 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	router.Use(jsonRecovery())
 	router.Use(canonicalErrors())
 	router.Use(gin.Recovery())
+	if accountHandler != nil {
+		if err := router.SetTrustedProxies([]string{"127.0.0.1", "::1", "172.16.0.0/12"}); err != nil {
+			panic(err)
+		}
+		router.Use(accountHandler.Gate())
+	}
 
 	// Load favicon
 	router.StaticFile("/favicon.ico", "./static/favicon.ico")
@@ -244,9 +251,15 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	router.Static("/static", "./static")
 
 	// Web UI routes
-	router.GET("/", webuiHandler.Index)
+	if accountHandler != nil {
+		registerAccountRoutes(router, accountHandler, metaHandler)
+		router.GET("/", accountHandler.Home)
+	} else {
+		router.GET("/", webuiHandler.Index)
+		router.GET("/api/v1/session", func(c *gin.Context) { c.JSON(200, gin.H{"enabled": false, "user": nil}) })
+	}
 	router.GET("/api/v1/ui-config", sharesHandler.UIConfig)
-	if cfg.UploadAuth {
+	if cfg.UploadAuth && !cfg.AccountsEnabled {
 		router.POST("/api/v1/shares", apiKeyAuth(cfg), sharesHandler.Create)
 	} else {
 		router.POST("/api/v1/shares", sharesHandler.Create)
@@ -256,7 +269,7 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	router.POST("/api/v1/shares/:slug/receive", sharesHandler.Receive)
 
 	// Core API routes
-	if cfg.UploadAuth {
+	if cfg.UploadAuth && !cfg.AccountsEnabled {
 		auth := apiKeyAuth(cfg)
 		router.POST("/", auth, uploadHandler.Upload)
 		router.POST("/burn/", auth, uploadHandler.UploadBurn)
@@ -270,7 +283,7 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	}
 	router.GET("/:slug", retrievalHandler.View)
 	router.GET("/raw/:slug", retrievalHandler.Raw)
-	if cfg.UploadAuth {
+	if cfg.UploadAuth && !cfg.AccountsEnabled {
 		auth := apiKeyAuth(cfg)
 		router.DELETE("/:slug", auth, metaHandler.DeletePaste)
 	} else {
@@ -292,6 +305,22 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	})
 
 	return router
+}
+
+func registerAccountRoutes(router *gin.Engine, h *handlers.AccountHandler, meta *handlers.MetaHandler) {
+	router.GET("/login", h.LoginPage)
+	router.POST("/login", h.Login)
+	router.POST("/api/v1/login", h.Login)
+	router.GET("/api/v1/session", h.Session)
+	router.POST("/api/v1/logout", h.Logout)
+	router.GET("/receive", h.ReceivePage)
+	router.GET("/admin", h.AdminPage)
+	router.GET("/api/v1/users", h.Users)
+	router.POST("/api/v1/users", h.SaveUser)
+	router.PUT("/api/v1/users/:id", h.SaveUser)
+	router.DELETE("/api/v1/users/:id", h.DeleteUser)
+	router.GET("/api/v1/admin/shares", h.Shares)
+	router.DELETE("/api/v1/admin/shares/:slug", meta.DeletePaste)
 }
 
 // base64UploadMiddleware sets the X-Base64 header
@@ -492,8 +521,11 @@ func runHTTPServer(router *gin.Engine, cfg *config.Config, store storage.PasteSt
 
 	// Create HTTP server
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Port),
-		Handler: router,
+		Addr:              fmt.Sprintf(":%d", cfg.Port),
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    32 * 1024,
 	}
 
 	// Start server in a goroutine

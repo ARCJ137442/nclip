@@ -5,16 +5,16 @@ metadata:
   namespace: nclip
 spec:
   rules:
-  - host: demo.nclip.app
+  - host: clipboard.example.com
     http:
       paths:
       - backend:
           service:
-            name: nclip-http
+            name: nclip
             port:
-              number: 8080
+              number: 80
         path: /
         pathType: Prefix
   tls:
   - hosts:
-    - demo.nclip.app
+    - clipboard.example.com

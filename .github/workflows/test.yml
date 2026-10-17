@@ -20,6 +20,18 @@ env:
   GO_VERSION_LATEST: "1.26" # Latest version for lint/security
 
 jobs:
+  public-docs:
+    name: Documentation and publication checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node scripts/check-public-docs.mjs
+
   test:
     name: Test
     runs-on: ubuntu-latest

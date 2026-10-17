@@ -2,7 +2,7 @@ name: Share preview
 on:
   workflow_dispatch:
   push:
-    branches: [feat/clipboard-sharing]
+    branches: [feat/clipboard-sharing, feat/accounts-and-access]
 permissions:
   contents: read
 jobs:
@@ -22,7 +22,8 @@ jobs:
       - uses: golangci/golangci-lint-action@v8
         with:
           version: v2.15.0
-      - run: node --test scripts/clipboard.test.mjs
+      - run: node --test scripts/clipboard.test.mjs scripts/accounts.test.mjs
+      - run: node scripts/check-public-docs.mjs
       - name: Legacy HTTP integration in temporary storage
         run: |
           go build -o /tmp/nclip-integration .

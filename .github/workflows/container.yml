@@ -18,6 +18,9 @@ permissions:
 jobs:
   build-and-push:
     name: Build and Push Container
+    # The fork exports offline images through Release; legacy registry publishing
+    # remains scoped to its original owner and never requires a fork's Docker Hub credentials.
+    if: github.repository == 'johnwmail/nclip'
     runs-on: ubuntu-latest
     
     steps:

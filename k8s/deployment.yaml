@@ -6,6 +6,8 @@ metadata:
   namespace: nclip
 spec:
   replicas: 1
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: nclip
@@ -14,16 +16,19 @@ spec:
       labels:
         app: nclip
     spec:
+      securityContext:
+        fsGroup: 1001
       containers:
         - name: nclip
-          image: ghcr.io/johnwmail/nclip:latest
+          # Replace with the fixed image you built and made available to the cluster.
+          image: nclip:local
           ports:
             - containerPort: 8080
           env:
             - name: NCLIP_DATA_DIR
               value: "/data"
             # - name: NCLIP_URL
-            #   value: "https://demo.nclip.app"
+            #   value: "https://clipboard.example.com"
             - name: NCLIP_PORT
               value: "8080"
             - name: NCLIP_TTL

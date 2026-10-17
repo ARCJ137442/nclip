@@ -22,6 +22,23 @@ const context = await browser.newContext({
   permissions: ["clipboard-read", "clipboard-write"],
   reducedMotion: "reduce",
 });
+let sessionOptions = {};
+if (process.env.NCLIP_TEST_ACCOUNTS === "true") {
+  const login = await context.request.post(base + "/api/v1/login", {
+    data: {
+      username: process.env.NCLIP_TEST_ADMIN || "admin",
+      password: process.env.NCLIP_TEST_PASSWORD || "test-admin-password",
+    },
+    headers: { Origin: base },
+  });
+  assert.equal(login.status(), 200);
+  sessionOptions = {
+    storageState: { cookies: await context.cookies(), origins: [] },
+  };
+}
+async function auxiliaryContext(options) {
+  return browser.newContext({ ...options, ...sessionOptions });
+}
 const page = await context.newPage();
 const errors = [];
 page.on("pageerror", (error) => errors.push(error.message));
@@ -238,7 +255,7 @@ try {
     "PASS 320/390px controls, English, dark theme and saved preferences",
   );
 
-  const lateContext = await browser.newContext({ locale: "zh-CN" });
+  const lateContext = await auxiliaryContext({ locale: "zh-CN" });
   await lateContext.addInitScript(() => {
     localStorage.setItem(
       "nclip.preferences.v1",
@@ -279,7 +296,7 @@ try {
   await lateContext.close();
   console.log("PASS late clipboard reads cannot replace an active draft");
 
-  const suggestionContext = await browser.newContext({ locale: "zh-CN" });
+  const suggestionContext = await auxiliaryContext({ locale: "zh-CN" });
   await suggestionContext.addInitScript(() => {
     localStorage.setItem(
       "nclip.preferences.v1",
@@ -325,7 +342,7 @@ try {
     "PASS visible recommendation sends with shortcut and own links stay suppressed",
   );
 
-  const deniedContext = await browser.newContext({ locale: "zh-CN" });
+  const deniedContext = await auxiliaryContext({ locale: "zh-CN" });
   await deniedContext.addInitScript(() => {
     Object.defineProperty(navigator, "clipboard", {
       value: {
@@ -356,7 +373,7 @@ try {
     "PASS denied automatic copy retains link and never claims success",
   );
 
-  const touchContext = await browser.newContext({
+  const touchContext = await auxiliaryContext({
     viewport: { width: 390, height: 844 },
     isMobile: true,
     hasTouch: true,
@@ -384,6 +401,14 @@ try {
   await page.screenshot({ path: `${evidence}/failure.png`, fullPage: true });
   throw error;
 } finally {
-  for (const slug of slugs) await context.request.delete(`${base}/${slug}`);
+  const state = await (
+    await context.request.get(base + "/api/v1/session")
+  ).json();
+  for (const slug of slugs)
+    await context.request.delete(`${base}/${slug}`, {
+      headers: state.csrf_token
+        ? { "X-CSRF-Token": state.csrf_token, Origin: base }
+        : {},
+    });
   await browser.close();
 }
