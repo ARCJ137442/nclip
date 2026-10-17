@@ -1,202 +1,143 @@
-<!DOCTYPE html>
-<html lang="en">
-
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{{.Title}}</title>
-    <link rel="stylesheet" href="/static/style.css?v={{.Version}}">
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap"
-        rel="stylesheet">
-</head>
-
-<body class="main-page">
-    <div class="container">
-        <header>
-            <h1>
-                <a href="/"
-                    style="text-decoration: none; color: inherit; display: inline-flex; align-items: center; gap: 0.5rem;">
-                    <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                        style="width: 2rem; height: 2rem; flex-shrink: 0;">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                    </svg>
-                    NCLIP
-                </a>
-            </h1>
-            <p>Open Source Clipboard Service</p>
-        </header>
-
-        <main>
-            <div class="card upload-section">
-                <h2>
-                    <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                    </svg>
-                    Paste Content
-                </h2>
-
-                <!-- Text Upload Form -->
-                <div class="form-group">
-                    <label for="text-content">Text Content</label>
-                    <textarea id="text-content" placeholder="Paste your text here..."></textarea>
-                    <!-- API key moved below file upload controls -->
-                    <div class="form-controls">
-                        <div class="checkbox-wrapper">
-                            <input type="checkbox" id="burn-text">
-                            <label for="burn-text">Burn after reading</label>
-                        </div>
-                        <button id="upload-text" class="btn btn-primary">
-                            <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M12 4v16m8-8H4" />
-                            </svg>
-                            Paste Text
-                        </button>
-                    </div>
-                </div>
-
-                <!-- File Upload Form -->
-                <div class="form-group">
-                    <label for="file-input">File Upload</label>
-                    <input type="file" id="file-input">
-                    <!-- API key unified below -->
-                    <div class="form-controls">
-                        <div class="checkbox-wrapper">
-                            <input type="checkbox" id="burn-file">
-                            <label for="burn-file">Burn after reading</label>
-                        </div>
-                        <button id="upload-file" class="btn btn-primary">
-                            <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M12 4v16m8-8H4" />
-                            </svg>
-                            Upload File
-                        </button>
-                    </div>
-                </div>
-                {{ if .UploadAuth }}
-                <div class="form-group api-key-row">
-                    <label for="api-key-input">API Key</label>
-                    <input type="text" id="api-key-input" placeholder="Paste API key for uploads" style="width:100%;" />
-                </div>
-                {{ end }}
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>nclip</title>
+    <link rel="stylesheet" href="/static/style.css?v={{.Version}}" />
+  </head>
+  <body data-page="compose">
+    <div class="workspace">
+      {{template "app-header" .}}
+      <main>
+        <section id="composer" class="panel composer">
+          <div class="section-heading">
+            <h1 data-i18n="compose">粘贴，然后分享</h1>
+            <p data-i18n="composeHint">文字、截图和文件，一起生成一个链接。</p>
+          </div>
+          <fieldset id="draft-controls">
+            <label class="sr-only" for="message" data-i18n="compose"
+              >粘贴，然后分享</label
+            ><textarea
+              id="message"
+              data-i18n-placeholder="placeholder"
+              placeholder="在这里输入，或直接粘贴内容…"
+              spellcheck="false"
+            ></textarea>
+            <div id="draft-items" class="items"></div>
+            <p id="rich-hint" class="hint" data-i18n="richEdit" hidden></p>
+            <p id="path-hint" class="hint" data-i18n="pathHint" hidden></p>
+            <div class="compose-toolbar">
+              <div class="input-actions">
+                <button
+                  type="button"
+                  id="paste"
+                  class="button secondary"
+                  data-icon="clipboard"
+                >
+                  <span data-i18n="paste">粘贴</span></button
+                ><button
+                  type="button"
+                  id="attach"
+                  class="button secondary"
+                  data-icon="attach"
+                >
+                  <span data-i18n="attach">添加文件</span></button
+                ><input id="files" type="file" multiple hidden />
+              </div>
+              <span class="shortcut" data-i18n="shortcut"
+                >Ctrl / ⌘ + Enter 发送</span
+              >
             </div>
-
-            <div class="card result-section" id="result-section">
-                <div class="success-message">
-                    <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24"
-                        style="display: inline; margin-right: 0.5rem;">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7" />
-                    </svg>
-                    Upload Successful!
-                </div>
-                <div class="result-content">
-                    <h3>Your paste URL:</h3>
-                    <div class="url-display">
-                        <input type="text" id="paste-url" readonly>
-                        <button id="copy-url" class="btn btn-secondary">
-                            <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
-                            </svg>
-                            Copy
-                        </button>
-                    </div>
-                    <div class="action-buttons">
-                        <a id="view-paste" href="#" class="btn btn-secondary">
-                            <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M15 12a3 3 0 11-6 0 3 3 0 616 0z" />
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                            </svg>
-                            View
-                        </a>
-                        <a id="raw-paste" href="#" download class="btn btn-secondary">
-                            <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            Download
-                        </a>
-                        <button id="delete-paste" class="btn btn-danger">
-                            <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                            </svg>
-                            Delete
-                        </button>
-                        <button id="new-paste" class="btn btn-primary">
-                            <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                                    d="M12 4v16m8-8H4" />
-                            </svg>
-                            New Paste
-                        </button>
-                    </div>
-                </div>
+            <div class="send-row">
+              <label class="check"
+                ><input id="burn" type="checkbox" /><span data-i18n="burn"
+                  >一次性接收</span
+                ><span class="help-dot" tabindex="0" data-help="burnHint"
+                  >ⓘ</span
+                ></label
+              ><button
+                id="send"
+                type="button"
+                class="button primary"
+                data-icon="send"
+              >
+                <span data-i18n="send">生成链接</span>
+              </button>
             </div>
-
-            <div class="card usage-section">
-                <h2>
-                    <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                            d="M8 9l3 3-3 3m5 0h3M5 20h14a2 2 0 002-2V6a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                    </svg>
-                    Command Line Usage
-                </h2>
-                <div class="code-examples">
-                    {{ if .UploadAuth }}
-                    <div class="example">
-                        <p>Upload text (with API key):</p>
-                        <code>echo "hello world" | curl -sL --data-binary @- -H "Authorization: Bearer &lt;YOUR_KEY&gt;" {{.Config.URL}}</code>
-                    </div>
-                    <div class="example">
-                        <p>Upload text (X-Api-Key header):</p>
-                        <code>echo "hello world" | curl -sL --data-binary @- -H "X-Api-Key: &lt;YOUR_KEY&gt;" {{.Config.URL}}</code>
-                    </div>
-                    <div class="example">
-                        <p>Upload file (with API key):</p>
-                        <code>curl -sL -F "file=@/path/to/file" -H "X-Api-Key: &lt;YOUR_KEY&gt;" {{.Config.URL}}</code>
-                    </div>
-                    {{ else }}
-                    <div class="example">
-                        <p>Upload text:</p>
-                        <code>echo "hello world" | curl -sL --data-binary @- {{.Config.URL}}</code>
-                    </div>
-                    <div class="example">
-                        <p>Upload file:</p>
-                        <code>curl -sL --data-binary @/path/to/file {{.Config.URL}}</code>
-                    </div>
-                    <div class="example">
-                        <p>Burn after reading:</p>
-                        <code>echo "secret" | curl -sL --data-binary @- {{.Config.URL}}/burn/</code>
-                    </div>
-                    {{ end }}
-                </div>
+          </fieldset>
+          <div id="candidate" class="candidate" hidden>
+            <div class="candidate-heading">
+              <span data-icon="clipboard"></span
+              ><strong data-i18n="candidate">剪贴板里有新内容</strong>
             </div>
-        </main>
-
-        <footer>
-            <p>
-                NCLIP -
-                <a href="https://github.com/johnwmail/nclip" target="_blank" rel="noopener"
-                    style="text-decoration: none; color: inherit; font-weight: bold;">
-                    Open Source Clipboard Project
-                </a><br>
-                <small>Version: {{.Version}}</small>
-                <!-- BuildTime: {{.BuildTime}} -->
-                <!-- CommitHash: {{.CommitHash}} -->
-            </p>
-        </footer>
+            <div id="candidate-preview" class="items compact"></div>
+            <button
+              id="send-candidate"
+              type="button"
+              class="button secondary"
+              data-i18n="sendCandidate"
+            >
+              发送并复制链接
+            </button>
+          </div>
+          <p id="limits" class="hint"></p>
+        </section>
+        <section id="result" class="panel result" hidden tabindex="-1">
+          <span class="result-check" data-icon="check"></span>
+          <h1 data-i18n="sent">上传完成</h1>
+          <p id="result-message"></p>
+          <div class="link-row">
+            <input
+              id="share-url"
+              type="url"
+              readonly
+              aria-label="Share URL"
+            /><button id="copy-link" class="button primary" data-icon="copy">
+              <span data-i18n="copyLink">复制链接</span>
+            </button>
+          </div>
+          <div class="result-actions">
+            <a id="open-share" class="button secondary" data-i18n="view"
+              >打开接收页</a
+            ><button
+              id="native-share"
+              class="button secondary"
+              data-i18n="share"
+              hidden
+            >
+              分享</button
+            ><button
+              id="new-share"
+              class="button secondary"
+              data-i18n="newShare"
+            >
+              再传一份
+            </button>
+          </div>
+        </section>
+        <div
+          id="status"
+          class="status"
+          role="status"
+          aria-live="polite"
+          aria-atomic="true"
+        ></div>
+        <details class="help">
+          <summary data-i18n="help">命令行与使用帮助</summary>
+          <p data-i18n="helpText"></p>
+          <code
+            >printf 'hello' | curl --user clipuser --data-binary @-
+            {{.Config.URL}}</code
+          >
+        </details>
+      </main>
+      {{template "app-footer" .}}
     </div>
-
-    <script src="/static/script.js"></script>
-</body>
-
+    <div id="drop-overlay" hidden>
+      <span data-icon="attach"></span
+      ><span data-i18n="drop">放下文件，添加到待发送内容</span>
+    </div>
+    <script type="module" src="/static/script.js?v={{.Version}}"></script>
+  </body>
 </html>

@@ -1,0 +1,34 @@
+name: Share preview
+on:
+  workflow_dispatch:
+  push:
+    branches: [feat/clipboard-sharing]
+permissions:
+  contents: read
+jobs:
+  verify-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.0'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: go vet ./...
+      - run: test -z "$(gofmt -l .)"
+      - run: go test -race ./...
+      - run: node --test scripts/clipboard.test.mjs
+      - name: Build fixed-commit preview image
+        run: |
+          docker build --build-arg VERSION=arc-${GITHUB_SHA::7} --build-arg GIT_COMMIT=$GITHUB_SHA --build-arg BUILD_TIME=$(date -u +%FT%TZ) -t nclip:arc-${GITHUB_SHA::7} .
+          docker save nclip:arc-${GITHUB_SHA::7} | gzip > nclip-image.tar.gz
+          sha256sum nclip-image.tar.gz > nclip-image.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nclip-preview-${{ github.sha }}
+          path: |
+            nclip-image.tar.gz
+            nclip-image.sha256
+          retention-days: 7

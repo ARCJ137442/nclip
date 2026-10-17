@@ -138,22 +138,18 @@ func (h *Handler) View(c *gin.Context) {
 		}
 	}
 
+	// Browser one-time messages are metadata-only until explicit confirmation.
+	// New multi-format messages use the same receiving UI, without decoding ZIP here.
+	if !h.isCli(c) && (paste.BurnAfterRead || paste.Share != nil) {
+		c.Header("Cache-Control", "no-store")
+		c.HTML(http.StatusOK, "view.html", gin.H{"Title": "NCLIP", "Paste": paste, "Version": h.config.Version, "BuildTime": h.config.BuildTime, "CommitHash": h.config.CommitHash, "UploadAuth": h.config.UploadAuth})
+		return
+	}
+
 	// Increment read count
 	if err := h.service.IncrementReadCount(slug); err != nil {
 		// Log error but don't fail the request
 		fmt.Printf("Failed to increment read count for %s: %v\n", slug, err)
-	}
-
-	// If burn-after-read, handle specially for CLI and browser clients so the
-	// paste is removed on first access.
-	if paste.BurnAfterRead {
-		if h.isCli(c) {
-			h.viewCLI(c, slug, paste)
-			return
-		}
-		// Browser burn handling: render content or preview and remove paste.
-		h.viewBrowserBurn(c, slug, paste)
-		return
 	}
 
 	// CLI clients: full content and streaming (non-burn) or browser clients: render
@@ -164,43 +160,16 @@ func (h *Handler) View(c *gin.Context) {
 	h.viewBrowser(c, slug, paste)
 }
 
-// viewBrowserBurn handles burn-after-read for browser clients: it should
-// provide the same UX as viewBrowser (full vs preview) but ensure the paste
-// is deleted on first access. It uses store-provided burn preview/stream
-// when available.
-// NOTE: Size verification is performed in View() before calling this function.
-func (h *Handler) viewBrowserBurn(c *gin.Context, slug string, paste *models.Paste) {
-	// For small content, render full
-	if paste.Size <= h.config.MaxRenderSize {
-		// Read full content, delete paste, render
-		full, err := h.service.GetPasteContent(slug)
-		if err != nil {
-			h.renderNotFound(c, "Paste not available or deleted")
-			return
-		}
-		// No size check needed - already verified in View()
-		if err := h.service.DeletePaste(slug); err != nil {
-			log.Printf("[ERROR] viewBrowserBurn: failed to delete burn paste %s: %v", slug, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete burn-after-read paste"})
-			return
-		}
-		c.HTML(http.StatusOK, "view.html", gin.H{"Title": fmt.Sprintf("NCLIP - Paste %s", paste.ID), "Paste": paste, "IsText": utils.IsTextContent(paste.ContentType), "IsPreview": false, "Content": string(full), "Version": h.config.Version, "BuildTime": h.config.BuildTime, "CommitHash": h.config.CommitHash, "BaseURL": h.getBaseURL(c), "UploadAuth": h.config.UploadAuth})
-		return
-	}
-
-	// Large content: reuse loadPreviewContent path which already handles burn
-	// semantics for preview-sized reads.
-	preview, err := h.loadPreviewContent(c, slug, paste)
-	if err != nil {
-		return
-	}
-	c.HTML(http.StatusOK, "view.html", gin.H{"Title": fmt.Sprintf("NCLIP - Paste %s", paste.ID), "Paste": paste, "IsText": utils.IsTextContent(paste.ContentType), "IsPreview": true, "Content": string(preview), "Version": h.config.Version, "BuildTime": h.config.BuildTime, "CommitHash": h.config.CommitHash, "BaseURL": h.getBaseURL(c), "UploadAuth": h.config.UploadAuth})
-}
-
-// viewCLI handles CLI (curl/wget/powershell) clients; streams full content or temp file for burn-after-read
+// viewCLI handles CLI (curl/wget/powershell) clients; streams full content and consumes one-time pastes through the shared service
 // NOTE: Size verification is performed in View() before calling this function.
 func (h *Handler) viewCLI(c *gin.Context, slug string, paste *models.Paste) {
-	content, err := h.service.GetPasteContent(slug)
+	var content []byte
+	var err error
+	if paste.BurnAfterRead {
+		_, content, err = h.service.ConsumePaste(slug)
+	} else {
+		content, err = h.service.GetPasteContent(slug)
+	}
 	if err != nil {
 		log.Printf("[ERROR] View CLI: content not found or deleted for slug %s: %v", slug, err)
 		h.renderNotFound(c, "Paste not available or deleted")
@@ -208,12 +177,6 @@ func (h *Handler) viewCLI(c *gin.Context, slug string, paste *models.Paste) {
 	}
 
 	if paste.BurnAfterRead {
-		// Delete paste before streaming so subsequent reads return 404
-		if err := h.service.DeletePaste(slug); err != nil {
-			log.Printf("[ERROR] View CLI: failed to delete burn-after-read paste %s before streaming: %v", slug, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete burn-after-read paste"})
-			return
-		}
 		c.Header("Content-Type", paste.ContentType)
 		c.Header("Content-Length", fmt.Sprintf("%d", paste.Size))
 		_, _ = c.Writer.Write(content)
@@ -265,6 +228,9 @@ func (h *Handler) viewBrowser(c *gin.Context, slug string, paste *models.Paste) 
 
 // Raw handles raw content download via GET /raw/:slug
 func (h *Handler) Raw(c *gin.Context) {
+	// Raw HTML/SVG are user data, not an application document with same-origin powers.
+	c.Header("Content-Security-Policy", "sandbox; default-src 'none'")
+	c.Header("X-Content-Type-Options", "nosniff")
 	slug := c.Param("slug")
 
 	paste, err := h.service.GetPaste(slug)
@@ -299,6 +265,7 @@ func (h *Handler) Raw(c *gin.Context) {
 		if ok := h.handleRawBurn(c, slug, paste); !ok {
 			return
 		}
+		return
 	}
 	// Non-burn path: load content now and validate size before serving
 	content, cerr := h.service.GetPasteContent(slug)
@@ -346,31 +313,11 @@ func (h *Handler) loadFullContent(slug string, paste *models.Paste) ([]byte, err
 	return full, nil
 }
 
-// loadPreviewContent loads a preview (up to MaxRenderSize) for large pastes.
-// It handles burn-after-read temp rename branches, preview reads and returns
-// the preview bytes or an error. The caller must render the response when an
-// error is returned.
+// loadPreviewContent loads at most MaxRenderSize for ordinary text pastes.
+// Browser one-time pastes are metadata-only until the receive API is called.
 func (h *Handler) loadPreviewContent(c *gin.Context, slug string, paste *models.Paste) ([]byte, error) {
 	if !utils.IsTextContent(paste.ContentType) {
 		return []byte(""), nil
-	}
-	if paste.BurnAfterRead {
-		// Read up to MaxRenderSize, verify full size via StatContent when possible,
-		// delete the paste, and return the prefix for preview rendering.
-		prefix, err := h.store.GetContentPrefix(slug, h.config.MaxRenderSize)
-		if err != nil {
-			log.Printf("[ERROR] View Browser: failed to read preview from store for %s: %v", slug, err)
-			h.renderNotFound(c, "Paste not available or deleted")
-			return nil, err
-		}
-		// Verify size matches metadata before deleting, if we can stat the content.
-		// No late verification of size here; delete paste and return preview.
-		if err := h.service.DeletePaste(slug); err != nil {
-			log.Printf("[ERROR] View Browser: failed to delete burn-after-read paste %s during preview: %v", slug, err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete burn-after-read paste"})
-			return nil, err
-		}
-		return prefix, nil
 	}
 
 	prefix, err := h.store.GetContentPrefix(slug, h.config.MaxRenderSize)
@@ -382,25 +329,17 @@ func (h *Handler) loadPreviewContent(c *gin.Context, slug string, paste *models.
 	return prefix, nil
 }
 
-// handleRawBurn performs the burn-after-read flow for Raw: it moves files to
-// temporary burn paths, validates size, deletes metadata, streams the file
-// to the response, and cleans up. It returns true on success (streamed and
-// returned) or false if the caller should stop processing.
+// handleRawBurn atomically consumes within this process before writing bytes.
+// A failed response is deliberately not replayable.
 func (h *Handler) handleRawBurn(c *gin.Context, slug string, paste *models.Paste) bool {
-	// Unified handler-level burn: read full content, verify size, delete paste, then stream the bytes.
-	// Read full content, verify size, delete the paste, then stream the bytes.
-	content, err := h.service.GetPasteContent(slug)
+	// Share the single-instance consumption boundary with browser receive and CLI.
+	contentPaste, content, err := h.service.ConsumePaste(slug)
 	if err != nil {
 		log.Printf("[ERROR] Raw: content not found or deleted for slug %s: %v", slug, err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Paste not found or deleted"})
 		return false
 	}
-	// No late size mismatch checks; proceed to delete and stream.
-	if err := h.service.DeletePaste(slug); err != nil {
-		log.Printf("[ERROR] Raw: failed to delete burn-after-read paste %s before streaming: %v", slug, err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete burn-after-read paste"})
-		return false
-	}
+	paste = contentPaste
 	c.Header("Content-Type", paste.ContentType)
 	c.Header("Content-Length", fmt.Sprintf("%d", paste.Size))
 	ext := utils.ExtensionByMime(paste.ContentType)

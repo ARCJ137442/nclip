@@ -220,6 +220,7 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	metaHandler := handlers.NewMetaHandler(store)
 	systemHandler := handlers.NewSystemHandler()
 	webuiHandler := handlers.NewWebUIHandler(cfg)
+	sharesHandler := handlers.NewSharesHandler(pasteService, cfg)
 
 	// Create Gin router
 	router := gin.New()
@@ -244,6 +245,15 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 
 	// Web UI routes
 	router.GET("/", webuiHandler.Index)
+	router.GET("/api/v1/ui-config", sharesHandler.UIConfig)
+	if cfg.UploadAuth {
+		router.POST("/api/v1/shares", apiKeyAuth(cfg), sharesHandler.Create)
+	} else {
+		router.POST("/api/v1/shares", sharesHandler.Create)
+	}
+	router.GET("/api/v1/shares/:slug", sharesHandler.Metadata)
+	router.GET("/api/v1/shares/:slug/content", sharesHandler.Content)
+	router.POST("/api/v1/shares/:slug/receive", sharesHandler.Receive)
 
 	// Core API routes
 	if cfg.UploadAuth {
@@ -314,6 +324,13 @@ func jsonRecovery() gin.HandlerFunc {
 // This helps intermediaries and CDNs forward a predictable JSON payload.
 func canonicalErrors() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// These handlers already emit JSON errors. Streaming multipart directly
+		// avoids buffering a second copy of the payload in our 128 MiB deployment.
+		if strings.HasPrefix(c.Request.URL.Path, "/api/v1/shares/") &&
+			(strings.HasSuffix(c.Request.URL.Path, "/content") || strings.HasSuffix(c.Request.URL.Path, "/receive")) {
+			c.Next()
+			return
+		}
 		// Wrap the ResponseWriter so we can buffer the body and inspect it
 		origWriter := c.Writer
 		bcw := &bodyCaptureWriter{ResponseWriter: origWriter}
