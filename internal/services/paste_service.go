@@ -38,6 +38,7 @@ type CreatePasteRequest struct {
 	BurnAfterRead bool
 	TTL           time.Duration
 	Share         *models.ShareManifest
+	Public        bool
 }
 
 // CreatePasteResponse represents the response from creating a paste
@@ -132,6 +133,7 @@ func (s *PasteService) CreatePaste(req CreatePasteRequest) (*CreatePasteResponse
 		BurnAfterRead: req.BurnAfterRead,
 		ReadCount:     0,
 		Share:         req.Share,
+		Public:        req.Public,
 	}
 
 	if err := s.store.StoreContent(slug, req.Content); err != nil {

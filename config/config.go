@@ -24,11 +24,14 @@ type Config struct {
 	// UploadAuth enables API key authentication on upload endpoints
 	UploadAuth bool `json:"upload_auth"`
 	// APIKeys is a comma-separated list of valid API keys
-	APIKeys       string `json:"api_keys"`
-	Version       string `json:"version"`
-	BuildTime     string `json:"build_time"`
-	CommitHash    string `json:"commit_hash"`
-	MaxRenderSize int64  `json:"max_render_size"`
+	APIKeys           string `json:"api_keys"`
+	Version           string `json:"version"`
+	BuildTime         string `json:"build_time"`
+	CommitHash        string `json:"commit_hash"`
+	MaxRenderSize     int64  `json:"max_render_size"`
+	AccountsEnabled   bool   `json:"accounts_enabled"`
+	AdminUsername     string `json:"-"`
+	AdminPasswordFile string `json:"-"`
 }
 
 // LoadConfig loads configuration from environment variables and CLI flags
@@ -43,6 +46,7 @@ func LoadConfig() *Config {
 		S3Prefix:      "",
 		DataDir:       "./data",
 		MaxRenderSize: 262144, // 256 KiB
+		AdminUsername: "admin",
 	}
 
 	// Parse CLI flags
@@ -57,6 +61,9 @@ func LoadConfig() *Config {
 	flag.StringVar(&config.DataDir, "data-dir", config.DataDir, "Filesystem data directory for server mode")
 	flag.BoolVar(&config.UploadAuth, "upload-auth", config.UploadAuth, "Require API key for upload endpoints")
 	flag.StringVar(&config.APIKeys, "api-keys", config.APIKeys, "Comma-separated API keys for upload authentication")
+	flag.BoolVar(&config.AccountsEnabled, "accounts", false, "Enable account login and independent permissions")
+	flag.StringVar(&config.AdminUsername, "admin-username", config.AdminUsername, "Initial administrator username")
+	flag.StringVar(&config.AdminPasswordFile, "admin-password-file", "", "Private bootstrap administrator password file")
 	flag.Parse()
 
 	// Override with environment variables if present
@@ -100,6 +107,9 @@ func LoadConfig() *Config {
 	setStringEnv("NCLIP_S3_PREFIX", &config.S3Prefix)
 	setBoolEnv("NCLIP_UPLOAD_AUTH", &config.UploadAuth)
 	setStringEnv("NCLIP_API_KEYS", &config.APIKeys)
+	setBoolEnv("NCLIP_ACCOUNTS", &config.AccountsEnabled)
+	setStringEnv("NCLIP_ADMIN_USERNAME", &config.AdminUsername)
+	setStringEnv("NCLIP_ADMIN_PASSWORD_FILE", &config.AdminPasswordFile)
 	// NCLIP_DATA_DIR configures the local filesystem data directory used in
 	// server mode. Keep backward compatibility with the environment var.
 	setStringEnv("NCLIP_DATA_DIR", &config.DataDir)

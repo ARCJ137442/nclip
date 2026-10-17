@@ -152,12 +152,17 @@ func (h *SharesHandler) Create(c *gin.Context) {
 		return
 	}
 	burn := c.GetHeader("X-Burn") == "true"
-	resp, err := h.service.CreatePaste(services.CreatePasteRequest{Content: content, ContentType: contentType, TTL: ttl, BurnAfterRead: burn, Share: &u.manifest})
+	visibility := c.GetHeader("X-Nclip-Visibility")
+	if visibility != "" && visibility != "authenticated" && visibility != "public" {
+		shareError(c, 400, "invalid_visibility")
+		return
+	}
+	resp, err := h.service.CreatePaste(services.CreatePasteRequest{Content: content, ContentType: contentType, TTL: ttl, BurnAfterRead: burn, Share: &u.manifest, Public: visibility == "public"})
 	if err != nil {
 		shareError(c, 500, "store_failed")
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"slug": resp.Slug, "url": h.shareURL(c, resp.Slug), "burn_after_read": burn, "expires_at": resp.ExpiresAt})
+	c.JSON(http.StatusCreated, gin.H{"slug": resp.Slug, "url": h.shareURL(c, resp.Slug), "burn_after_read": burn, "expires_at": resp.ExpiresAt, "public": visibility == "public"})
 }
 
 func (h *SharesHandler) get(c *gin.Context) (*models.Paste, bool) {
@@ -180,7 +185,7 @@ func (h *SharesHandler) Metadata(c *gin.Context) {
 	if !ok {
 		return
 	}
-	c.JSON(200, gin.H{"id": p.ID, "size": p.Size, "created_at": p.CreatedAt, "expires_at": p.ExpiresAt, "burn_after_read": p.BurnAfterRead, "manifest": manifestFor(p)})
+	c.JSON(200, gin.H{"id": p.ID, "size": p.Size, "created_at": p.CreatedAt, "expires_at": p.ExpiresAt, "burn_after_read": p.BurnAfterRead, "manifest": manifestFor(p), "public": p.Public})
 }
 
 // Content preloads ordinary messages; one-time messages require explicit POST.

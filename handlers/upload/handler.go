@@ -362,6 +362,7 @@ func (h *Handler) Upload(c *gin.Context) {
 		Filename:      filename,
 		ContentType:   contentType,
 		BurnAfterRead: burnAfterRead,
+		Public:        c.GetHeader("X-Nclip-Visibility") == "public",
 	}
 
 	// Check for custom slug header
@@ -403,6 +404,7 @@ func (h *Handler) UploadBurn(c *gin.Context) {
 		Filename:      filename,
 		ContentType:   contentType,
 		BurnAfterRead: true,
+		Public:        c.GetHeader("X-Nclip-Visibility") == "public",
 	}
 
 	expiresAt, err := h.parseTTL(c)

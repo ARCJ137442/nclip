@@ -43,20 +43,38 @@
                   data-icon="attach"
                 >
                   <span data-i18n="attach">添加文件</span></button
-                ><input id="files" type="file" multiple hidden />
+                ><input id="files" type="file" multiple hidden /><button
+                  id="open-clipboard-receive"
+                  class="button secondary"
+                  type="button"
+                  hidden
+                ></button>
               </div>
               <span class="shortcut" data-i18n="shortcut"
                 >Ctrl / ⌘ + Enter 发送</span
               >
             </div>
             <div class="send-row">
-              <label class="check"
-                ><input id="burn" type="checkbox" /><span data-i18n="burn"
-                  >一次性接收</span
-                ><span class="help-dot" tabindex="0" data-help="burnHint"
-                  >ⓘ</span
-                ></label
-              ><button
+              <div class="sharing-options">
+                <label class="check"
+                  ><input id="burn" type="checkbox" /><span data-i18n="burn"
+                    >一次性接收</span
+                  ><span class="help-dot" tabindex="0" data-help="burnHint"
+                    >ⓘ</span
+                  ></label
+                ><label class="check" id="public-option" hidden
+                  ><input id="public-share" type="checkbox" /><span
+                    data-i18n="publicShare"
+                    >公网分享</span
+                  ><span
+                    class="help-dot"
+                    tabindex="0"
+                    data-help="publicShareHint"
+                    >ⓘ</span
+                  ></label
+                >
+              </div>
+              <button
                 id="send"
                 type="button"
                 class="button primary"
@@ -123,6 +141,10 @@
           aria-live="polite"
           aria-atomic="true"
         ></div>
+        <details id="secondary-receive" class="secondary-receive" hidden>
+          <summary data-i18n="receiveExisting">接收已有分享</summary>
+          {{template "receive-entry" .}}
+        </details>
         <details class="help">
           <summary data-i18n="help">命令行与使用帮助</summary>
           <p data-i18n="helpText"></p>

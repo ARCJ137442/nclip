@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>访问权限 · nclip</title>
+    <link rel="stylesheet" href="/static/style.css?v={{.Version}}" />
+  </head>
+  <body data-page="account-error">
+    <div class="workspace">
+      {{template "app-header" .}}
+      <main>
+        <section class="panel empty-state">
+          <span data-icon="clipboard"></span>
+          <h1 data-i18n="permissionDeniedTitle">当前账号没有这项权限</h1>
+          <p data-i18n="permissionDeniedHint">
+            可返回可用页面，或联系管理员调整权限。
+          </p>
+          <a href="/" class="button primary" data-i18n="backHome">返回首页</a>
+        </section>
+        <div id="status" class="status" role="status" aria-live="polite"></div>
+      </main>
+      {{template "app-footer" .}}
+    </div>
+    <script type="module" src="/static/script.js?v={{.Version}}"></script>
+  </body>
+</html>

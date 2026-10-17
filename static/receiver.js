@@ -2,6 +2,7 @@ import { $, status, failure, authHeaders, renderItems } from "./ui.js";
 import { t, sizeLabel } from "./i18n.js";
 import { copyItem } from "./clipboard.js";
 import { request, decodeShare } from "./share-api.js";
+import { can } from "./access.js";
 
 export async function startReceiver(slug) {
   let metadata = null,
@@ -69,7 +70,7 @@ export async function startReceiver(slug) {
       $("receive-gate").hidden = true;
       await render();
       details();
-      $("delete-share").hidden = consumed;
+      $("delete-share").hidden = consumed || !can("manage");
       $("download-all").hidden = metadata.manifest.encoding !== "zip-v1";
       if (consumed) {
         if (decoded.archive instanceof Blob) {
@@ -134,6 +135,7 @@ export async function startReceiver(slug) {
     items = null;
   });
   metadata = await (await request(endpoint)).json();
+  $("delete-share").hidden = !can("manage");
   details();
   if (metadata.burn_after_read) {
     $("receive-gate").hidden = false;

@@ -1,0 +1,49 @@
+{{define "receive-entry"}}
+<section id="receive-entry" class="panel receive-entry">
+  <div class="section-heading">
+    <h1 data-i18n="receiveTitle">接收一份内容</h1>
+    <p data-i18n="receiveHint">
+      输入分享链接或分享码，也可以从剪贴板直接打开。
+    </p>
+  </div>
+  <form id="receive-form">
+    <label class="sr-only" for="receive-code" data-i18n="shareCode"
+      >链接或分享码</label
+    >
+    <div class="link-row">
+      <input
+        id="receive-code"
+        type="text"
+        name="code"
+        autocomplete="off"
+        autocapitalize="none"
+        spellcheck="false"
+        data-i18n-placeholder="shareCode"
+      /><button
+        id="open-code"
+        class="button primary"
+        type="submit"
+        data-i18n="openContent"
+      >
+        打开内容
+      </button>
+    </div>
+    <div class="input-actions">
+      <button
+        id="paste-code"
+        class="button secondary"
+        type="button"
+        data-icon="clipboard"
+      >
+        <span data-i18n="pasteLink">粘贴链接</span></button
+      ><button
+        id="open-suggested-code"
+        class="button secondary"
+        type="button"
+        hidden
+      ></button>
+    </div>
+    <p id="receive-error" class="form-error" role="alert"></p>
+  </form>
+</section>
+{{end}}

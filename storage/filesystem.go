@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -277,4 +278,31 @@ func (fs *FilesystemStore) GetContentPrefix(id string, n int64) ([]byte, error) 
 
 func (fs *FilesystemStore) Close() error {
 	return nil
+}
+
+// ListPastes lists active metadata, excluding private account subdirectories.
+func (fs *FilesystemStore) ListPastes() ([]models.Paste, error) {
+	entries, err := os.ReadDir(fs.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	pastes := make([]models.Paste, 0, len(entries)/2)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		if !utils.IsValidSlug(id) {
+			continue
+		}
+		paste, err := fs.Get(id)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		pastes = append(pastes, *paste)
+	}
+	return pastes, nil
 }

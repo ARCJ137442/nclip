@@ -15,6 +15,7 @@ type Paste struct {
 	ReadCount     int            `json:"read_count" bson:"read_count"`
 	Content       []byte         `json:"-" bson:"content"` // Not exposed in JSON
 	Share         *ShareManifest `json:"share,omitempty" bson:"share,omitempty"`
+	Public        bool           `json:"public,omitempty" bson:"public,omitempty"`
 }
 
 // IsExpired checks if the paste has expired

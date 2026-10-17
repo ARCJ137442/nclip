@@ -1,3 +1,4 @@
+import { csrfHeaders } from "./access.js";
 export class RequestError extends Error {
   constructor(status, code) {
     super(code);
@@ -6,11 +7,20 @@ export class RequestError extends Error {
 }
 export async function request(url, options = {}) {
   let response;
+  const headers = new Headers(options.headers || {});
+  if (
+    !["GET", "HEAD", "OPTIONS"].includes(
+      (options.method || "GET").toUpperCase(),
+    )
+  )
+    for (const [key, value] of Object.entries(csrfHeaders()))
+      headers.set(key, value);
   try {
     response = await fetch(url, {
       credentials: "same-origin",
       cache: "no-store",
       ...options,
+      headers,
     });
   } catch {
     throw new RequestError(0, "network");

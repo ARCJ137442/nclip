@@ -1,8 +1,11 @@
 import { preferences, savePreferences } from "./preferences.js";
 import { t, translate, sizeLabel } from "./i18n.js";
+import { accountMessage } from "./account-messages.js";
 
 export const $ = (id) => document.getElementById(id);
 const paths = {
+  user: "M20 21v-2a6 6 0 0 0-6-6h-4a6 6 0 0 0-6 6v2M12 3a4 4 0 1 0 0 8 4 4 0 0 0 0-8",
+  add: "M12 5v14M5 12h14",
   clipboard: "M9 4H6a2 2 0 0 0-2 2v14h16V6a2 2 0 0 0-2-2h-3M9 2h6v5H9z",
   settings:
     "M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8M9 3h6l1 3 3 1 2 5-2 5-3 1-1 3H9l-1-3-3-1-2-5 2-5 3-1z",
@@ -38,6 +41,22 @@ export function status(key, tone = "", values = {}) {
   }
 }
 export function failure(error, config = {}) {
+  if (
+    [
+      "login_required",
+      "permission_denied",
+      "csrf_failed",
+      "sessionFailed",
+    ].includes(error.message)
+  ) {
+    status("", "error");
+    if ($("status"))
+      $("status").textContent =
+        error.message === "sessionFailed"
+          ? t("sessionFailed")
+          : accountMessage(error.message);
+    return;
+  }
   let key =
     error.status === 413
       ? "tooLarge"
