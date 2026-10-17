@@ -1,169 +1,146 @@
-
 name: Release
 
 on:
   push:
-    tags: [ 'v*' ]
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g., v0.3)'
-        required: false
-        default: ''
-      changelog:
-        description: 'Custom changelog message'
-        required: false
-        default: ''
+        description: Existing version tag to package
+        required: true
+        type: string
 
-env:
-  GO_VERSION: '1.26'  # Use latest for builds
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 permissions:
-  contents: write
-  packages: write
+  contents: read
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
-  build:
-    name: Build Binaries
+  verify:
     runs-on: ubuntu-latest
-    
+    outputs:
+      source: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Validate version
+        shell: bash
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG }}
+      - id: source
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: node scripts/check-public-docs.mjs
+      - name: Protect published assets from replacement
+        uses: actions/github-script@v7
+        with:
+          script: |
+            try {
+              const release = await github.rest.repos.getReleaseByTag({
+                ...context.repo, tag: process.env.RELEASE_TAG
+              });
+              if (!release.data.draft) throw new Error('Published releases are immutable; use a new version.');
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+
+  binaries:
+    needs: verify
+    runs-on: ubuntu-latest
     strategy:
       matrix:
-        goos: [linux]
-        goarch: [amd64, arm64]
-    
+        arch: [amd64, arm64]
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ${{ env.GO_VERSION }}
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.source }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build self-contained binary package
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: '0'
+          SOURCE_SHA: ${{ needs.verify.outputs.source }}
+        run: |
+          set -euo pipefail
+          package="nclip_linux_$GOARCH"
+          mkdir -p "package/$package" out
+          go build -trimpath -ldflags="-s -w -X main.Version=$RELEASE_TAG -X main.BuildTime=$(date -u +%FT%TZ) -X main.CommitHash=$SOURCE_SHA" -o "package/$package/nclip" .
+          cp -R static "package/$package/static"
+          tar -czf "out/$package.tar.gz" -C package "$package"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-binary-${{ matrix.arch }}
+          path: out/*.tar.gz
+          retention-days: 7
 
-    - name: Build binary
-      env:
-        GOOS: ${{ matrix.goos }}
-        GOARCH: ${{ matrix.goarch }}
-        CGO_ENABLED: 0
-      run: |
-        BINARY_NAME=nclip
-        
-        VERSION=${GITHUB_REF#refs/tags/}
-        
-        # Ensure dist directory exists
-        mkdir -p dist
-        
-        echo "Building $BINARY_NAME for $GOOS/$GOARCH..."
-        go build -v \
-          -ldflags="-s -w -X main.Version=${VERSION} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ) -X main.CommitHash=${GITHUB_SHA:0:7}" \
-          -o "dist/${BINARY_NAME}_${GOOS}_${GOARCH}" \
-          .
-          
-    - name: Create archive
-      run: |
-        cd dist/
-        echo "Files in dist directory:"
-        ls -la
-        for file in *; do
-          echo "Checking: $file"
-          echo "Type: $(file "$file")"
-          if [ -f "$file" ]; then
-            # Create a temporary directory for packaging
-            pkg_dir="package_${file}"
-            echo "Processing binary file: $file -> package directory: $pkg_dir"
-            
-            # Remove directory if it exists to avoid conflicts
-            rm -rf "$pkg_dir"
-            
-            mkdir "$pkg_dir"
-            # Copy the binary and rename it to generic 'nclip'
-            cp "$file" "$pkg_dir/nclip"
-            cp -r ../static "$pkg_dir/"
-            tar -czf "${file}.tar.gz" "$pkg_dir"
-            rm -rf "$pkg_dir"
-            echo "Created archive: ${file}.tar.gz"
-          else
-            echo "Skipping $file (not a regular file)"
-          fi
-        done
-        echo "Final archives:"
-        ls -la *.tar.gz
-        
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: nclip-${{ matrix.goos }}-${{ matrix.goarch }}
-        path: dist/
-        retention-days: 90
-
-  release:
-    name: Create Release
+  image:
+    needs: verify
     runs-on: ubuntu-latest
-    needs: [build]
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      with:
-        fetch-depth: 0
-        
-    - name: Download all artifacts
-      uses: actions/download-artifact@v4
-      with:
-        path: artifacts/
-        
-    - name: Prepare release assets
-      run: |
-        mkdir -p release/
-        find artifacts/ -name "*.tar.gz" | while read file; do
-          cp "$file" release/
-        done
-        cd release/
-        ls -la
-        
-    - name: Generate changelog
-      id: changelog
-      run: |
-        # Use input tag if provided, else use GITHUB_REF
-        CURRENT_TAG="${{ github.event.inputs.tag }}"
-        if [ -z "$CURRENT_TAG" ]; then
-          CURRENT_TAG=${GITHUB_REF#refs/tags/}
-        fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.source }}
+      - name: Export versioned Linux amd64 image
+        env:
+          SOURCE_SHA: ${{ needs.verify.outputs.source }}
+        run: |
+          set -euo pipefail
+          mkdir out
+          docker build --platform linux/amd64 --build-arg VERSION="$RELEASE_TAG" --build-arg GIT_COMMIT="$SOURCE_SHA" --build-arg BUILD_TIME="$(date -u +%FT%TZ)" -t "nclip:$RELEASE_TAG" .
+          docker save "nclip:$RELEASE_TAG" | gzip -n > out/nclip_image_linux_amd64.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-image
+          path: out/nclip_image_linux_amd64.tar.gz
+          retention-days: 7
 
-        PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD~1 2>/dev/null || echo "")
-
-        if [ -n "${{ github.event.inputs.changelog }}" ]; then
-          echo "${{ github.event.inputs.changelog }}" > changelog.md
-        elif [ -n "$PREVIOUS_TAG" ]; then
-          echo "## Changes since $PREVIOUS_TAG" > changelog.md
-          git log --pretty=format:"* %s (%h)" $PREVIOUS_TAG..$CURRENT_TAG >> changelog.md
-        else
-          echo "## Initial Release" > changelog.md
-          git log --pretty=format:"* %s (%h)" >> changelog.md
-        fi
-
-        # Write output to GITHUB_OUTPUT using a temp file for multi-line output (recommended)
-        {
-          echo "changelog<<EOF"
-          cat changelog.md
-          echo ""
-          echo "EOF"
-        } > temp_changelog_output.txt
-        echo "--- temp_changelog_output.txt contents ---"
-        cat temp_changelog_output.txt
-        echo "-----------------------------------------"
-        cat temp_changelog_output.txt >> $GITHUB_OUTPUT
-
-        
-    - name: Create Release
-      uses: softprops/action-gh-release@v2
-      with:
-        files: release/*
-        body: ${{ steps.changelog.outputs.changelog }}
-        draft: false
-        tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-        prerelease: ${{ contains(github.event.inputs.tag || github.ref, '-rc') || contains(github.event.inputs.tag || github.ref, '-beta') || contains(github.event.inputs.tag || github.ref, '-alpha') }}
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  draft:
+    needs: [verify, binaries, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.verify.outputs.source }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: artifacts
+          merge-multiple: true
+      - name: Check tag and create checksums
+        env:
+          SOURCE_SHA: ${{ needs.verify.outputs.source }}
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = "$SOURCE_SHA"
+          printf 'version=%s\nsource=%s\n' "$RELEASE_TAG" "$SOURCE_SHA" > artifacts/BUILD-INFO.txt
+          cd artifacts
+          sha256sum nclip_linux_amd64.tar.gz nclip_linux_arm64.tar.gz nclip_image_linux_amd64.tar.gz BUILD-INFO.txt > SHA256SUMS
+      - name: Prepare reviewable release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: nclip ${{ env.RELEASE_TAG }} (ARC fork)
+          body_path: Documents/RELEASE-NOTES.md
+          draft: true
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          fail_on_unmatched_files: true
+          files: |
+            artifacts/nclip_linux_amd64.tar.gz
+            artifacts/nclip_linux_arm64.tar.gz
+            artifacts/nclip_image_linux_amd64.tar.gz
+            artifacts/BUILD-INFO.txt
+            artifacts/SHA256SUMS

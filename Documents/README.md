@@ -18,6 +18,7 @@ Examples describe the software, never a maintainer's live deployment.
 | Which registry images can the cleanup workflow remove? | [Container cleanup](CONTAINER_CLEANUP.md) |
 | How are corrupt sizes and destructive reads checked? | [Content integrity](SIZE_MISMATCH_ARCHITECTURE.md) |
 | What may be published? | [Publication and security boundaries](../SECURITY.md) |
+| What ships in the current fork release? | [Release notes and downloads](RELEASE-NOTES.md) |
 
 Source conventions live in [AGENTS.md](../AGENTS.md). The scoped Copilot instruction
 files under `.github/instructions/` describe editing practices, not an alternate

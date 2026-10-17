@@ -7,6 +7,7 @@ and the distinction between resource types.
 | Resource | Owner / cleanup |
 |---|---|
 | `Share preview` archive | Actions artifact, seven-day retention; archive adopted builds separately |
+| Versioned offline image/binaries | GitHub Release assets with checksums, maintained separately from temporary Actions artifacts |
 | GHCR package versions | `.github/workflows/cleanup-container-images.yml` |
 | Docker images/containers on a server | Operator; unaffected by GitHub package cleanup |
 | Bind-mounted data, accounts, secrets and backups | Operator; never part of image cleanup |
@@ -43,6 +44,9 @@ access and should be interpreted with the workflow/API context. The script logs
 its analysis and deletion errors. Do not infer that Docker volumes were backed up
 or that a server image was removed from a successful GHCR cleanup report.
 
-`container.yml` builds/publishes images on `v*` tags or manual dispatch and needs
-the configured registry credentials. `Share preview` only exports a Docker
-archive; it neither publishes a registry package nor deploys an application.
+`release.yml` builds versioned binaries and an offline Linux amd64 Docker archive
+into a draft GitHub Release. Review its source/checksums/assets, then publish it.
+Already published versions cannot be rebuilt in place; use a new version.
+The legacy `container.yml` registry publisher is scoped to the original upstream
+owner and does not run in this fork. `Share preview` remains a temporary image
+export and does not deploy an application.

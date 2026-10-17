@@ -15,9 +15,10 @@ description: 'Repository-specific CI, artifact and publication boundaries'
   never upload a whole workspace, real data, private docs or unredacted logs.
 - `test.yml`, `integration-test.yml` and `gosec.yml` validate code/security.
   Integration fixtures must use isolated storage and clean only owned data.
-- `container.yml` and `release.yml` are publication workflows, triggered by
-  release tags or manual runs. `deploy-lambda.yml` performs real AWS deployment;
-  ordinary preview builds must not invoke it.
+- `release.yml` prepares versioned offline assets and checksums in a draft
+  Release. It never deploys. The legacy `container.yml` registry publisher is
+  restricted to upstream ownership. `deploy-lambda.yml` performs real AWS
+  deployment; ordinary preview builds must not invoke it.
 - `cleanup-container-images.yml` defaults to dry-run; preserve the documented
   retention semantics and do not imply it cleans server disks or data volumes.
 - Configuration defaults belong to README; test commands belong to
