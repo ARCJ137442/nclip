@@ -45,12 +45,14 @@ func (h *WebUIHandler) Index(c *gin.Context) {
 
 	// Pass version info and upload-auth flag to template
 	c.HTML(http.StatusOK, "index.html", struct {
-		Title      string
-		Config     struct{ URL string }
-		Version    string
-		BuildTime  string
-		CommitHash string
-		UploadAuth bool
+		Title        string
+		Config       struct{ URL string }
+		Version      string
+		BuildTime    string
+		CommitHash   string
+		UploadAuth   bool
+		Code         string
+		ReceiveError bool
 	}{
 		Title:      "NCLIP - HTTP Clipboard",
 		Config:     struct{ URL string }{URL: baseURL},

@@ -202,6 +202,10 @@ func TestReceiveEntryWorksBeforeJavaScript(t *testing.T) {
 	router := accountRouter(t)
 	admin := signIn(t, router, "admin", "test-admin-password")
 	slug := accountLegacyPaste(t, admin, false)
+	home := admin.call("GET", "/", nil, false)
+	if home.Code != 200 || !strings.Contains(home.Body.String(), `src="/static/script.js`) {
+		t.Fatalf("composer template incomplete: %d", home.Code)
+	}
 	for _, value := range []string{slug, strings.ToLower(slug), "https://clip.test/raw/" + slug} {
 		w := admin.call("GET", "/receive?code="+url.QueryEscape(value), nil, false)
 		if w.Code != 303 || w.Header().Get("Location") != "/"+slug {
