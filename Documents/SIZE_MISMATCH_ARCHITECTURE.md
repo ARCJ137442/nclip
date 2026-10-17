@@ -2,6 +2,8 @@
 
 This document explains how nclip detects and handles size mismatches between stored metadata and actual file content.
 
+The diagrams below describe the upstream legacy stat-check path. The fork additionally uses `PasteService.ConsumePaste` for destructive raw/CLI reads and confirmed one-time receiving: it validates a complete read while holding the process-local consume lock before deletion. Browser one-time HTML views do not read content. New multipart share reads also validate the stored manifest/bundle. The legacy “single check” claim below must not be extended to these new paths; see [ARC-SHARING.md](ARC-SHARING.md).
+
 ## Overview
 
 Size mismatch detection prevents serving corrupted or tampered content by verifying that the actual file size matches the metadata before streaming content to clients.

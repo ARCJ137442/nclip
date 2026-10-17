@@ -56,3 +56,5 @@ Run Go tests/race/vet/lint, the Node clipboard/account checks, and `scripts/acco
 Deploy behind the old proxy password first. Back up and verify existing data/configuration, initialize exactly one manager, and test application access on a loopback preview port under the production memory/security settings. Only after those checks should the site's `auth_basic` directives be disabled and OpenResty syntax-checked/reloaded. Preserve TLS, request-size limits, data, and other services.
 
 Rollback must **restore the old proxy authentication before starting an image without account enforcement**. Retain the new private account data, current shares, old image/container, exact proxy configuration, and verified backup. Never expose the old application while proxy authentication is disabled. The old proxy credentials and new account passwords may diverge after later password changes; account initialization is deliberately not a password-reset mechanism.
+
+For human acceptance and generic maintenance steps, see [OPERATIONS.zh-CN.md](OPERATIONS.zh-CN.md). Deployment-specific records belong outside the public repository.

@@ -4,11 +4,13 @@ This document centralizes the supported HTTP `X-` headers used by nclip, their p
 
 Status: Consolidated from `BASE64_FEATURE_SUMMARY.md` and `XBURN_FEATURE_SUMMARY.md`.
 
+With `NCLIP_ACCOUNTS=true`, account permissions replace global upload keys and also protect private GET/raw/meta/CLI routes. Explicit CLI `Authorization: Basic` carries an account's credentials; the browser uses session cookies plus CSRF for mutations. `X-Nclip-Visibility: public` opts a new share into anonymous receiving; `authenticated` is the default. Confirmed receiving requires `X-Nclip-Confirm: 1`. See [ACCOUNTS.md](ACCOUNTS.md) for the full boundary; API-key statements below apply to standalone mode only.
+
 ## Quick summary
 
 - X-Base64 — instructs the server that the request body is base64-encoded and should be decoded before storage.
 - X-Burn — marks a paste to burn-after-read (delete after the first successful retrieval).
-- X-TTL — custom time-to-live for a paste (duration string between 1h and 7d).
+- X-TTL — custom time-to-live for a paste (duration string between 1h and 168h).
 - X-Slug — custom paste identifier (validated, see `utils.IsValidSlug`).
 - Authorization / X-Api-Key — API auth headers (when `NCLIP_UPLOAD_AUTH` is enabled).
 
@@ -107,7 +109,7 @@ Test notes:
 Purpose: set a custom lifetime for the paste.
 
 Accepted values:
-- A Go `time.Duration` string between `1h` and `7d` (e.g., `2h`, `24h`, `72h`).
+- A Go `time.Duration` string between `1h` and `168h` (e.g., `2h`, `24h`, `72h`). Go durations do not accept a `d` suffix.
 
 Behavior:
 - If `X-TTL` is present, the value is parsed; invalid values or values outside the allowed range cause a 400 error.

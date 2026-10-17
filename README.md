@@ -9,6 +9,15 @@
 
 A modern, high-performance HTTP clipboard app written in Go with Gin framework.
 
+This is the maintained **ARCJ137442/nclip fork**. It adds unified clipboard/file
+sharing and optional account login with independent upload, download and manage
+permissions. The upstream installation examples below describe standalone mode;
+the official upstream images do not contain this fork's additions.
+
+- [Accounts and API](Documents/ACCOUNTS.md)
+- [Sharing protocol](Documents/ARC-SHARING.md)
+- [人工维护、验收、备份与回滚](Documents/OPERATIONS.zh-CN.md)
+
 ## Table of Contents
 
 - [Overview](#overview)
@@ -217,6 +226,7 @@ nclip supports configuration via environment variables and CLI flags. Environmen
 | Variable | CLI Flag | Default | Description |
 |----------|----------|---------|-------------|
 | `NCLIP_PORT` | `--port` | `8080` | HTTP port to listen on |
+| `NCLIP_DATA_DIR` | `--data-dir` | `./data` | Persistent filesystem storage, including private account state when enabled |
 | `NCLIP_URL` | `--url` | `""` | Base URL for paste links (auto-detected if empty) |
 | `NCLIP_SLUG_LENGTH` | `--slug-length` | `5` | Length of generated slugs (3-32 characters) |
 | `NCLIP_BUFFER_SIZE` | `--buffer-size` | `5242880` | Maximum upload size in bytes (5MB) |
@@ -225,9 +235,17 @@ nclip supports configuration via environment variables and CLI flags. Environmen
 | `NCLIP_S3_PREFIX` | `--s3-prefix` | `""` | S3 key prefix for Lambda mode |
 | `NCLIP_UPLOAD_AUTH` | `--upload-auth` | `false` | Require API key for upload endpoints |
 | `NCLIP_API_KEYS` | `--api-keys` | `""` | Comma-separated API keys for upload authentication |
+| `NCLIP_ACCOUNTS` | `--accounts` | `false` | Enable account login; single filesystem server only; supersedes global upload keys |
+| `NCLIP_ADMIN_USERNAME` | `--admin-username` | `admin` | Initial administrator username, used only on first initialization |
+| `NCLIP_ADMIN_PASSWORD_FILE` | `--admin-password-file` | `""` | Private mounted bootstrap password file; does not reset existing accounts |
 | `NCLIP_MAX_RENDER_SIZE` | `--max-render-size` | `262144` | Maximum size (bytes) to render inline in the HTML view; also used as preview length when content exceeds this size |
 
 ### API Key Authentication
+
+This section applies with `NCLIP_ACCOUNTS=false`. In account mode, private reads
+require login plus download permission, uploads require upload permission, and
+management requires manage permission. Explicit per-share public visibility
+allows anonymous receiving; see the account guide above.
 
 Optionally require API keys for upload endpoints to prevent unauthorized usage. This is disabled by default.
 
@@ -414,8 +432,8 @@ go fmt ./... && go vet ./... && go test -v ./...
 golangci-lint run
 
 # Run integration tests
-go run main.go
-bash scripts/integration-tests.sh
+go run .
+bash scripts/integration-test.sh
 ```
 
 <a id="monitoring"></a>

@@ -2,6 +2,10 @@
 
 This guide explains how to interact with nclip using various clients, including advanced features via custom HTTP headers like `X-TTL` and `X-SLUG`.
 
+These standalone examples assume `NCLIP_ACCOUNTS=false`. On this fork's account-enabled deployment, supply explicit CLI account credentials, for example `curl --user example-user --data-binary @myfile.txt https://clipboard.example.com/` (curl prompts for the password). Upload, private download and management require their respective permissions. API keys do not replace account authentication. Only explicitly public shares permit anonymous reads. Browser login uses the native form instead of a Basic Auth challenge. See [ACCOUNTS.md](ACCOUNTS.md) and [人工维护手册](OPERATIONS.zh-CN.md).
+
+For one-time shares, a browser HTML page only asks for confirmation; confirmed receiving or direct raw/CLI access consumes the share. New multi-item raw/CLI content is a portable ZIP. Header semantics and duration examples are authoritative in [X-HEADERS.md](X-HEADERS.md); use hours such as `72h` or `168h`, not a `d` suffix.
+
 ---
 
 ### 1. Curl (Linux/macOS/Windows)
@@ -326,7 +330,7 @@ The `/base64` endpoint (and `X-Base64: true` header) allows you to bypass WAF (W
 
 For full header semantics, examples, and middleware precedence, see:
 
-👉 **[Documents/X-HEADERS.md](Documents/X-HEADERS.md)**
+👉 **[X-HEADERS.md](X-HEADERS.md)**
 
 ---
 
@@ -339,7 +343,7 @@ nclip supports several custom HTTP headers to control paste behavior. All header
 - `X-Slug: <custom-id>` - Specify a custom slug/ID for the paste. Must be 3-32 characters, alphanumeric only (A-Z, 2-9, excluding confusing chars: 0, 1, O, I).
 
 **Behavior Headers:**
-- `X-TTL: <duration>` - Set custom time-to-live (expiry). Valid range: 1h to 7d. Examples: `2h`, `24h`, `3d`, `7d`
+- `X-TTL: <duration>` - Set custom time-to-live (expiry). Valid range: 1h to 168h. Examples: `2h`, `24h`, `72h`, `168h`
 - `X-Burn: <value>` - Enable burn-after-read. Accepted values: `true`, `1`, `yes`. Paste self-destructs after first access.
 
 **Authentication Headers:**
@@ -364,7 +368,7 @@ echo "secret script" | base64 | curl -sL --data-binary @- \
 # Custom Slug + TTL
 echo "Important data" | curl -sL --data-binary @- \
     -H "X-Slug: DATA2024" \
-    -H "X-TTL: 7d" \
+    -H "X-TTL: 168h" \
     http://localhost:8080/
 
 # Burn + API Key (when auth enabled)

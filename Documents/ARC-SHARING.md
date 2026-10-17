@@ -12,7 +12,7 @@ The maintained source is the `ARCJ137442/nclip` fork. This feature starts at ups
 
 ## HTTP contract
 
-All endpoints remain behind the deployment's existing Basic Auth. If upload API keys are enabled, creation and deletion use `X-Api-Key`, preserving the proxy's Authorization header. Legacy upload/raw/delete/CLI endpoints remain available.
+Account-mode deployments enforce independent permissions for all new and legacy endpoints. Private sharing requires login and download permission; senders may explicitly opt into public sharing. See [ACCOUNTS.md](ACCOUNTS.md). In standalone mode, the legacy upload-key option remains available. Proxy Basic Auth was used before account migration and must be restored before reverting to an image without account enforcement.
 
 | Endpoint | Behavior |
 |---|---|
@@ -65,3 +65,5 @@ NCLIP_TEST_URL=http://127.0.0.1:18080 node scripts/browser-test.mjs
 The `Share preview` Actions workflow runs vet, formatting, race and clipboard checks, builds a fixed-commit image, and exports a checksum plus Docker archive as a seven-day build artifact. It does not publish a registry image, create a release, or deploy automatically. The repository's pre-existing `v*` workflows publish releases/images; do not use such tags merely to build a preview.
 
 Before production replacement: record the exact old image/container configuration, inspect `/path/to/private-operations` conventions, back up and verify `/srv/nclip/data`, test with separate data on a loopback-only temporary port under the production 128 MiB limit, and exercise ordinary/burn/batch/max-size flows. Reuse mounts, environment, network, limits and proxy settings. Preserve the old container/image for rollback. Failed health, old-link access or upload checks require immediate rollback. Test cleanup must never scan/delete unrelated production data.
+
+For the actual deployment inventory and a human-operated release/backup/rollback procedure, see [人工维护手册](OPERATIONS.zh-CN.md). Include the hidden account directory in backups; account-mode rollback to a legacy image needs the proxy gate restored first.

@@ -2,6 +2,8 @@
 
 This guide provides detailed instructions for deploying nclip on Kubernetes, including manifest customization, scaling, ingress, and troubleshooting.
 
+The manifests below are upstream standalone examples, not this fork's deployed configuration. Account mode requires one persistent filesystem writer; do not apply replica/autoscaling examples to accounts or claim cross-process one-time receive coordination. A Kubernetes account deployment would also need a persistent private account directory, mounted bootstrap secret and a deployment strategy preventing overlapping writers. See [ACCOUNTS.md](ACCOUNTS.md); the maintained server procedure is [OPERATIONS.zh-CN.md](OPERATIONS.zh-CN.md).
+
 ## Table of Contents
 
 - [Quick Start](#quick-start)

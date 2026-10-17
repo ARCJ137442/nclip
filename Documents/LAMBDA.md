@@ -2,6 +2,8 @@
 
 This guide provides comprehensive instructions for deploying nclip as a serverless application on AWS Lambda with S3 storage.
 
+This guide applies with `NCLIP_ACCOUNTS=false`. The fork's account mode intentionally requires a single persistent filesystem server and fails closed in Lambda; it is not a distributed user database. One-time reader coordination is also per process. deployment host uses the [manual server procedure](OPERATIONS.zh-CN.md), not this Lambda deployment.
+
 ## Table of Contents
 
 - [Overview](#overview)

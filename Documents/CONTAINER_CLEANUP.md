@@ -2,6 +2,8 @@
 
 This document explains the automated container image cleanup system for the nclip repository and provides a maintainer reference for the workflow.
 
+For this fork's actual deployment, use [人工维护手册](OPERATIONS.zh-CN.md). `Share preview` exports a seven-day Actions artifact; the server uses a manually loaded local image. This GHCR workflow cannot clean server images, containers, bind-mounted data or Actions artifacts. Scheduled runs default to **dry-run**, so the monthly run alone does not delete anything. A production/rollback image without `latest` can still become eligible for GHCR deletion: retain adopted image archives independently and inspect candidates before an explicit live run.
+
 ---
 
 ## Overview
@@ -36,7 +38,7 @@ The cleanup is handled by the `.github/workflows/cleanup-container-images.yml` w
 ## How to Use
 
 ### Automatic Cleanup
-The workflow runs automatically every month. No action is required.
+The workflow runs automatically every month in dry-run mode with the current defaults. Review its report; actual deletion requires an explicit live run.
 
 ### Manual Cleanup
 1. Go to **Actions** tab in the GitHub repository
