@@ -19,6 +19,9 @@ jobs:
       - run: go vet ./...
       - run: test -z "$(gofmt -l .)"
       - run: go test -race ./...
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.15.0
       - run: node --test scripts/clipboard.test.mjs
       - name: Build fixed-commit preview image
         run: |
