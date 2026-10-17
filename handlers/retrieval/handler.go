@@ -262,7 +262,7 @@ func (h *Handler) Raw(c *gin.Context) {
 	// If burn-after-read, delete the paste so subsequent accesses return 404.
 	// Serve the content for this request (first read) then delete the stored data.
 	if paste.BurnAfterRead {
-		if ok := h.handleRawBurn(c, slug, paste); !ok {
+		if ok := h.handleRawBurn(c, slug); !ok {
 			return
 		}
 		return
@@ -331,15 +331,14 @@ func (h *Handler) loadPreviewContent(c *gin.Context, slug string, paste *models.
 
 // handleRawBurn atomically consumes within this process before writing bytes.
 // A failed response is deliberately not replayable.
-func (h *Handler) handleRawBurn(c *gin.Context, slug string, paste *models.Paste) bool {
+func (h *Handler) handleRawBurn(c *gin.Context, slug string) bool {
 	// Share the single-instance consumption boundary with browser receive and CLI.
-	contentPaste, content, err := h.service.ConsumePaste(slug)
+	paste, content, err := h.service.ConsumePaste(slug)
 	if err != nil {
 		log.Printf("[ERROR] Raw: content not found or deleted for slug %s: %v", slug, err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Paste not found or deleted"})
 		return false
 	}
-	paste = contentPaste
 	c.Header("Content-Type", paste.ContentType)
 	c.Header("Content-Length", fmt.Sprintf("%d", paste.Size))
 	ext := utils.ExtensionByMime(paste.ContentType)

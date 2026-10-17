@@ -169,7 +169,15 @@ func TestShareRichBatchAndBurnArchive(t *testing.T) {
 	if len(form.File["html"]) != 1 || len(form.File["file"]) != 1 || len(form.File["archive"]) != 1 {
 		t.Fatalf("missing representations: %+v", form.File)
 	}
-	f, err := form.File["archive"][0].Open()
+	assertShareArchive(t, form.File["archive"][0], 4)
+	if w := shareRequest(router, "GET", "/raw/"+slug, nil, nil); w.Code != 404 {
+		t.Fatalf("burn survived: %d", w.Code)
+	}
+}
+
+func assertShareArchive(t *testing.T, file *multipart.FileHeader, wantEntries int) {
+	t.Helper()
+	f, err := file.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,16 +190,13 @@ func TestShareRichBatchAndBurnArchive(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(zr.File) != 4 {
+	if len(zr.File) != wantEntries {
 		t.Fatalf("archive entries = %d", len(zr.File))
 	}
 	for _, entry := range zr.File {
 		if strings.Contains(entry.Name, "..") {
 			t.Fatal("unsafe archive path")
 		}
-	}
-	if w := shareRequest(router, "GET", "/raw/"+slug, nil, nil); w.Code != 404 {
-		t.Fatalf("burn survived: %d", w.Code)
 	}
 }
 
