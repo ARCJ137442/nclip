@@ -54,10 +54,6 @@ cleanup_temp_files() {
             fi
         done < "$TRASH_RECORD_FILE"
         rm -f "$TRASH_RECORD_FILE" || true
-    else
-        if [[ -d "./data" ]]; then
-            find "${NCLIP_DATA_DIR}" -maxdepth 1 -type f -mmin -60 -print -delete || true
-        fi
     fi
     rm -f /tmp/nclip_test_* /tmp/nclip_test_ext.* 2>/dev/null || true
     if [[ -d "./testdata" ]]; then

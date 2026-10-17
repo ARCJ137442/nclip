@@ -23,6 +23,16 @@ jobs:
         with:
           version: v2.15.0
       - run: node --test scripts/clipboard.test.mjs
+      - name: Legacy HTTP integration in temporary storage
+        run: |
+          go build -o /tmp/nclip-integration .
+          export NCLIP_DATA_DIR=$(mktemp -d)
+          export NCLIP_PORT=18111 NCLIP_URL=http://127.0.0.1:18111
+          export NCLIP_BUFFER_SIZE=5242880 NCLIP_UPLOAD_AUTH=false GIN_MODE=release
+          /tmp/nclip-integration > /tmp/nclip-integration.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          bash scripts/integration-test.sh
       - name: Build fixed-commit preview image
         run: |
           docker build --build-arg VERSION=arc-${GITHUB_SHA::7} --build-arg GIT_COMMIT=$GITHUB_SHA --build-arg BUILD_TIME=$(date -u +%FT%TZ) -t nclip:arc-${GITHUB_SHA::7} .
