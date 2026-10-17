@@ -4,6 +4,11 @@ This is ARCJ137442/nclip, a fork of johnwmail/nclip. Check remote URLs before
 pushing: a remote named `upstream` may point to the personal fork. Official
 `latest` images do not contain this fork's additions.
 
+This repository is PUBLIC. Use example.com/example credentials in public docs.
+Keep real domains, hosts, ports, usernames, local paths, deployment snapshots,
+backups and credentials outside the checkout. Check commits, PR bodies, logs
+and artifacts for disclosure before publishing; `.gitignore` alone is not a scan.
+
 - Keep Go + native HTML/CSS/JS. Users, independent permissions and per-share
   public opt-in are sufficient; do not invent ownership, groups or ACLs.
 - Account mode requires one persistent filesystem writer. Protect all legacy

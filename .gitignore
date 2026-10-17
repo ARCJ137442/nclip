@@ -50,3 +50,20 @@ main
 core.*
 .nfs.*
 
+# Private deployment material belongs outside the public checkout.
+.private/
+private/
+.env
+.env.*
+!.env.example
+*.local.*
+*.pem
+*.key
+id_rsa
+id_ed25519
+*.bundle
+*.tar
+*.tar.gz
+.ruff_cache/
+node_modules/
+
