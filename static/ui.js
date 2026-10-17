@@ -191,13 +191,23 @@ function refresh() {
 }
 export function setup() {
   refresh();
-  document.querySelectorAll(".help-dot").forEach((el) =>
+  document.querySelectorAll(".help-dot").forEach((el) => {
+    el.setAttribute("role", "button");
+    el.replaceChildren(icon("info"));
     el.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
       el.focus();
-    }),
-  );
+    });
+    el.addEventListener("keydown", (event) => {
+      if (["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      if (event.key === "Escape")
+        el.closest("label")?.querySelector("input")?.focus();
+    });
+  });
   for (const name of ["language", "theme"]) {
     $(name).value = preferences[name];
     $(name).addEventListener("change", () =>

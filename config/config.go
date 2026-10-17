@@ -110,6 +110,9 @@ func LoadConfig() *Config {
 	setBoolEnv("NCLIP_ACCOUNTS", &config.AccountsEnabled)
 	setStringEnv("NCLIP_ADMIN_USERNAME", &config.AdminUsername)
 	setStringEnv("NCLIP_ADMIN_PASSWORD_FILE", &config.AdminPasswordFile)
+	if config.AccountsEnabled {
+		config.UploadAuth = false
+	}
 	// NCLIP_DATA_DIR configures the local filesystem data directory used in
 	// server mode. Keep backward compatibility with the environment var.
 	setStringEnv("NCLIP_DATA_DIR", &config.DataDir)

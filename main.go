@@ -70,6 +70,7 @@ func main() {
 
 	// Print the NCLIP_UPLOAD_AUTH settings at startup
 	log.Printf("Upload Authentication Enabled: %v", cfg.UploadAuth)
+	log.Printf("Account Login Enabled: %v", cfg.AccountsEnabled)
 	if cfg.UploadAuth {
 		// Print the number of configured API keys without exposing them
 		// Count and log the number of non-empty API keys (do not print the keys themselves)

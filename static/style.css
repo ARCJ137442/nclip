@@ -1147,3 +1147,13 @@ dd {
   min-width: 28px;
   min-height: 28px;
 }
+@media (max-width: 600px) {
+  .help-dot:hover::after,
+  .help-dot:focus::after {
+    position: fixed;
+    left: 16px;
+    right: 16px;
+    bottom: 18px;
+    width: auto;
+  }
+}

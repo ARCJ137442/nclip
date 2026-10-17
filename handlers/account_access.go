@@ -220,6 +220,10 @@ func (h *AccountHandler) sameOrigin(c *gin.Context) bool {
 func (h *AccountHandler) Gate() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Cache-Control", "no-store")
+		c.Header("X-Frame-Options", "DENY")
+		c.Header("Content-Security-Policy", "frame-ancestors 'none'")
+		c.Header("Referrer-Policy", "same-origin")
+		c.Header("X-Content-Type-Options", "nosniff")
 		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
 			c.Header("Cache-Control", "no-cache")
 		}
