@@ -84,19 +84,6 @@ func main() {
 		log.Printf("Configured API Keys: %d", numKeys)
 	}
 
-	// Aggressive logging: print all environment variables
-	if utils.IsDebugEnabled() {
-		log.Printf("[DEBUG] ENVIRONMENT VARIABLES:")
-		for _, e := range os.Environ() {
-			log.Printf("[ENV] %s", e)
-		}
-	}
-
-	// Aggressive logging: print config
-	if utils.IsDebugEnabled() {
-		log.Printf("[DEBUG] Loaded config: %+v", cfg)
-	}
-
 	// Initialize storage backend based on deployment mode
 	var store storage.PasteStore
 	var err error

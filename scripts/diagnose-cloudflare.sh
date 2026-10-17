@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Diagnostic script for Cloudflare + Lambda upload issues
-# Usage: ./scripts/diagnose-cloudflare.sh https://demo.nclip.app
+# Usage: ./scripts/diagnose-cloudflare.sh https://clipboard.example.com
 
 set -euo pipefail
 
 URL="${1:-}"
 if [[ -z "$URL" ]]; then
     echo "Usage: $0 <url>"
-    echo "Example: $0 https://demo.nclip.app"
+    echo "Example: $0 https://clipboard.example.com"
     exit 1
 fi
 
