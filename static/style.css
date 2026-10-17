@@ -1118,3 +1118,32 @@ dd {
     margin-right: 10px;
   }
 }
+@media (max-width: 600px) {
+  .sharing-options {
+    min-width: 0;
+  }
+  .sharing-options .check {
+    white-space: normal;
+  }
+  [data-accounts="true"] .send-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+  }
+  [data-accounts="true"] .send-row > .button {
+    width: 100%;
+    justify-self: stretch;
+  }
+  [data-accounts="true"] .sharing-options {
+    flex-direction: row;
+    gap: 0 18px;
+  }
+}
+.help-dot {
+  border: 0;
+  background: transparent;
+  padding: 0;
+  align-items: center;
+  min-width: 28px;
+  min-height: 28px;
+}

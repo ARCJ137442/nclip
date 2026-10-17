@@ -12,6 +12,8 @@ export function startReceiveEntry() {
   const shortcut = document.getElementById("open-clipboard-receive");
   let version = 0,
     suggestedCode = null;
+  if (document.body.dataset.page === "download")
+    input.focus({ preventScroll: true });
   function open(value) {
     const code = shareCode(value, location.origin);
     if (!code) {

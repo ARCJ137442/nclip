@@ -27,6 +27,7 @@ export async function refreshSession() {
 export function setupNavigation() {
   const id = (name) => document.getElementById(name);
   function render() {
+    document.body.dataset.accounts = String(access.enabled);
     id("account-controls").hidden = !access.enabled;
     id("account-menu").hidden = !access.user;
     id("sign-in").hidden =
