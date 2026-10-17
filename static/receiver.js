@@ -2,7 +2,25 @@ import { $, status, failure, authHeaders, renderItems } from "./ui.js";
 import { t, sizeLabel } from "./i18n.js";
 import { copyItem } from "./clipboard.js";
 import { request, decodeShare } from "./share-api.js";
-import { can } from "./access.js";
+import { access, can } from "./access.js";
+
+export function adaptReceiverNavigation() {
+  let path = "/",
+    key = "backHome";
+  if (!access.enabled || can("upload")) key = "newShare";
+  else if (can("download")) {
+    path = "/receive";
+    key = "receiveAnother";
+  } else if (can("manage")) {
+    path = "/admin";
+    key = "administration";
+  }
+  document.querySelectorAll("[data-share-home]").forEach((link) => {
+    link.href = path;
+    link.dataset.i18n = key;
+    link.textContent = t(key);
+  });
+}
 
 export async function startReceiver(slug) {
   let metadata = null,

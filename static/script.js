@@ -20,10 +20,12 @@ try {
   if (page === "download")
     (await import("./receive-entry.js")).startReceiveEntry();
   if (page === "admin") await (await import("./admin.js")).startAdmin();
-  if (document.body.dataset.page === "receive" && document.body.dataset.slug)
-    await (
-      await import("./receiver.js")
-    ).startReceiver(document.body.dataset.slug);
+  if (page === "receive") {
+    const receiver = await import("./receiver.js");
+    receiver.adaptReceiverNavigation();
+    if (document.body.dataset.slug)
+      await receiver.startReceiver(document.body.dataset.slug);
+  }
 } catch (error) {
   failure(error);
 }

@@ -40,9 +40,18 @@
               data-i18n="downloadAll"
               hidden
               >打包下载</a
-            ><a href="/" class="button secondary" data-i18n="newShare"
+            ><a
+              href="/"
+              class="button secondary"
+              data-share-home
+              data-i18n="backHome"
               >再传一份</a
-            ><button id="delete-share" class="button danger" data-i18n="delete">
+            ><button
+              id="delete-share"
+              hidden
+              class="button danger"
+              data-i18n="delete"
+            >
               删除分享
             </button>
           </div>
@@ -64,7 +73,13 @@
           <span data-icon="file"></span>
           <h1 data-i18n="notFound">内容不存在或已失效</h1>
           <p data-i18n="notFoundHint"></p>
-          <a href="/" class="button primary" data-i18n="newShare">再传一份</a>
+          <a
+            href="/"
+            class="button primary"
+            data-share-home
+            data-i18n="backHome"
+            >再传一份</a
+          >
         </section>
         {{end}}
         <div

@@ -1,5 +1,6 @@
 import { language } from "./preferences.js";
 const messages = {
+  receiveAnother: ["接收其他分享", "Receive another share"],
   deleteUser: ["删除用户", "Delete user"],
   deleteAction: ["删除", "Delete"],
   receiveClipboardShort: ["接收 {code}", "Receive {code}"],
