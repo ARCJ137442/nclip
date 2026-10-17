@@ -60,8 +60,8 @@ const messages = {
   openContent: ["打开内容", "Open share"],
   pasteLink: ["粘贴链接", "Paste link"],
   invalidShareCode: [
-    "请输入本站的分享链接，或 5–7 位分享码。",
-    "Enter a share link from this site, or a 5–7 character code.",
+    "请输入本站的分享链接，或 3–32 位分享码。",
+    "Enter a share link from this site, or a 3–32 character code.",
   ],
   openClipboardCode: ["打开剪贴板中的 {code}", "Open {code} from clipboard"],
   receiveExisting: ["接收已有分享", "Receive an existing share"],

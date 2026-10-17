@@ -3,11 +3,13 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/johnwmail/nclip/internal/accounts"
+	"github.com/johnwmail/nclip/utils"
 )
 
 func (h *AccountHandler) secureCookie(c *gin.Context) bool {
@@ -145,7 +147,44 @@ func (h *AccountHandler) Home(c *gin.Context) {
 
 // ReceivePage is the link/code entry point for users with download permission.
 func (h *AccountHandler) ReceivePage(c *gin.Context) {
-	c.HTML(200, "download.html", gin.H{"Version": h.config.Version})
+	value := c.Query("code")
+	if value != "" {
+		if code := h.receiveCode(c, value); code != "" {
+			c.Redirect(303, "/"+code)
+			return
+		}
+	}
+	c.HTML(200, "download.html", gin.H{"Version": h.config.Version, "Code": value, "ReceiveError": value != ""})
+}
+
+func (h *AccountHandler) receiveCode(c *gin.Context, value string) string {
+	value = strings.TrimSpace(value)
+	if code := strings.ToUpper(value); utils.IsValidSlug(code) {
+		return code
+	}
+	if !strings.HasPrefix(value, "/") && !strings.HasPrefix(value, "https://") && !strings.HasPrefix(value, "http://") {
+		return ""
+	}
+	base, _ := url.Parse(h.config.URL)
+	if base == nil || base.Host == "" {
+		base = &url.URL{Scheme: "http", Host: c.Request.Host}
+	}
+	reference, err := url.Parse(value)
+	if err != nil {
+		return ""
+	}
+	target := base.ResolveReference(reference)
+	if target.Scheme != base.Scheme || !strings.EqualFold(target.Host, base.Host) || target.RawQuery != "" || target.Fragment != "" {
+		return ""
+	}
+	path := strings.TrimPrefix(target.EscapedPath(), "/")
+	path = strings.TrimPrefix(path, "raw/")
+	path = strings.TrimSuffix(path, "/")
+	code := strings.ToUpper(path)
+	if !utils.IsValidSlug(code) {
+		return ""
+	}
+	return code
 }
 
 // AdminPage provides separate user and share administration views.

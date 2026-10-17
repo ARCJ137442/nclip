@@ -6,13 +6,14 @@
       输入分享链接或分享码，也可以从剪贴板直接打开。
     </p>
   </div>
-  <form id="receive-form">
+  <form id="receive-form" action="/receive" method="get">
     <label class="sr-only" for="receive-code" data-i18n="shareCode"
       >链接或分享码</label
     >
     <div class="link-row">
       <input
         id="receive-code"
+        value="{{.Code}}"
         type="text"
         name="code"
         autocomplete="off"
@@ -43,7 +44,9 @@
         hidden
       ></button>
     </div>
-    <p id="receive-error" class="form-error" role="alert"></p>
+    <p id="receive-error" class="form-error" role="alert">
+      {{if .ReceiveError}}请输入本站分享链接或有效分享码。{{end}}
+    </p>
   </form>
 </section>
 {{end}}

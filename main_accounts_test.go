@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,4 +196,20 @@ func accountLegacyPaste(t *testing.T, client accountClient, public bool) string 
 		t.Fatal(err)
 	}
 	return result.Slug
+}
+
+func TestReceiveEntryWorksBeforeJavaScript(t *testing.T) {
+	router := accountRouter(t)
+	admin := signIn(t, router, "admin", "test-admin-password")
+	slug := accountLegacyPaste(t, admin, false)
+	for _, value := range []string{slug, strings.ToLower(slug), "https://clip.test/raw/" + slug} {
+		w := admin.call("GET", "/receive?code="+url.QueryEscape(value), nil, false)
+		if w.Code != 303 || w.Header().Get("Location") != "/"+slug {
+			t.Fatalf("native receive failed: %d %s", w.Code, w.Header().Get("Location"))
+		}
+	}
+	w := admin.call("GET", "/receive?code="+url.QueryEscape("https://untrusted.invalid/"+slug), nil, false)
+	if w.Code != 200 || w.Header().Get("Location") != "" {
+		t.Fatal("receive entry allowed an external redirect")
+	}
 }
