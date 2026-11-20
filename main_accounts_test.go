@@ -217,8 +217,8 @@ func TestUploadSettingsManagerPermissionCSRFAndPersistence(t *testing.T) {
 		t.Fatalf("manager settings read returned %d: %s", w.Code, w.Body.String())
 	}
 	var initial struct {
-		UploadLimitMiB int64 `json:"upload_limit_mib"`
-		Revision uint64 `json:"revision"`
+		UploadLimitMiB int64  `json:"upload_limit_mib"`
+		Revision       uint64 `json:"revision"`
 	}
 	if err := json.Unmarshal(w.Body.Bytes(), &initial); err != nil {
 		t.Fatal(err)

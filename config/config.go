@@ -10,14 +10,14 @@ import (
 
 // Config holds all configuration for the nclip service
 type Config struct {
-	Port       int           `json:"port"`
-	URL        string        `json:"url"`
-	SlugLength int           `json:"slug_length"`
+	Port        int           `json:"port"`
+	URL         string        `json:"url"`
+	SlugLength  int           `json:"slug_length"`
 	BufferSize  int64         `json:"buffer_size"`
 	UploadLimit *UploadLimit  `json:"-"`
-	DefaultTTL time.Duration `json:"default_ttl"`
-	S3Bucket   string        `json:"s3_bucket"`
-	S3Prefix   string        `json:"s3_prefix"`
+	DefaultTTL  time.Duration `json:"default_ttl"`
+	S3Bucket    string        `json:"s3_bucket"`
+	S3Prefix    string        `json:"s3_prefix"`
 	// DataDir is the filesystem directory used by the server mode to store
 	// paste content and metadata. It defaults to ./data and can be overridden
 	// via the NCLIP_DATA_DIR environment variable or CLI flag.
