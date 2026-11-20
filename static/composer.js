@@ -8,6 +8,7 @@ import {
   fileItem,
   textItem,
   copyText,
+  draggedLinks,
 } from "./clipboard.js";
 import { request, encodeShare } from "./share-api.js";
 
@@ -300,6 +301,43 @@ export async function startComposer() {
       if (!$("composer").hidden)
         void append(Array.from(e.dataTransfer.files, fileItem));
     }
+  });
+  // A dragged link carries only a URI. file: URIs cannot be read by the page,
+  // so refuse them with an actionable message instead of silently sharing the
+  // path as text; ordinary links keep their previous insertion outcome.
+  const isLink = (e) =>
+    !isFiles(e) &&
+    Array.from(e.dataTransfer?.types || []).includes("text/uri-list");
+  $("composer").addEventListener("dragover", (e) => {
+    if (isLink(e) && !sending && !$("composer").hidden) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    }
+  });
+  $("composer").addEventListener("drop", (e) => {
+    if (!isLink(e) || sending || $("composer").hidden) return;
+    e.preventDefault();
+    dragDepth = 0;
+    $("drop-overlay").hidden = true;
+    const link = draggedLinks(e.dataTransfer);
+    if (!link) return;
+    if (link.local) {
+      status("localDrop", "error");
+      $("attach").focus();
+      return;
+    }
+    // Native link drops insert at the pointer; the caret is the closest
+    // stable approximation when the page has to handle the drop itself.
+    editor.setRangeText(
+      link.text,
+      editor.selectionStart ?? editor.value.length,
+      editor.selectionEnd ?? editor.value.length,
+      "end",
+    );
+    rich = null;
+    $("rich-hint").hidden = true;
+    changed();
+    editor.focus();
   });
   window.addEventListener("blur", () => {
     invalidateRead();

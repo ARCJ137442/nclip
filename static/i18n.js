@@ -296,8 +296,12 @@ const messages = {
     "No readable clipboard content. Use system paste, drop, or Add files.",
   ],
   pathHint: [
-    "检测到路径文字；如需传文件，请点击“添加文件”选择实际文件。",
-    "This looks like a path. Use Add files to select the actual file.",
+    "检测到本地路径文字；浏览器无法读取该文件。如需传输，请点击“添加文件”选择实际文件。",
+    "This looks like a local path; browsers cannot read it. Use Add files to select the actual file.",
+  ],
+  localDrop: [
+    "拖入的是本地文件链接，浏览器无法读取该文件。请点击“添加文件”选择它，或从文件管理器把文件本身拖进来。",
+    "That is a local file link, which the browser cannot read. Use Add files, or drag the file itself from your file manager.",
   ],
   richEdit: [
     "编辑文字后按纯文本发送；未编辑时保留富文本。",

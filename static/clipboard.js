@@ -62,6 +62,30 @@ export function pastedItems(data) {
   const html = data.getData("text/html");
   return plain || html ? [textItem(plain, html)] : [];
 }
+export function draggedLinks(data) {
+  // A dropped link only carries a URI. file: URIs cannot be read by the page,
+  // so callers must offer a file picker instead of sharing the path as text.
+  if (!data || data.files?.length) return null;
+  if (!Array.from(data.types || []).includes("text/uri-list")) return null;
+  const lines = (data.getData("text/uri-list") || "")
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("#"));
+  const uris = lines
+    .map((line) => {
+      try {
+        return new URL(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  if (!uris.length) return null;
+  return {
+    text: lines.join("\n"),
+    local: uris.some((uri) => uri.protocol === "file:"),
+  };
+}
 export async function copyText(text) {
   if (navigator.clipboard?.writeText && window.isSecureContext) {
     try {
