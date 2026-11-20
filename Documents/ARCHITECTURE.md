@@ -55,11 +55,13 @@ delivery. [CLIENTS.md](CLIENTS.md) owns the legacy route table;
 [X-HEADERS.md](X-HEADERS.md) owns header semantics. `GET /health` is deliberately
 public; other API capabilities follow the selected authentication mode.
 
-Upload, download and manage permissions are independent. Login/edit operations
-bind sessions to the user version; edits revoke prior sessions. Browser mutations
-require CSRF/origin checks, while explicit CLI credentials follow the same user
-permissions. Uploaded HTML is representation data, not executable preview markup.
-Only UI preferences are persisted by the browser.
+Ordinary users receive upload and download permissions independently. Manage is
+reserved to the unique, immutable administrator, who also has upload and download.
+Login/edit operations bind sessions to the user version; edits revoke prior
+sessions. Browser mutations require CSRF/origin checks, while explicit CLI
+credentials follow the same user permissions. Uploaded HTML is representation
+data, not executable preview markup. Only UI preferences are persisted by the
+browser.
 
 One-time browser pages display confirmation without loading body/thumbnail.
 Confirmed receive and legacy raw/CLI consumption coordinate within one process,

@@ -7,9 +7,10 @@ Custom header behavior is maintained in [X-HEADERS.md](X-HEADERS.md).
 ## Authentication choices
 
 - Account mode: explicit CLI `curl --user example-user` prompts for a password.
-  Upload, private download and management require their independent permissions.
-  Public-share reads may omit authentication. The browser uses the native login
-  form, not a Basic challenge. Details: [Accounts](ACCOUNTS.md).
+  Upload and private download require their independent permissions; management
+  is reserved to the unique administrator. Public-share reads may omit
+  authentication. The browser uses the native login form, not a Basic challenge.
+  Details: [Accounts](ACCOUNTS.md).
 - Standalone with API keys: provide `X-Api-Key` or `Authorization: Bearer` for
   upload/deletion. Reads remain public. Example key strings are fixtures, not
   credentials to reuse.

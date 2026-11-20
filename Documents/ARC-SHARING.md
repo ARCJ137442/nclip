@@ -14,6 +14,8 @@ The maintained source is the `ARCJ137442/nclip` fork. The supported filesystem d
 
 Account-mode deployments enforce independent permissions for all new and legacy endpoints. Private sharing requires login and download permission; senders may explicitly opt into public sharing. See [ACCOUNTS.md](ACCOUNTS.md). In standalone mode, the legacy upload-key option remains available. When migrating from an externally authenticated deployment, restore its authentication gate before reverting to an image without account enforcement.
 
+Account settings may also give each user an optional per-upload content cap through `upload_limit_bytes`. Ordinary new users default to 100 MiB; `null` means no per-user cap. Caps are whole MiB from 1–100; effective uploads also remain bounded by `NCLIP_BUFFER_SIZE`. This cap does not change share visibility or recipient download permissions.
+
 | Endpoint | Behavior |
 |---|---|
 | `GET /api/v1/ui-config` | Non-secret upload/TTL/item limits and formats. Account mode requires login; it is not an anonymous capability endpoint. |
@@ -22,7 +24,7 @@ Account-mode deployments enforce independent permissions for all new and legacy 
 | `GET /api/v1/shares/:slug/content` | Multipart message for an ordinary share. Returns 409 for a one-time share. |
 | `POST /api/v1/shares/:slug/receive` | Requires `X-Nclip-Confirm: 1`. Validates the entire stored message, consumes a one-time share, then returns its multipart content. |
 
-Creation accepts `X-Burn: true` and the existing `X-TTL` duration contract (1h–168h). Without an override the configured TTL is authoritative. The request body, including multipart framing, is bounded separately from the logical binary total. In account mode, managers configure the browser share content quota from 1–100 MiB; the request boundary reserves space for the manifest and multipart framing. Other upload routes retain their existing `NCLIP_BUFFER_SIZE` behavior. The default item limit is 32 and the manifest limit is 64 KiB. No automatic retry/idempotency guarantee is claimed.
+Creation accepts `X-Burn: true` and the existing `X-TTL` duration contract (1h–168h). Without an override the configured TTL is authoritative. The request body, including multipart framing, is bounded separately from the logical binary total. In account mode, managers configure the browser share content quota from 1–100 MiB, bounded by `NCLIP_BUFFER_SIZE`. The request boundary reserves space for the manifest and multipart framing. In account mode, the multipart request boundary reserves space for the manifest and framing, and the logical binary total is limited by the server limit, the global browser-share setting for users with a per-user cap, and that user's cap. Users without a per-user cap are limited by the server value. Other upload routes combine the server limit with the account's optional cap. The default item limit is 32 and the manifest limit is 64 KiB. No automatic retry/idempotency guarantee is claimed.
 
 Example manifest (part sizes/encoding/archive paths are assigned by the server):
 

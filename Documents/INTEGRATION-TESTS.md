@@ -61,7 +61,7 @@ $env:NCLIP_EVIDENCE_DIR='.\evidence\clipboard'
 node scripts/browser-test.mjs
 ```
 
-`NCLIP_PLAYWRIGHT_MODULE` optionally names an installed Playwright package directory. Both helpers clean up only users/shares they created. The account suite tests native form values without input events, all independent roles, direct-link login return, native code-entry fallback, user CRUD, last-manager protection, revocation, stale edits, CSRF and anonymous public one-time receiving. The clipboard suite tests text/rich/multiple files, one-time ZIP retention, oversized draft retention, read races, clipboard refusal and 320/390px themes/touch emulation.
+`NCLIP_PLAYWRIGHT_MODULE` optionally names an installed Playwright package directory. Both helpers clean up only users/shares they created. The account suite tests native form values without input events, ordinary upload/download permission combinations, direct-link login return, native code-entry fallback, user CRUD, immutable administrator constraints, revocation, stale edits, CSRF and anonymous public one-time receiving. The clipboard suite tests text/rich/multiple files, one-time ZIP retention, oversized draft retention, read races, clipboard refusal and 320/390px themes/touch emulation.
 
 For a standalone server, omit `NCLIP_TEST_ACCOUNTS` and run only `browser-test.mjs` with the same 10 MiB UI limit. Screenshots are written to the evidence directory. Mobile emulation cannot establish real Safari compatibility; native Bitwarden vault interaction is a separate human acceptance step.
 

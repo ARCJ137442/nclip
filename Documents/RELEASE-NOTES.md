@@ -1,9 +1,10 @@
 # nclip v0.12.0-arc.1
 
-This ARC fork release adds native account login and independent upload, download
-and manage permissions. Users land on a suitable sending, receiving or management
-page; managers can maintain users and all shares. Private shares require login
-and download permission, with explicit public sharing available per message.
+This ARC fork release adds native account login and independent upload and
+download permissions for ordinary users. Management is reserved to the unique,
+immutable administrator, who can maintain users and all shares. Users land on a
+suitable sending, receiving or management page. Private shares require login and
+download permission, with explicit public sharing available per message.
 
 The unified composer supports text, rich clipboard representations, screenshots
 and multiple files. Sending creates one link and reports upload and clipboard

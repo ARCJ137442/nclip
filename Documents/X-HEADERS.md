@@ -45,6 +45,11 @@ limit. Base64 is a transport encoding, not encryption or access control.
 The versioned multipart endpoint limits the **whole request**, including framing,
 to `NCLIP_BUFFER_SIZE` and checks the logical byte total separately. A file whose
 size equals that limit can therefore be rejected once multipart overhead is added.
+In account mode, the optional per-user `upload_limit_bytes` cap is an account
+setting rather than a request header; `null` disables that per-user cap. Legacy
+upload routes use the lower of this value and `NCLIP_BUFFER_SIZE`. Browser shares
+also apply the global share setting to accounts with a per-user cap; users without
+one remain bounded only by `NCLIP_BUFFER_SIZE`.
 
 ## Authentication, public visibility and forwarding
 
