@@ -44,6 +44,9 @@ Explicit CLI `Authorization: Basic` credentials remain supported by the applicat
 | `PUT /api/v1/users/:id`, `DELETE /api/v1/users/:id` | Replace settings/delete a user |
 | `GET /api/v1/admin/shares` | Search/paginate share metadata, not payloads |
 | `DELETE /api/v1/admin/shares/:slug` | Delete any share with manage permission |
+| `GET /api/v1/settings/upload`, `PUT /api/v1/settings/upload` | Read/update the browser sharing content quota with manage permission, CSRF and revision checks |
+
+The browser sharing quota is configured in whole MiB from 1–100. It applies to the aggregate binary content in `POST /api/v1/shares`; legacy upload endpoints keep their configured buffer limit. The settings file is stored under the data directory and survives restarts.
 
 User creation requires `username`, `password`, and the three explicit `permissions` booleans. Updates also send the returned `version`; a stale version returns 409 `user_changed`. A blank update password preserves the old hash. Usernames are case-insensitive and use 3–64 ASCII letters/digits/dots/underscores/hyphens. No user self-registration or email identities are introduced.
 

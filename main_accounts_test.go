@@ -35,7 +35,7 @@ func accountRouter(t *testing.T) *gin.Engine {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return setupRouter(store, &config.Config{DataDir: dir, AccountsEnabled: true, AdminUsername: "admin", AdminPasswordFile: secret, URL: "https://clip.test", BufferSize: 1 << 20, DefaultTTL: 72 * time.Hour, MaxRenderSize: 1024, Version: "accounts-test"})
+	return setupRouter(store, &config.Config{DataDir: dir, AccountsEnabled: true, AdminUsername: "admin", AdminPasswordFile: secret, URL: "https://clip.test", BufferSize: 4 * config.MiB, DefaultTTL: 72 * time.Hour, MaxRenderSize: 1024, Version: "accounts-test"})
 }
 
 func (c accountClient) call(method, path string, value any, csrf bool) *httptest.ResponseRecorder {
@@ -196,6 +196,63 @@ func accountLegacyPaste(t *testing.T, client accountClient, public bool) string 
 		t.Fatal(err)
 	}
 	return result.Slug
+}
+
+func TestUploadSettingsManagerPermissionCSRFAndPersistence(t *testing.T) {
+	router := accountRouter(t)
+	admin := signIn(t, router, "admin", "test-admin-password")
+	createAccount(t, admin, "manageonly", gin.H{"manage": true})
+	manager := signIn(t, router, "manageonly", "test-user-password")
+	createAccount(t, admin, "uploadonly", gin.H{"upload": true})
+	uploader := signIn(t, router, "uploadonly", "test-user-password")
+
+	if w := (accountClient{router: router}).call("GET", "/api/v1/settings/upload", nil, false); w.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous settings read returned %d", w.Code)
+	}
+	if w := uploader.call("GET", "/api/v1/settings/upload", nil, false); w.Code != http.StatusForbidden {
+		t.Fatalf("upload-only settings read returned %d", w.Code)
+	}
+	w := manager.call("GET", "/api/v1/settings/upload", nil, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("manager settings read returned %d: %s", w.Code, w.Body.String())
+	}
+	var initial struct {
+		UploadLimitMiB int64 `json:"upload_limit_mib"`
+		Revision uint64 `json:"revision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &initial); err != nil {
+		t.Fatal(err)
+	}
+	if initial.UploadLimitMiB != 4 || initial.Revision != 0 {
+		t.Fatalf("initial settings = (%d MiB, revision %d), want (4 MiB, revision 0)", initial.UploadLimitMiB, initial.Revision)
+	}
+	if w := manager.call("PUT", "/api/v1/settings/upload", gin.H{"upload_limit_mib": 2, "revision": 0}, false); w.Code != http.StatusForbidden {
+		t.Fatalf("settings update without CSRF returned %d", w.Code)
+	}
+	if w := manager.call("PUT", "/api/v1/settings/upload", gin.H{"upload_limit_mib": 2, "revision": 0}, true); w.Code != http.StatusOK {
+		t.Fatalf("settings update returned %d: %s", w.Code, w.Body.String())
+	}
+	w := admin.call("GET", "/api/v1/settings/upload", nil, false)
+	if w.Code != http.StatusOK {
+		t.Fatalf("updated settings read returned %d: %s", w.Code, w.Body.String())
+	}
+	var current struct {
+		UploadLimitMiB int64  `json:"upload_limit_mib"`
+		Revision       uint64 `json:"revision"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &current); err != nil {
+		t.Fatal(err)
+	}
+	if current.UploadLimitMiB != 2 || current.Revision != 1 {
+		t.Fatalf("active setting = (%d MiB, revision %d), want (2 MiB, revision 1)", current.UploadLimitMiB, current.Revision)
+	}
+	w = manager.call("GET", "/api/v1/ui-config", nil, false)
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"upload_max_bytes":2097152`) {
+		t.Fatalf("public UI config did not reflect saved limit: %d %s", w.Code, w.Body.String())
+	}
+	if w := manager.call("PUT", "/api/v1/settings/upload", gin.H{"upload_limit_mib": 3, "revision": 0}, true); w.Code != http.StatusConflict {
+		t.Fatalf("stale settings update returned %d: %s", w.Code, w.Body.String())
+	}
 }
 
 func TestReceiveEntryWorksBeforeJavaScript(t *testing.T) {

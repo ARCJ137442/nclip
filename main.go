@@ -204,13 +204,7 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	// Initialize service
 	pasteService := services.NewPasteService(store, cfg)
 
-	// Initialize handlers
-	uploadHandler := upload.NewHandler(pasteService, cfg)
-	retrievalHandler := retrieval.NewHandler(pasteService, store, cfg)
-	metaHandler := handlers.NewMetaHandler(store)
-	systemHandler := handlers.NewSystemHandler()
-	webuiHandler := handlers.NewWebUIHandler(cfg)
-	sharesHandler := handlers.NewSharesHandler(pasteService, cfg)
+	// Initialize account state before handlers snapshot the active upload limit.
 	var accountHandler *handlers.AccountHandler
 	if cfg.AccountsEnabled {
 		if isLambdaEnvironment() {
@@ -220,8 +214,24 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 		if err != nil {
 			panic(fmt.Errorf("initialize accounts: %w", err))
 		}
+		// Round the legacy byte setting down to the whole-MiB browser-share
+		// quota. Other upload routes keep using BufferSize unchanged.
+		initialUploadLimit := min(max(config.MiB, cfg.BufferSize/config.MiB*config.MiB), config.MaxUploadLimitBytes)
+		uploadLimit, err := config.OpenUploadLimit(cfg.DataDir, initialUploadLimit, config.MaxUploadLimitBytes)
+		if err != nil {
+			panic(fmt.Errorf("initialize upload settings: %w", err))
+		}
+		cfg.UploadLimit = uploadLimit
 		accountHandler = handlers.NewAccountHandler(accountStore, store, cfg)
 	}
+
+	// Initialize handlers after account mode has installed its shared settings.
+	uploadHandler := upload.NewHandler(pasteService, cfg)
+	retrievalHandler := retrieval.NewHandler(pasteService, store, cfg)
+	metaHandler := handlers.NewMetaHandler(store)
+	systemHandler := handlers.NewSystemHandler()
+	webuiHandler := handlers.NewWebUIHandler(cfg)
+	sharesHandler := handlers.NewSharesHandler(pasteService, cfg)
 
 	// Create Gin router
 	router := gin.New()
@@ -252,7 +262,7 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 
 	// Web UI routes
 	if accountHandler != nil {
-		registerAccountRoutes(router, accountHandler, metaHandler)
+		registerAccountRoutes(router, accountHandler, metaHandler, cfg.UploadLimit)
 		router.GET("/", accountHandler.Home)
 	} else {
 		router.GET("/", webuiHandler.Index)
@@ -307,7 +317,7 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	return router
 }
 
-func registerAccountRoutes(router *gin.Engine, h *handlers.AccountHandler, meta *handlers.MetaHandler) {
+func registerAccountRoutes(router *gin.Engine, h *handlers.AccountHandler, meta *handlers.MetaHandler, limit *config.UploadLimit) {
 	router.GET("/login", h.LoginPage)
 	router.POST("/login", h.Login)
 	router.POST("/api/v1/login", h.Login)
@@ -321,6 +331,8 @@ func registerAccountRoutes(router *gin.Engine, h *handlers.AccountHandler, meta 
 	router.DELETE("/api/v1/users/:id", h.DeleteUser)
 	router.GET("/api/v1/admin/shares", h.Shares)
 	router.DELETE("/api/v1/admin/shares/:slug", meta.DeletePaste)
+	router.GET("/api/v1/settings/upload", handlers.GetUploadSettings(limit))
+	router.PUT("/api/v1/settings/upload", handlers.SaveUploadSettings(limit))
 }
 
 // base64UploadMiddleware sets the X-Base64 header

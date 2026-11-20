@@ -13,7 +13,8 @@ type Config struct {
 	Port       int           `json:"port"`
 	URL        string        `json:"url"`
 	SlugLength int           `json:"slug_length"`
-	BufferSize int64         `json:"buffer_size"`
+	BufferSize  int64         `json:"buffer_size"`
+	UploadLimit *UploadLimit  `json:"-"`
 	DefaultTTL time.Duration `json:"default_ttl"`
 	S3Bucket   string        `json:"s3_bucket"`
 	S3Prefix   string        `json:"s3_prefix"`
@@ -40,7 +41,7 @@ func LoadConfig() *Config {
 		Port:          8080,
 		URL:           "",
 		SlugLength:    5,
-		BufferSize:    5 * 1024 * 1024, // 5MB
+		BufferSize:    DefaultUploadLimitBytes, // 5 MiB
 		DefaultTTL:    24 * time.Hour,
 		S3Bucket:      "",
 		S3Prefix:      "",

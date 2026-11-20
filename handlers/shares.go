@@ -20,19 +20,24 @@ import (
 
 // SharesHandler adapts multipart clipboard messages to the existing paste store.
 type SharesHandler struct {
-	service *services.PasteService
-	config  *config.Config
+	service     *services.PasteService
+	config      *config.Config
+	uploadLimit *config.UploadLimit
 }
 
 // NewSharesHandler creates the web sharing API without introducing another store.
 func NewSharesHandler(service *services.PasteService, cfg *config.Config) *SharesHandler {
-	return &SharesHandler{service: service, config: cfg}
+	return &SharesHandler{service: service, config: cfg, uploadLimit: cfg.UploadLimit}
 }
 
 // UIConfig contains only public, authoritative settings used by the composer.
 func (h *SharesHandler) UIConfig(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	c.JSON(200, gin.H{"upload_max_bytes": h.config.BufferSize, "default_ttl_seconds": int64(h.config.DefaultTTL.Seconds()), "max_items": maxShareItems, "upload_auth": h.config.UploadAuth, "clipboard_formats": []string{"text/plain", "text/html", "image/png"}})
+	maxBytes := h.config.BufferSize
+	if h.uploadLimit != nil {
+		maxBytes, _, _ = h.uploadLimit.Snapshot()
+	}
+	c.JSON(200, gin.H{"upload_max_bytes": maxBytes, "default_ttl_seconds": int64(h.config.DefaultTTL.Seconds()), "max_items": maxShareItems, "upload_auth": h.config.UploadAuth, "clipboard_formats": []string{"text/plain", "text/html", "image/png"}})
 }
 
 func shareError(c *gin.Context, status int, code string) { c.JSON(status, gin.H{"error": code}) }
@@ -44,7 +49,7 @@ type shareUpload struct {
 	size         int64
 }
 
-func (u *shareUpload) add(key string, data []byte, max int64) error {
+func (u *shareUpload) add(key string, data []byte) error {
 	if key == "manifest" {
 		if u.manifestSeen || json.Unmarshal(data, &u.manifest) != nil {
 			return fmt.Errorf("invalid_manifest")
@@ -57,14 +62,11 @@ func (u *shareUpload) add(key string, data []byte, max int64) error {
 	}
 	u.parts[key] = data
 	u.size += int64(len(data))
-	if u.size > max {
-		return fmt.Errorf("content_too_large")
-	}
 	return nil
 }
 
-func readShareUpload(c *gin.Context, max int64) (*shareUpload, bool) {
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, max)
+func readShareUpload(c *gin.Context, requestLimit, contentLimit int64) (*shareUpload, bool) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, requestLimit)
 	r, err := c.Request.MultipartReader()
 	if err != nil {
 		shareError(c, 400, "invalid_multipart")
@@ -81,16 +83,34 @@ func readShareUpload(c *gin.Context, max int64) (*shareUpload, bool) {
 			return nil, false
 		}
 		key := p.FormName()
-		limit := max
+		limit := contentLimit - u.size
 		if key == "manifest" {
 			limit = maxManifestBytes
+		} else if limit > contentLimit {
+			limit = contentLimit
+		}
+		if key != "manifest" && limit < 0 {
+			shareError(c, http.StatusRequestEntityTooLarge, "content_too_large")
+			return nil, false
+		}
+		if limit < 0 {
+			shareError(c, http.StatusRequestEntityTooLarge, "content_too_large")
+			return nil, false
 		}
 		data, err := io.ReadAll(io.LimitReader(p, limit+1))
 		if err != nil || int64(len(data)) > limit {
-			shareError(c, 413, "request_too_large")
+			code := "request_too_large"
+			if key != "manifest" {
+				code = "content_too_large"
+			}
+			shareError(c, http.StatusRequestEntityTooLarge, code)
 			return nil, false
 		}
-		if err := u.add(key, data, max); err != nil {
+		if key != "manifest" && u.size+int64(len(data)) > contentLimit {
+			shareError(c, http.StatusRequestEntityTooLarge, "content_too_large")
+			return nil, false
+		}
+		if err := u.add(key, data); err != nil {
 			shareError(c, 400, err.Error())
 			return nil, false
 		}
@@ -126,10 +146,16 @@ func (h *SharesHandler) shareURL(c *gin.Context, slug string) string {
 	return base + "/" + slug
 }
 
-// Create accepts a manifest and named binary fields. HTTP framing and content
-// are independently bounded; no clipboard body is included in application logs.
+// Create accepts a manifest and named binary fields. The aggregate part bytes
+// are limited by the configured quota; no clipboard body enters application logs.
 func (h *SharesHandler) Create(c *gin.Context) {
-	u, ok := readShareUpload(c, h.config.BufferSize)
+	contentLimit := h.config.BufferSize
+	requestLimit := contentLimit
+	if h.uploadLimit != nil {
+		contentLimit, _, _ = h.uploadLimit.Snapshot()
+		requestLimit = contentLimit + config.MultipartOverheadBytes + maxManifestBytes
+	}
+	u, ok := readShareUpload(c, requestLimit, contentLimit)
 	if !ok {
 		return
 	}

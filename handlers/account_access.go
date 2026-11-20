@@ -151,7 +151,7 @@ func (h *AccountHandler) publicOrMissingShare(c *gin.Context) bool {
 
 func requiredPermission(c *gin.Context) string {
 	path := c.Request.URL.Path
-	if path == "/admin" || strings.HasPrefix(path, "/api/v1/users") || strings.HasPrefix(path, "/api/v1/admin/") {
+	if path == "/admin" || strings.HasPrefix(path, "/api/v1/users") || strings.HasPrefix(path, "/api/v1/admin/") || strings.HasPrefix(path, "/api/v1/settings/") {
 		return "manage"
 	}
 	if c.Request.Method == http.MethodDelete {
@@ -195,8 +195,11 @@ func SafeNext(value string) string {
 }
 
 func (h *AccountHandler) csrf(c *gin.Context, session accounts.Session) bool {
-	if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead || c.Request.Method == http.MethodOptions || session.UserID == "" {
+	if c.Request.Method == http.MethodGet || c.Request.Method == http.MethodHead || c.Request.Method == http.MethodOptions {
 		return true
+	}
+	if session.UserID == "" {
+		return !strings.HasPrefix(c.Request.URL.Path, "/api/v1/settings/")
 	}
 	return subtle.ConstantTimeCompare([]byte(c.GetHeader("X-CSRF-Token")), []byte(session.CSRF)) == 1 && h.sameOrigin(c)
 }

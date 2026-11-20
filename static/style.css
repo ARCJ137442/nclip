@@ -912,6 +912,45 @@ dd {
   border-bottom-color: var(--accent);
   font-weight: 650;
 }
+.upload-settings-panel {
+  max-width: 720px;
+}
+.settings-intro h2 {
+  margin: 0 0 6px;
+  font-size: 19px;
+}
+.settings-intro .hint {
+  margin: 0 0 24px;
+}
+.upload-range-label {
+  display: grid;
+  gap: 10px;
+  margin: 0 0 18px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 550;
+}
+.upload-range-label input {
+  width: 100%;
+  accent-color: var(--accent);
+}
+.limit-presets,
+.settings-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.limit-presets {
+  margin-bottom: 16px;
+}
+.settings-actions {
+  justify-content: space-between;
+  margin-top: 20px;
+}
+.settings-actions .hint {
+  margin: 0;
+}
 .list-toolbar {
   display: flex;
   align-items: center;

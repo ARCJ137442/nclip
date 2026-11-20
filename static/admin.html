@@ -37,7 +37,16 @@
             aria-controls="shares-panel"
             data-i18n="allShares"
           >
-            分享内容
+            分享内容</button
+          ><button
+            id="settings-tab"
+            type="button"
+            role="tab"
+            aria-selected="false"
+            aria-controls="settings-panel"
+            data-i18n="systemSettings"
+          >
+            系统设置
           </button>
         </div>
         <section
@@ -92,6 +101,58 @@
               下一页
             </button>
           </div>
+        </section>
+        <section
+          id="settings-panel"
+          class="panel upload-settings-panel"
+          role="tabpanel"
+          aria-labelledby="settings-tab"
+          hidden
+        >
+          <div class="settings-intro">
+            <h2 data-i18n="uploadSettingsTitle">上传限额</h2>
+            <p class="hint" data-i18n="uploadSettingsHint">
+              设置浏览器分享功能每次可包含的内容总量。
+            </p>
+          </div>
+          <form id="upload-settings-form">
+            <label class="field" for="upload-limit-number">
+              <span data-i18n="uploadLimitLabel">单次分享总量上限（MiB）</span>
+              <input
+                id="upload-limit-number"
+                type="number"
+                min="1"
+                max="100"
+                step="1"
+                required
+                inputmode="numeric"
+                aria-describedby="upload-limit-range upload-limit-hint"
+              />
+            </label>
+            <label class="upload-range-label" for="upload-limit-range">
+              <span data-i18n="uploadLimitRange">快速调整</span>
+              <input id="upload-limit-range" type="range" min="1" max="100" step="1" />
+            </label>
+            <div class="limit-presets" aria-label="Common upload limits">
+              <button class="button secondary" type="button" data-upload-limit="5">5 MiB</button>
+              <button class="button secondary" type="button" data-upload-limit="20">20 MiB</button>
+              <button class="button secondary" type="button" data-upload-limit="50">50 MiB</button>
+              <button class="button secondary" type="button" data-upload-limit="100">100 MiB</button>
+            </div>
+            <p id="upload-limit-hint" class="hint" data-i18n="uploadLimitCeiling">
+              服务端允许的最高值为 100 MiB。
+            </p>
+            <div class="settings-actions">
+              <span id="upload-settings-state" class="hint" role="status" aria-live="polite"></span>
+              <button id="reload-upload-settings" class="button secondary" type="button" data-i18n="reloadSettings" hidden>
+                重新加载
+              </button>
+              <button id="save-upload-settings" class="button primary" type="submit" data-i18n="saveSettings">
+                保存设置
+              </button>
+            </div>
+            <p id="upload-settings-error" class="form-error" role="alert"></p>
+          </form>
         </section>
         <div
           id="status"

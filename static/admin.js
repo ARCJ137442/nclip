@@ -8,6 +8,8 @@ export async function startAdmin() {
   let users = [],
     editing = null,
     active = "users",
+    uploadSettings = null,
+    uploadDraftDirty = false,
     sharePage = 1,
     sharePages = 1,
     shareResult = null,
@@ -204,15 +206,126 @@ export async function startAdmin() {
       if (version === shareRequest) failure(error);
     }
   }
+  function setUploadDraft(value) {
+    $("upload-limit-number").value = value;
+    $("upload-limit-range").value = value;
+    uploadDraftDirty = true;
+    $("upload-settings-error").textContent = "";
+  }
+  function validUploadDraft() {
+    const value = Number($("upload-limit-number").value);
+    return Number.isInteger(value) && value >= 1 && value <= (uploadSettings?.ceiling_mib || 100);
+  }
+  async function loadUploadSettings({ discardDraft = false } = {}) {
+    if (uploadDraftDirty && !discardDraft) return;
+    $("upload-settings-state").textContent = t("uploadSettingsLoading");
+    $("reload-upload-settings").hidden = true;
+    try {
+      const response = await request("/api/v1/settings/upload");
+      const loaded = await response.json();
+      uploadSettings = loaded;
+      const value = uploadSettings.upload_limit_mib;
+      $("upload-limit-number").max = uploadSettings.ceiling_mib;
+      $("upload-limit-range").max = uploadSettings.ceiling_mib;
+      $("upload-limit-number").value = value;
+      $("upload-limit-range").value = value;
+      $("upload-limit-hint").textContent = t("uploadLimitCeiling", {
+        size: `${uploadSettings.ceiling_mib} MiB`,
+      });
+      uploadDraftDirty = false;
+      $("reload-upload-settings").hidden = true;
+      $("upload-settings-state").textContent = t("uploadSettingsLoaded", {
+        size: `${value} MiB`,
+      });
+    } catch (error) {
+      $("upload-settings-state").textContent = "";
+      $("upload-settings-error").textContent =
+        error.message === "settings_unavailable"
+          ? t("uploadSettingsUnavailable")
+          : accountMessage(error.message);
+      $("reload-upload-settings").hidden = false;
+    }
+  }
   async function tab(name) {
     active = name;
-    for (const key of ["users", "shares"]) {
+    for (const key of ["users", "shares", "settings"]) {
       $(key + "-tab").setAttribute("aria-selected", String(key === name));
       $(key + "-panel").hidden = key !== name;
     }
     $("new-user").hidden = name !== "users";
     if (name === "shares") await loadShares();
+    if (name === "settings") await loadUploadSettings();
   }
+  $("upload-limit-number").addEventListener("input", () => {
+    const value = Number($("upload-limit-number").value);
+    if (Number.isInteger(value)) $("upload-limit-range").value = value;
+    uploadDraftDirty = true;
+    $("upload-settings-error").textContent = "";
+  });
+  $("upload-limit-range").addEventListener("input", () =>
+    setUploadDraft($("upload-limit-range").value),
+  );
+  document.querySelectorAll("[data-upload-limit]").forEach((preset) =>
+    preset.addEventListener("click", () => setUploadDraft(preset.dataset.uploadLimit)),
+  );
+  $("reload-upload-settings").addEventListener("click", () => {
+    $("upload-settings-error").textContent = "";
+    void loadUploadSettings({ discardDraft: true });
+  });
+  $("upload-settings-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!uploadSettings || !validUploadDraft() || saving) {
+      $("upload-settings-error").textContent = t("invalidRequest");
+      return;
+    }
+    saving = true;
+    $("save-upload-settings").disabled = true;
+    $("save-upload-settings").setAttribute("aria-busy", "true");
+    $("upload-settings-error").textContent = "";
+    try {
+      const response = await request("/api/v1/settings/upload", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          upload_limit_mib: Number($("upload-limit-number").value),
+          revision: uploadSettings.revision,
+        }),
+      });
+      uploadSettings = await response.json();
+      uploadDraftDirty = false;
+      $("upload-limit-number").max = uploadSettings.ceiling_mib;
+      $("upload-limit-range").max = uploadSettings.ceiling_mib;
+      $("upload-limit-number").value = uploadSettings.upload_limit_mib;
+      $("upload-limit-range").value = uploadSettings.upload_limit_mib;
+      $("upload-limit-hint").textContent = t("uploadLimitCeiling", {
+        size: `${uploadSettings.ceiling_mib} MiB`,
+      });
+      $("upload-settings-state").textContent = t("uploadSettingsSaved");
+    } catch (error) {
+      if (error.message === "upload_limit_changed") {
+        try {
+          const response = await request("/api/v1/settings/upload");
+          const current = await response.json();
+          $("upload-settings-state").textContent = t("uploadSettingsLoaded", {
+            size: `${current.upload_limit_mib} MiB`,
+          });
+        } catch {
+          /* Keep the draft available even if refreshing the revision fails. */
+        }
+        $("reload-upload-settings").hidden = false;
+        $("upload-settings-error").textContent = t("uploadSettingsChanged");
+      } else {
+        $("upload-settings-error").textContent =
+          error.message === "upload_limit_out_of_range"
+            ? t("invalidRequest")
+            : t("uploadSettingsFailed");
+      }
+    } finally {
+      saving = false;
+      $("save-upload-settings").disabled = false;
+      $("save-upload-settings").removeAttribute("aria-busy");
+    }
+  });
   $("new-user").addEventListener("click", () => edit());
   $("close-user-dialog").addEventListener("click", closeEditor);
   $("user-dialog").addEventListener("cancel", (event) => {
@@ -222,19 +335,19 @@ export async function startAdmin() {
     $("edit-password").value = "";
   });
   $("user-search").addEventListener("input", renderUsers);
-  for (const key of ["users", "shares"]) {
+  const tabs = ["users", "shares", "settings"];
+  for (const key of tabs) {
     $(key + "-tab").addEventListener("click", () => tab(key));
     $(key + "-tab").addEventListener("keydown", (event) => {
       if (["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
         event.preventDefault();
+        const index = tabs.indexOf(active);
         const next =
           event.key === "Home"
-            ? "users"
+            ? tabs[0]
             : event.key === "End"
-              ? "shares"
-              : active === "users"
-                ? "shares"
-                : "users";
+              ? tabs[tabs.length - 1]
+              : tabs[(index + (event.key === "ArrowRight" ? 1 : tabs.length - 1)) % tabs.length];
         $(next + "-tab").focus();
         void tab(next);
       }
@@ -324,6 +437,14 @@ export async function startAdmin() {
     renderUsers();
     renderShares();
     $("user-dialog-title").textContent = t(editing ? "editUser" : "createUser");
+    if (uploadSettings && !uploadDraftDirty)
+      $("upload-settings-state").textContent = t("uploadSettingsLoaded", {
+        size: `${uploadSettings.upload_limit_mib} MiB`,
+      });
+    if ($("upload-limit-hint"))
+      $("upload-limit-hint").textContent = t("uploadLimitCeiling", {
+        size: `${uploadSettings?.ceiling_mib || 100} MiB`,
+      });
   });
   await loadUsers();
 }

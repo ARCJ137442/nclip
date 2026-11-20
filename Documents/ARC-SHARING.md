@@ -22,7 +22,7 @@ Account-mode deployments enforce independent permissions for all new and legacy 
 | `GET /api/v1/shares/:slug/content` | Multipart message for an ordinary share. Returns 409 for a one-time share. |
 | `POST /api/v1/shares/:slug/receive` | Requires `X-Nclip-Confirm: 1`. Validates the entire stored message, consumes a one-time share, then returns its multipart content. |
 
-Creation accepts `X-Burn: true` and the existing `X-TTL` duration contract (1h–168h). Without an override the configured TTL is authoritative. The request body, including multipart framing, cannot exceed `NCLIP_BUFFER_SIZE`; the logical binary total is checked separately. The default item limit is 32 and the manifest limit is 64 KiB. No automatic retry/idempotency guarantee is claimed.
+Creation accepts `X-Burn: true` and the existing `X-TTL` duration contract (1h–168h). Without an override the configured TTL is authoritative. The request body, including multipart framing, is bounded separately from the logical binary total. In account mode, managers configure the browser share content quota from 1–100 MiB; the request boundary reserves space for the manifest and multipart framing. Other upload routes retain their existing `NCLIP_BUFFER_SIZE` behavior. The default item limit is 32 and the manifest limit is 64 KiB. No automatic retry/idempotency guarantee is claimed.
 
 Example manifest (part sizes/encoding/archive paths are assigned by the server):
 
