@@ -16,6 +16,36 @@
             <h1 id="receive-title" data-i18n="contents">收到一份内容</h1>
             <p id="receive-subtitle"></p>
           </div>
+          <section id="receive-progress" class="transfer" hidden>
+            <div class="transfer-head">
+              <span id="receive-phase" class="transfer-phase"></span>
+              <strong id="receive-percent" class="transfer-percent"></strong>
+              <button
+                id="receive-cancel"
+                class="button quiet"
+                type="button"
+                data-i18n="cancelReceive"
+              >
+                取消接收
+              </button>
+            </div>
+            <div
+              id="receive-track"
+              class="transfer-track"
+              role="progressbar"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+              aria-labelledby="receive-phase"
+            >
+              <span id="receive-fill"></span>
+            </div>
+            <div class="transfer-meta">
+              <span id="receive-bytes"></span>
+              <span id="receive-rate"></span>
+            </div>
+            <p id="receive-note" class="hint" hidden></p>
+          </section>
           <div id="receive-gate" hidden>
             <strong data-i18n="oneTimeTitle">这是一份一次性内容</strong>
             <p data-i18n="oneTimeHint"></p>

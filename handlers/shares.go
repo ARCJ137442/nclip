@@ -8,6 +8,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"strconv"
 	"strings"
 	"time"
 
@@ -259,14 +260,18 @@ func writeShareFile(mw *multipart.Writer, key, contentType string, data []byte) 
 	return err
 }
 
-func writeShareResponse(c *gin.Context, p *models.Paste, m models.ShareManifest, parts map[string][]byte, content []byte) error {
-	manifest, err := json.Marshal(m)
-	if err != nil {
+// shareBoundary returns one boundary for both the sizing and writing passes.
+// Stable framing lets the response declare Content-Length, so browsers can
+// show determinate download progress instead of an unknown stream.
+func shareBoundary() string {
+	return multipart.NewWriter(io.Discard).Boundary()
+}
+
+func writeShareMultipart(w io.Writer, boundary string, p *models.Paste, manifest []byte, m models.ShareManifest, parts map[string][]byte, content []byte) error {
+	mw := multipart.NewWriter(w)
+	if err := mw.SetBoundary(boundary); err != nil {
 		return err
 	}
-	c.Header("X-Content-Type-Options", "nosniff")
-	mw := multipart.NewWriter(c.Writer)
-	c.Header("Content-Type", mw.FormDataContentType())
 	if err := mw.WriteField("manifest", string(manifest)); err != nil {
 		return err
 	}
@@ -286,6 +291,23 @@ func writeShareResponse(c *gin.Context, p *models.Paste, m models.ShareManifest,
 	return mw.Close()
 }
 
+type byteCounter int64
+
+func (c *byteCounter) Write(data []byte) (int, error) {
+	*c += byteCounter(len(data))
+	return len(data), nil
+}
+
+// shareResponseSize measures the exact multipart body before it is written.
+// The measurement pass uses no payload-sized buffer; only the write pass does.
+func shareResponseSize(boundary string, p *models.Paste, manifest []byte, m models.ShareManifest, parts map[string][]byte, content []byte) (int64, error) {
+	var size byteCounter
+	if err := writeShareMultipart(&size, boundary, p, manifest, m, parts, content); err != nil {
+		return 0, err
+	}
+	return int64(size), nil
+}
+
 func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 	p, ok := h.get(c)
 	if !ok {
@@ -300,19 +322,32 @@ func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 		shareError(c, 404, "not_found")
 		return
 	}
-	// Validate the full archive before the irreversible consume operation.
+	// Validate the full archive and measure the response before the
+	// irreversible consume operation.
 	m, parts, err := unpackShare(p, content)
 	if err != nil {
 		shareError(c, 500, "invalid_archive_or_size")
 		return
 	}
+	manifest, err := json.Marshal(m)
+	if err != nil {
+		shareError(c, 500, "invalid_archive_or_size")
+		return
+	}
+	boundary := shareBoundary()
+	size, sizeErr := shareResponseSize(boundary, p, manifest, m, parts, content)
 	if p.BurnAfterRead {
 		if _, _, err = h.service.ConsumePaste(p.ID); err != nil {
 			shareError(c, 404, "not_found_or_consumed")
 			return
 		}
 	}
-	if err := writeShareResponse(c, p, m, parts, content); err != nil {
+	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("Content-Type", "multipart/form-data; boundary="+boundary)
+	if sizeErr == nil {
+		c.Header("Content-Length", strconv.FormatInt(size, 10))
+	}
+	if err := writeShareMultipart(c.Writer, boundary, p, manifest, m, parts, content); err != nil {
 		// The response may be partial, so do not append JSON or replay consumption.
 		_ = c.Error(err)
 	}

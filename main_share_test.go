@@ -9,6 +9,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -107,6 +108,19 @@ func responseForm(t *testing.T, w *httptest.ResponseRecorder) *multipart.Form {
 	return form
 }
 
+// assertDeclaredLength proves the progress-bearing header matches the bytes
+// actually written; a mismatch would hang or truncate browser downloads.
+func assertDeclaredLength(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	declared := w.Header().Get("Content-Length")
+	if declared == "" {
+		t.Fatal("missing Content-Length")
+	}
+	if declared != strconv.Itoa(w.Body.Len()) {
+		t.Fatalf("Content-Length = %s, body = %d", declared, w.Body.Len())
+	}
+}
+
 func TestShareTextRoundTripAndOldRaw(t *testing.T) {
 	router := shareTestRouter(t, 1<<20, false)
 	text := "  中文\n末尾空行\n"
@@ -121,6 +135,7 @@ func TestShareTextRoundTripAndOldRaw(t *testing.T) {
 	if r.Code != 200 {
 		t.Fatal(r.Body.String())
 	}
+	assertDeclaredLength(t, r)
 	form := responseForm(t, r)
 	f, err := form.File["text"][0].Open()
 	if err != nil {
@@ -165,6 +180,7 @@ func TestShareRichBatchAndBurnArchive(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("receive %d %s", w.Code, w.Body.String())
 	}
+	assertDeclaredLength(t, w)
 	form := responseForm(t, w)
 	if len(form.File["html"]) != 1 || len(form.File["file"]) != 1 || len(form.File["archive"]) != 1 {
 		t.Fatalf("missing representations: %+v", form.File)

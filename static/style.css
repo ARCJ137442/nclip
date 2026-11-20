@@ -552,6 +552,19 @@ select:hover {
   background: var(--subtle);
 }
 
+.button.quiet {
+  min-height: 36px;
+  padding: 6px 10px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.button.quiet:hover {
+  color: var(--text);
+  background: var(--tint);
+}
+
 .button.danger {
   border-color: transparent;
   color: var(--danger);
@@ -665,6 +678,99 @@ select:hover {
 
 .draft-meter[data-over="true"] #draft-meter-fill {
   background: var(--danger);
+}
+
+.transfer {
+  margin-top: 18px;
+  padding: 14px 16px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius-small);
+  background: var(--subtle);
+}
+
+.transfer-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+}
+
+.transfer-phase {
+  color: var(--text);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.transfer-percent {
+  margin-left: auto;
+  color: var(--text);
+  font: 600 12.5px/1 var(--font-mono);
+}
+
+.transfer-track {
+  display: block;
+  height: 6px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+
+#transfer-fill,
+#receive-fill {
+  display: block;
+  width: 0;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+  transition: width 120ms linear;
+}
+
+/* Unknown total: movement shows life, never a fake percentage. */
+.transfer-track[data-unknown="true"] {
+  background: linear-gradient(
+    90deg,
+    var(--line) 0%,
+    var(--accent) 50%,
+    var(--line) 100%
+  );
+  background-size: 200% 100%;
+  animation: transfer-scan 1.2s linear infinite;
+}
+
+.transfer-track[data-unknown="true"] #transfer-fill,
+.transfer-track[data-unknown="true"] #receive-fill {
+  width: 0 !important;
+}
+
+.transfer-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 16px;
+  margin-top: 8px;
+  color: var(--muted);
+  font: 11px/1.4 var(--font-mono);
+}
+
+.transfer-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.transfer .hint {
+  margin-top: 8px;
+}
+
+@keyframes transfer-scan {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
 }
 
 .compose-grid {
@@ -1889,5 +1995,9 @@ footer a {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+
+  .transfer-track[data-unknown="true"] {
+    background: var(--line-strong);
   }
 }

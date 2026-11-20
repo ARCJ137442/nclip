@@ -34,6 +34,55 @@
               ></span>
             </div>
           </div>
+          <section id="transfer" class="transfer" hidden>
+            <div class="transfer-head">
+              <span id="transfer-phase" class="transfer-phase" data-i18n="transferUploading"
+                >正在上传</span
+              >
+              <strong id="transfer-percent" class="transfer-percent"></strong>
+              <button
+                id="transfer-cancel"
+                class="button quiet"
+                type="button"
+                data-i18n="cancelTransfer"
+              >
+                取消上传
+              </button>
+            </div>
+            <div
+              id="transfer-track"
+              class="transfer-track"
+              role="progressbar"
+              aria-valuemin="0"
+              aria-valuemax="100"
+              aria-valuenow="0"
+              aria-labelledby="transfer-phase"
+            >
+              <span id="transfer-fill"></span>
+            </div>
+            <div class="transfer-meta">
+              <span id="transfer-bytes"></span>
+              <span id="transfer-rate"></span>
+            </div>
+            <p id="transfer-note" class="hint" hidden></p>
+            <div id="transfer-actions" class="transfer-controls" hidden>
+              <button
+                id="transfer-retry"
+                class="button secondary"
+                type="button"
+                data-i18n="retryUpload"
+              >
+                重试上传</button
+              ><button
+                id="transfer-dismiss"
+                class="button quiet"
+                type="button"
+                data-i18n="dismiss"
+              >
+                关闭
+              </button>
+            </div>
+          </section>
           <fieldset id="draft-controls">
             <div class="compose-grid">
               <div class="editor-pane">

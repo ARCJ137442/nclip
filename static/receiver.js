@@ -1,7 +1,8 @@
 import { $, status, failure, authHeaders, renderItems } from "./ui.js";
 import { t, sizeLabel } from "./i18n.js";
 import { copyItem } from "./clipboard.js";
-import { request, decodeShare } from "./share-api.js";
+import { request, requestStream, decodeShare } from "./share-api.js";
+import { createProgress, timeParts } from "./transfer.js";
 import { access, can } from "./access.js";
 
 export function adaptReceiverNavigation() {
@@ -28,8 +29,49 @@ export async function startReceiver(slug) {
     busy = false,
     consumed = false,
     dead = false,
-    bundleURL = null;
+    bundleURL = null,
+    receiveController = null;
   const endpoint = `/api/v1/shares/${encodeURIComponent(slug)}`;
+  function etaLabel(seconds) {
+    const part = timeParts(seconds);
+    if (!part) return "";
+    return t(part.unit === "minutes" ? "timeMinutes" : "timeSeconds", {
+      count: part.count,
+    });
+  }
+  function paintReceive({ received, total, percent, rate, eta }) {
+    const track = $("receive-track");
+    $("receive-percent").textContent =
+      percent == null ? "" : `${Math.floor(percent)}%`;
+    $("receive-fill").style.width = percent == null ? "" : `${percent}%`;
+    track.dataset.unknown = String(percent == null);
+    // An indeterminate bar must not claim a value; only remove the attribute.
+    if (percent == null) track.removeAttribute("aria-valuenow");
+    else track.setAttribute("aria-valuenow", String(Math.floor(percent)));
+    $("receive-bytes").textContent =
+      total > 0
+        ? t("transferBytes", {
+            sent: sizeLabel(received),
+            total: sizeLabel(total),
+          })
+        : sizeLabel(received);
+    $("receive-rate").textContent =
+      rate > 0
+        ? `${t("transferRate", { rate: sizeLabel(rate) })}${
+            eta != null ? ` · ${t("transferEta", { time: etaLabel(eta) })}` : ""
+          }`
+        : "";
+  }
+  function setReceivePhase(phase) {
+    $("receive-progress").dataset.phase = phase;
+    $("receive-phase").textContent = t(
+      {
+        connecting: "receiveConnecting",
+        downloading: "receiveDownloading",
+        parsing: "receiveParsing",
+      }[phase] || "receiveConnecting",
+    );
+  }
   async function copy(item, plainOnly = false) {
     try {
       const result = await copyItem(item, { plainOnly });
@@ -76,15 +118,39 @@ export async function startReceiver(slug) {
     $("receive").disabled = true;
     $("receive").setAttribute("aria-busy", "true");
     $("retry").hidden = true;
+    const burn = !!metadata?.burn_after_read;
+    // A one-time transfer cannot be resumed; offering cancel would only
+    // invite data loss. Ordinary shares keep their server copy.
+    $("receive-cancel").hidden = burn;
+    $("receive-note").hidden = !burn;
+    if (burn) $("receive-note").textContent = t("receiveOneTimeNote");
+    $("receive-progress").hidden = false;
+    setReceivePhase("connecting");
+    paintReceive({ received: 0, total: 0, percent: 0 });
     status(consume ? "receiving" : "loading");
+    const clock = createProgress();
+    clock.begin();
+    const controller = new AbortController();
+    receiveController = controller;
     try {
-      const response = await request(
+      const response = await requestStream(
         endpoint + (consume ? "/receive" : "/content"),
         consume ? { method: "POST", headers: { "X-Nclip-Confirm": "1" } } : {},
+        {
+          signal: controller.signal,
+          onProgress: ({ received, total }) => {
+            setReceivePhase("downloading");
+            paintReceive(clock.update(received, total));
+          },
+        },
       );
+      setReceivePhase("parsing");
+      // Let the phase change paint before the multipart parser takes over.
+      await new Promise((resolve) => requestAnimationFrame(resolve));
       const decoded = await decodeShare(response);
       items = decoded.items;
       consumed = consume && metadata.burn_after_read;
+      $("receive-progress").hidden = true;
       $("receive-gate").hidden = true;
       await render();
       details();
@@ -107,21 +173,36 @@ export async function startReceiver(slug) {
         }
       } else status("");
     } catch (error) {
-      failure(error);
-      if (!consume) $("retry").hidden = false;
-      else if (error.status === 0 || !error.status) {
-        dead = true;
-        status("oneTimeNetwork", "error");
-      } else if (error.status === 404) {
-        dead = true;
+      $("receive-progress").hidden = true;
+      if (error.message === "aborted") {
+        if (burn) {
+          dead = true;
+          status("oneTimeNetwork", "error");
+        } else {
+          status("receiveCanceled", "error");
+          $("retry").hidden = false;
+        }
+      } else {
+        failure(error);
+        if (!consume) $("retry").hidden = false;
+        else if (error.status === 0 || !error.status) {
+          dead = true;
+          status("oneTimeNetwork", "error");
+        } else if (error.status === 404) {
+          dead = true;
+        }
       }
     } finally {
+      receiveController = null;
       busy = false;
       $("receive").disabled = dead;
       $("receive").removeAttribute("aria-busy");
     }
   }
   $("receive").addEventListener("click", () => load(true));
+  $("receive-cancel").addEventListener("click", () =>
+    receiveController?.abort(),
+  );
   $("retry").addEventListener("click", () => load());
   $("delete-share").addEventListener("click", async () => {
     if (!confirm(t("deleteConfirm"))) return;
@@ -147,6 +228,13 @@ export async function startReceiver(slug) {
   window.addEventListener("preferenceschange", () => {
     details();
     void render();
+    // The phase replaced the markup's i18n default; re-render it in the newly
+    // selected language instead of leaving a stale translation.
+    if (!$("receive-progress").hidden) {
+      setReceivePhase($("receive-progress").dataset.phase || "connecting");
+      if (metadata?.burn_after_read && !$("receive-note").hidden)
+        $("receive-note").textContent = t("receiveOneTimeNote");
+    }
   });
   window.addEventListener("pagehide", () => {
     if (bundleURL) URL.revokeObjectURL(bundleURL);

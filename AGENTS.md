@@ -27,7 +27,7 @@ Run `node scripts/check-public-docs.mjs` before publishing documentation/artifac
   and drain old auth-off workers; never expose an unguarded old application.
 
 Run vet, formatting, `go test -race ./...`, golangci-lint, and
-`node --test scripts/clipboard.test.mjs scripts/accounts.test.mjs`.
+`node --test scripts/clipboard.test.mjs scripts/accounts.test.mjs scripts/transfer.test.mjs`.
 Linux CI/image export: `.github/workflows/share-preview.yml`.
 References in `Documents/`: `ACCOUNTS.md` (model/API), `ARC-SHARING.md` (protocol,
 storage), `INTEGRATION-TESTS.md` (isolated tests), `OPERATIONS.zh-CN.md` (manual

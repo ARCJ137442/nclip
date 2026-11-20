@@ -6,6 +6,7 @@ The maintained source is the `ARCJ137442/nclip` fork. The supported filesystem d
 
 - One composer accepts typed text, clipboard text/HTML/PNG, pasted `File` objects, dropped files and multi-file selection. Enter inserts a newline; Ctrl/Cmd+Enter sends, except during IME composition.
 - A send creates one URL for the entire message. Upload success and clipboard-write success are separate states. Failed uploads retain the draft; unknown upload outcomes are never automatically retried.
+- Large transfers are observable: uploads report sent bytes, rate and remaining time and can be canceled or retried, and downloads report received bytes plus a percentage when the response declares its length. The composer snapshots the sent content, so editing can continue during an upload; a finished link is shown without discarding the newer draft.
 - Clipboard suggestions are opt-in. Automatic reads require an existing browser grant and a focused, visible page. Other browsers retain explicit Paste and native paste. Own share links are suppressed without storing clipboard contents.
 - Clipboard HTML is stored as a representation and never inserted as live page HTML. Raw responses have a sandbox CSP and `nosniff` header. Preview images use local Blob URLs.
 - Language and appearance independently support system/explicit selection. Unmatched system languages fall back to Chinese. Only preferences use localStorage; credentials, drafts and clipboard contents do not.
@@ -25,6 +26,8 @@ Account settings may also give each user an optional per-upload content cap thro
 | `POST /api/v1/shares/:slug/receive` | Requires `X-Nclip-Confirm: 1`. Validates the entire stored message, consumes a one-time share, then returns its multipart content. |
 
 Creation accepts `X-Burn: true` and the existing `X-TTL` duration contract (1h–168h). Without an override the configured TTL is authoritative. The request body, including multipart framing, is bounded separately from the logical binary total. In account mode, managers configure the browser share content quota from 1–100 MiB, bounded by `NCLIP_BUFFER_SIZE`. The request boundary reserves space for the manifest and multipart framing. In account mode, the multipart request boundary reserves space for the manifest and framing, and the logical binary total is limited by the server limit, the global browser-share setting for users with a per-user cap, and that user's cap. Users without a per-user cap are limited by the server value. Other upload routes combine the server limit with the account's optional cap. The default item limit is 32 and the manifest limit is 64 KiB. No automatic retry/idempotency guarantee is claimed.
+
+Content responses declare `Content-Length` whenever the body can be measured. The length comes from the same multipart framing that is written, so clients can render determinate download progress without buffering a second copy. Clients must still handle an absent or unknown length by showing received bytes without a percentage.
 
 Example manifest (part sizes/encoding/archive paths are assigned by the server):
 
@@ -48,7 +51,7 @@ The existing `{slug}` content plus `{slug}.json` metadata layout is retained. An
 
 Browser `GET /:slug` displays metadata only for one-time content. It does not load a thumbnail/body, increment reads or delete the message. A confirmed receive and direct legacy raw/CLI reads share `PasteService.ConsumePaste`; a bounded set of lock stripes covers fresh metadata lookup, complete read, size verification and deletion. Only one destructive reader succeeds in the current single-instance deployment.
 
-Deletion precedes response delivery. An interrupted network response may be unrecoverable. A fully received message stays in page memory for copy/download retries; this does not restore a server copy. A browser clipboard permission refusal must never be reported as a successful copy. Multiple native clipboard objects and app-specific OS formats are not promised.
+Deletion precedes response delivery. An interrupted network response may be unrecoverable. A fully received message stays in page memory for copy/download retries; this does not restore a server copy. A browser clipboard permission refusal must never be reported as a successful copy. Multiple native clipboard objects and app-specific OS formats are not promised. The receive UI offers cancellation only for ordinary shares, whose server copy survives; a one-time transfer has no cancel action because aborting it would destroy content that cannot be fetched again.
 
 ## Verification and release
 
@@ -57,7 +60,7 @@ go fmt ./...
 go vet ./...
 go test -race ./...
 golangci-lint run
-node --test scripts/clipboard.test.mjs
+node --test scripts/clipboard.test.mjs scripts/accounts.test.mjs scripts/transfer.test.mjs
 # Playwright installed separately; use only an isolated test instance:
 NCLIP_TEST_URL=http://127.0.0.1:18080 node scripts/browser-test.mjs
 ```

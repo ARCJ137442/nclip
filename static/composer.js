@@ -10,7 +10,8 @@ import {
   copyText,
   draggedLinks,
 } from "./clipboard.js";
-import { request, encodeShare } from "./share-api.js";
+import { request, uploadShare, encodeShare } from "./share-api.js";
+import { createProgress, timeParts } from "./transfer.js";
 
 export async function startComposer() {
   const editor = $("message");
@@ -20,6 +21,10 @@ export async function startComposer() {
     candidate = [],
     readingVersion = 0,
     sending = false,
+    draftRevision = 0,
+    fullySent = false,
+    lastAttempt = null,
+    transferController = null,
     lastCopiedURL = "";
   function draft() {
     return [
@@ -58,16 +63,74 @@ export async function startComposer() {
     $("draft-meter").dataset.over = String(max > 0 && size > max);
   }
   function changed() {
+    // Revision, not a transient flag: edits made before a retry still count,
+    // so a retried snapshot can never discard the newer draft on success.
+    draftRevision++;
     hideCandidate();
     $("path-hint").hidden = !/^(?:[A-Za-z]:[\\/]|\\\\|file:\/\/)/.test(
       editor.value.trim(),
     );
     updateDraftMeter();
   }
+  function etaLabel(seconds) {
+    const part = timeParts(seconds);
+    if (!part) return "";
+    return t(part.unit === "minutes" ? "timeMinutes" : "timeSeconds", {
+      count: part.count,
+    });
+  }
+  function paintTransfer({ received, total, percent, rate, eta }) {
+    const track = $("transfer-track");
+    $("transfer-percent").textContent =
+      percent == null ? "" : `${Math.floor(percent)}%`;
+    $("transfer-fill").style.width = percent == null ? "" : `${percent}%`;
+    track.dataset.unknown = String(percent == null);
+    // An indeterminate bar must not claim a value; only remove the attribute.
+    if (percent == null) track.removeAttribute("aria-valuenow");
+    else track.setAttribute("aria-valuenow", String(Math.floor(percent)));
+    $("transfer-bytes").textContent =
+      total > 0
+        ? t("transferBytes", {
+            sent: sizeLabel(received),
+            total: sizeLabel(total),
+          })
+        : sizeLabel(received);
+    $("transfer-rate").textContent =
+      rate > 0
+        ? `${t("transferRate", { rate: sizeLabel(rate) })}${
+            eta != null ? ` · ${t("transferEta", { time: etaLabel(eta) })}` : ""
+          }`
+        : "";
+  }
+  function setTransferPhase(phase) {
+    $("transfer").dataset.phase = phase;
+    $("transfer-phase").textContent = t(
+      {
+        uploading: "transferUploading",
+        saving: "transferSaving",
+        error: "transferFailed",
+        canceled: "transferCanceled",
+      }[phase] || "transferUploading",
+    );
+    $("transfer-cancel").hidden = !["uploading", "saving"].includes(phase);
+    $("transfer-actions").hidden = !["error", "canceled"].includes(phase);
+    $("transfer-note").hidden = !["error", "canceled"].includes(phase);
+    if (phase === "saving") {
+      $("transfer-track").dataset.unknown = "true";
+      $("transfer-track").removeAttribute("aria-valuenow");
+      $("transfer-percent").textContent = "";
+      $("transfer-rate").textContent = "";
+    }
+    if (phase === "error") $("transfer-note").textContent = t("transferFailedNote");
+    // Only a fully handed-off body can have reached the server.
+    if (phase === "canceled")
+      $("transfer-note").textContent = t(
+        fullySent ? "transferCanceledNote" : "transferCanceledEarly",
+      );
+  }
   async function renderDraft() {
     await renderItems($("draft-items"), attachments, {
       remove: (index) => {
-        if (sending) return;
         attachments.splice(index, 1);
         void renderDraft();
         changed();
@@ -83,7 +146,6 @@ export async function startComposer() {
     updateDraftMeter();
   }
   async function append(items) {
-    if (sending) return;
     const max = config?.max_items || 32;
     if (draft().length + items.length > max) {
       status("tooMany", "error", { count: max });
@@ -105,7 +167,7 @@ export async function startComposer() {
   }
   async function probe(automatic) {
     if (
-      sending ||
+      (automatic && sending) ||
       $("composer").hidden ||
       (automatic && (!preferences.suggestions || draft().length))
     )
@@ -114,7 +176,8 @@ export async function startComposer() {
     if (!automatic) status("reading");
     try {
       const items = await readClipboard({ automatic });
-      if (version !== readingVersion || sending || $("composer").hidden) return;
+      if (version !== readingVersion || (automatic && sending) || $("composer").hidden)
+        return;
       if (!items.length) {
         if (!automatic) status("unsupported", "error");
         return;
@@ -164,13 +227,8 @@ export async function startComposer() {
       status("copyFailed", "error");
     }
   }
-  async function send(useCandidate = false) {
+  async function runUpload(items, revision = draftRevision) {
     if (sending) return;
-    const items = useCandidate
-      ? candidate
-      : draft().length
-        ? draft()
-        : candidate;
     if (!items.length) {
       status("empty", "error");
       editor.focus();
@@ -184,7 +242,6 @@ export async function startComposer() {
       status("tooMany", "error", { count: config.max_items });
       return;
     }
-    const form = encodeShare(items);
     // Request framing counts toward the proxy limit too; the server remains authoritative.
     if (
       items.reduce(
@@ -195,45 +252,96 @@ export async function startComposer() {
       status("tooLarge", "error", { size: sizeLabel(config.upload_max_bytes) });
       return;
     }
+    const form = encodeShare(items);
+    // The revision travels with the snapshot so a retry can tell whether the
+    // draft still holds exactly the content being sent.
+    lastAttempt = { items, revision };
+    fullySent = false;
     sending = true;
     invalidateRead();
-    $("draft-controls").disabled = true;
+    // The sent content is a snapshot: the editor stays usable for the next
+    // message while this transfer runs, and edits never change what is sent.
+    $("send").disabled = true;
     $("send-candidate").disabled = true;
     $("send").setAttribute("aria-busy", "true");
+    $("result").hidden = true;
+    $("new-share").hidden = false;
+    $("transfer").hidden = false;
+    setTransferPhase("uploading");
+    paintTransfer({ received: 0, total: 0, percent: 0 });
     status("uploading");
+    const clock = createProgress();
+    clock.begin();
+    const controller = new AbortController();
+    transferController = controller;
+    let painted = 0;
     try {
-      const response = await request("/api/v1/shares", {
-        method: "POST",
-        headers: {
+      const result = await uploadShare(
+        form,
+        {
           ...authHeaders(),
           "X-Burn": String($("burn").checked),
           "X-Nclip-Visibility": $("public-share").checked
             ? "public"
             : "authenticated",
         },
-        body: form,
-      });
-      const result = await response.json();
+        {
+          signal: controller.signal,
+          onProgress: ({ loaded, total }) => {
+            const at = performance.now();
+            if (loaded < total && at - painted < 100) return;
+            painted = at;
+            paintTransfer(clock.update(loaded, total));
+            if (total > 0 && loaded >= total) {
+              fullySent = true;
+              setTransferPhase("saving");
+            }
+          },
+        },
+      );
+      if (!result?.url) throw new Error("failed");
       $("share-url").value = result.url;
       $("open-share").href = result.url;
       $("open-share").hidden =
         access.enabled && !can("download") && !result.public;
-      $("composer").hidden = true;
-      $("result").hidden = false;
-      $("result-message").textContent = t("sentManual");
       $("native-share").hidden = !navigator.share;
+      $("transfer").hidden = true;
       hideCandidate();
-      $("result").focus({ preventScroll: true });
-      status("sent", "success");
-      await copyLink();
+      $("result").hidden = false;
+      if (draftRevision !== revision) {
+        // The draft no longer matches the sent snapshot: keep it visible,
+        // do not steal focus, and do not overwrite the clipboard.
+        $("new-share").hidden = true;
+        $("result-message").textContent = t("sentBackground");
+        status("sent", "success");
+      } else {
+        $("composer").hidden = true;
+        $("result-message").textContent = t("sentManual");
+        $("result").focus({ preventScroll: true });
+        status("sent", "success");
+        await copyLink();
+      }
     } catch (error) {
-      failure(error, config);
+      if (error.message === "aborted") {
+        setTransferPhase("canceled");
+        status("transferCanceled", "error");
+      } else {
+        setTransferPhase("error");
+        failure(error, config);
+      }
     } finally {
+      transferController = null;
       sending = false;
-      $("draft-controls").disabled = false;
+      $("send").disabled = false;
       $("send-candidate").disabled = false;
       $("send").removeAttribute("aria-busy");
     }
+  }
+  async function send(useCandidate = false) {
+    if (sending) return;
+    await runUpload(
+      useCandidate ? candidate : draft().length ? draft() : candidate,
+    );
   }
   editor.addEventListener("input", () => {
     rich = null;
@@ -261,6 +369,17 @@ export async function startComposer() {
   });
   $("send").addEventListener("click", () => send());
   $("send-candidate").addEventListener("click", () => send(true));
+  $("transfer-cancel").addEventListener("click", () =>
+    transferController?.abort(),
+  );
+  $("transfer-retry").addEventListener("click", () => {
+    if (!sending && lastAttempt)
+      void runUpload(lastAttempt.items, lastAttempt.revision);
+  });
+  $("transfer-dismiss").addEventListener("click", () => {
+    $("transfer").hidden = true;
+    status("");
+  });
   $("copy-link").addEventListener("click", copyLink);
   $("native-share").addEventListener("click", async () => {
     try {
@@ -376,6 +495,12 @@ export async function startComposer() {
     dragDepth = 0;
     $("drop-overlay").hidden = true;
   });
+  // Navigation aborts the request. Ask before discarding an active transfer.
+  window.addEventListener("beforeunload", (event) => {
+    if (!sending) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
   window.addEventListener("focus", () => probe(true));
   $("suggestions").addEventListener("change", () => {
     if (preferences.suggestions) void probe(false); // Enabling is an explicit read gesture.
@@ -388,6 +513,10 @@ export async function startComposer() {
     if (!preferences.suggestions) hideCandidate();
     else void probe(true);
     void renderDraft();
+    // The phase text replaced the markup's i18n default; re-render it in the
+    // newly selected language instead of leaving a stale translation.
+    if (!$("transfer").hidden)
+      setTransferPhase($("transfer").dataset.phase || "uploading");
   });
   try {
     config = await (await request("/api/v1/ui-config")).json();
