@@ -262,29 +262,40 @@ func validateDatabase(state database) error {
 	if state.Version != accountDatabaseVersion || state.Users == nil || len(state.Users) == 0 || len(state.Users) > maxUsers || state.Sessions == nil || state.AdminID == "" {
 		return fmt.Errorf("invalid account database")
 	}
-	admin, ok := state.Users[state.AdminID]
-	if !ok || admin.Disabled || !admin.Permissions.Manage || !admin.Permissions.Upload || !admin.Permissions.Download || admin.UploadLimitBytes != nil {
+	if !validAdministrator(state) {
 		return fmt.Errorf("invalid administrator account")
 	}
 	seenNames := make(map[string]struct{}, len(state.Users))
 	for id, user := range state.Users {
-		if id == "" || user.ID != id {
-			return fmt.Errorf("invalid account identifier")
+		if err := validateAccount(state, id, user, seenNames); err != nil {
+			return err
 		}
-		name, err := normalizeUsername(user.Username)
-		if err != nil || name != user.Username {
-			return fmt.Errorf("invalid username for account %q", user.ID)
-		}
-		if _, exists := seenNames[name]; exists {
-			return fmt.Errorf("duplicate account username %q", name)
-		}
-		seenNames[name] = struct{}{}
-		if id != state.AdminID && user.Permissions.Manage {
-			return fmt.Errorf("multiple account managers are not allowed")
-		}
-		if user.UploadLimitBytes != nil && (*user.UploadLimitBytes < MinUploadLimitBytes || *user.UploadLimitBytes > MaxUploadLimitBytes || *user.UploadLimitBytes%MinUploadLimitBytes != 0) {
-			return fmt.Errorf("invalid upload limit for account %q", user.Username)
-		}
+	}
+	return nil
+}
+
+func validAdministrator(state database) bool {
+	admin, ok := state.Users[state.AdminID]
+	return ok && !admin.Disabled && admin.Permissions.Manage && admin.Permissions.Upload && admin.Permissions.Download && admin.UploadLimitBytes == nil
+}
+
+func validateAccount(state database, id string, user record, seenNames map[string]struct{}) error {
+	if id == "" || user.ID != id {
+		return fmt.Errorf("invalid account identifier")
+	}
+	name, err := normalizeUsername(user.Username)
+	if err != nil || name != user.Username {
+		return fmt.Errorf("invalid username for account %q", user.ID)
+	}
+	if _, exists := seenNames[name]; exists {
+		return fmt.Errorf("duplicate account username %q", name)
+	}
+	seenNames[name] = struct{}{}
+	if id != state.AdminID && user.Permissions.Manage {
+		return fmt.Errorf("multiple account managers are not allowed")
+	}
+	if user.UploadLimitBytes != nil && !validUploadLimit(*user.UploadLimitBytes) {
+		return fmt.Errorf("invalid upload limit for account %q", user.Username)
 	}
 	return nil
 }
@@ -448,10 +459,8 @@ func (s *Store) SaveUser(actorID string, change UserChange) (User, error) {
 	if err := s.requireManager(actorID); err != nil {
 		return User{}, err
 	}
-	for key, u := range s.state.Users {
-		if key != change.ID && u.Username == name {
-			return User{}, ErrInput("username_exists")
-		}
+	if err := s.ensureUsernameAvailable(change.ID, name); err != nil {
+		return User{}, err
 	}
 	u, err := s.editRecord(change.ID, hash)
 	if err != nil {
@@ -460,29 +469,9 @@ func (s *Store) SaveUser(actorID string, change UserChange) (User, error) {
 	if change.ID != "" && u.Version != change.Version {
 		return User{}, ErrInput("user_changed")
 	}
-	if change.UploadLimitSet && change.UploadLimitBytes != nil && !validUploadLimit(*change.UploadLimitBytes) {
-		return User{}, ErrInput("upload_limit_out_of_range")
+	if err := applyUserChange(s.state.AdminID, change, name, &u); err != nil {
+		return User{}, err
 	}
-	if u.ID == s.state.AdminID {
-		if name != u.Username || change.Disabled || !change.Permissions.Upload || !change.Permissions.Download || !change.Permissions.Manage || change.UploadLimitSet && change.UploadLimitBytes != nil {
-			return User{}, ErrInput("admin_immutable")
-		}
-		u.UploadLimitBytes = nil
-	} else {
-		if change.Permissions.Manage {
-			return User{}, ErrInput("admin_exists")
-		}
-		if change.UploadLimitSet {
-			u.UploadLimitBytes = cloneLimit(change.UploadLimitBytes)
-		} else if change.ID == "" {
-			quota := DefaultUploadLimitBytes
-			u.UploadLimitBytes = &quota
-		}
-	}
-	u.Username = name
-	u.Permissions = change.Permissions
-	u.Disabled = change.Disabled
-	u.Version++
 	next := s.clone()
 	next.Users[u.ID] = u
 	revokeSessions(&next, u.ID)
@@ -490,6 +479,53 @@ func (s *Store) SaveUser(actorID string, change UserChange) (User, error) {
 		return User{}, err
 	}
 	return cloneUser(u.User), nil
+}
+
+func (s *Store) ensureUsernameAvailable(id, name string) error {
+	for key, u := range s.state.Users {
+		if key != id && u.Username == name {
+			return ErrInput("username_exists")
+		}
+	}
+	return nil
+}
+
+// applyUserChange enforces the administrator and quota invariants before the
+// caller publishes the record.
+func applyUserChange(adminID string, change UserChange, name string, u *record) error {
+	if change.UploadLimitSet && change.UploadLimitBytes != nil && !validUploadLimit(*change.UploadLimitBytes) {
+		return ErrInput("upload_limit_out_of_range")
+	}
+	if u.ID == adminID {
+		if !validAdministratorChange(change, name, u) {
+			return ErrInput("admin_immutable")
+		}
+		u.UploadLimitBytes = nil
+	} else if err := applyNonAdministratorChange(change, u); err != nil {
+		return err
+	}
+	u.Username = name
+	u.Permissions = change.Permissions
+	u.Disabled = change.Disabled
+	u.Version++
+	return nil
+}
+
+func validAdministratorChange(change UserChange, name string, u *record) bool {
+	return name == u.Username && !change.Disabled && change.Permissions.Upload && change.Permissions.Download && change.Permissions.Manage && (!change.UploadLimitSet || change.UploadLimitBytes == nil)
+}
+
+func applyNonAdministratorChange(change UserChange, u *record) error {
+	if change.Permissions.Manage {
+		return ErrInput("admin_exists")
+	}
+	if change.UploadLimitSet {
+		u.UploadLimitBytes = cloneLimit(change.UploadLimitBytes)
+	} else if change.ID == "" {
+		quota := DefaultUploadLimitBytes
+		u.UploadLimitBytes = &quota
+	}
+	return nil
 }
 
 func (s *Store) requireManager(id string) error {

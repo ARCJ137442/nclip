@@ -277,7 +277,7 @@ func (h *AccountHandler) Gate() gin.HandlerFunc {
 			return
 		}
 		permission := requiredPermission(c)
-		if !(permission == "download" && h.publicShare(c)) && !allowed(user, permission) {
+		if (permission != "download" || !h.publicShare(c)) && !allowed(user, permission) {
 			h.forbidden(c)
 			return
 		}

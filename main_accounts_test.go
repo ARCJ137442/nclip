@@ -138,14 +138,37 @@ func TestAccountsPermissionMatrixAndPublicShares(t *testing.T) {
 	upload := signIn(t, router, "uploadonly", "test-user-password")
 	download := signIn(t, router, "downloadonly", "test-user-password")
 	manager := admin
-	for _, client := range []accountClient{upload, download} {
+	assertUserManagementDenied(t, upload, download)
+	assertReaderCannotUpload(t, download)
+	assertAdministratorCanStoreAndList(t, manager)
+	assertInvalidUserCapRejected(t, manager, uploadID, downloadID)
+	private := accountLegacyPaste(t, upload, false)
+	assertPrivateShareAccess(t, router, upload, download, manager, private)
+	public := accountLegacyPaste(t, upload, true)
+	assertPublicShareAccessible(t, router, public)
+	if w := manager.call("GET", "/api/v1/admin/shares", nil, false); w.Code != 200 || strings.Contains(w.Body.String(), "password_hash") {
+		t.Fatal("bad administration listing")
+	}
+}
+
+func assertUserManagementDenied(t *testing.T, clients ...accountClient) {
+	t.Helper()
+	for _, client := range clients {
 		if w := client.call("GET", "/api/v1/users", nil, false); w.Code != 403 {
 			t.Fatalf("user management leaked %d", w.Code)
 		}
 	}
-	if w := download.call("POST", "/", nil, true); w.Code != 403 {
+}
+
+func assertReaderCannotUpload(t *testing.T, reader accountClient) {
+	t.Helper()
+	if w := reader.call("POST", "/", nil, true); w.Code != 403 {
 		t.Fatalf("reader uploaded %d", w.Code)
 	}
+}
+
+func assertAdministratorCanStoreAndList(t *testing.T, manager accountClient) {
+	t.Helper()
 	adminPaste := accountLegacyPaste(t, manager, false)
 	if w := manager.call("GET", "/raw/"+adminPaste, nil, false); w.Code != http.StatusOK {
 		t.Fatalf("administrator upload permission did not store content: %d", w.Code)
@@ -153,33 +176,40 @@ func TestAccountsPermissionMatrixAndPublicShares(t *testing.T) {
 	if w := manager.call("GET", "/api/v1/users", nil, false); w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
+}
+
+func assertInvalidUserCapRejected(t *testing.T, manager accountClient, uploadID, downloadID string) {
+	t.Helper()
 	for _, id := range []string{uploadID, downloadID} {
 		w := manager.call("PUT", "/api/v1/users/"+id, gin.H{"username": map[string]string{uploadID: "uploadonly", downloadID: "downloadonly"}[id], "permissions": gin.H{"upload": id == uploadID, "download": id == downloadID}, "upload_limit_bytes": int64(1024), "version": 1}, true)
 		if w.Code != 400 {
 			t.Fatalf("invalid user cap returned %d: %s", w.Code, w.Body.String())
 		}
 	}
-	private := accountLegacyPaste(t, upload, false)
-	for _, client := range []accountClient{upload, {router: router}} {
+}
+
+func assertPrivateShareAccess(t *testing.T, router http.Handler, owner, reader, manager accountClient, private string) {
+	t.Helper()
+	for _, client := range []accountClient{owner, {router: router}} {
 		if w := client.call("GET", "/raw/"+private, nil, false); w.Code == 200 {
 			t.Fatal("private content leaked")
 		}
 	}
-	if w := download.call("GET", "/raw/"+private, nil, false); w.Code != 200 {
+	if w := reader.call("GET", "/raw/"+private, nil, false); w.Code != 200 {
 		t.Fatalf("reader failed %d", w.Code)
 	}
 	if w := manager.call("GET", "/raw/"+private, nil, false); w.Code != 200 {
 		t.Fatalf("administrator read failed %d", w.Code)
 	}
-	if w := download.call("DELETE", "/"+private, nil, true); w.Code != 403 {
+	if w := reader.call("DELETE", "/"+private, nil, true); w.Code != 403 {
 		t.Fatal("reader deleted content")
 	}
-	public := accountLegacyPaste(t, upload, true)
+}
+
+func assertPublicShareAccessible(t *testing.T, router http.Handler, public string) {
+	t.Helper()
 	if w := (accountClient{router: router}).call("GET", "/raw/"+public, nil, false); w.Code != 200 {
 		t.Fatalf("public share blocked %d", w.Code)
-	}
-	if w := manager.call("GET", "/api/v1/admin/shares", nil, false); w.Code != 200 || strings.Contains(w.Body.String(), "password_hash") {
-		t.Fatal("bad administration listing")
 	}
 }
 
@@ -297,11 +327,11 @@ func accountShareRequest(router http.Handler, client accountClient, size int) *h
 
 func TestPerUserUploadLimitBrowserShares(t *testing.T) {
 	router := accountRouter(t)
-	admin, uploader, _, _, uploadID := accountSignupClients(t, router)
+	admin, _, _, _, uploadID := accountSignupClients(t, router)
 	if response := admin.call("PUT", "/api/v1/users/"+uploadID, gin.H{"username": "smallupload", "permissions": gin.H{"upload": true}, "upload_limit_bytes": 2 * config.MiB, "version": 2}, true); response.Code != http.StatusOK {
 		t.Fatalf("raise user quota above global setting %d: %s", response.Code, response.Body.String())
 	}
-	uploader = signIn(t, router, "smallupload", "test-user-password")
+	uploader := signIn(t, router, "smallupload", "test-user-password")
 	if response := admin.call("PUT", "/api/v1/settings/upload", gin.H{"upload_limit_mib": 1, "revision": 0}, true); response.Code != http.StatusOK {
 		t.Fatalf("set low global share limit %d: %s", response.Code, response.Body.String())
 	}

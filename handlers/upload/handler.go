@@ -112,26 +112,44 @@ func tooLargeReadError(err error) bool {
 	return errors.As(err, &maxBytesError) || strings.Contains(strings.ToLower(err.Error()), "request body too large") || strings.Contains(strings.ToLower(err.Error()), "message too large")
 }
 
-func (h *Handler) readUploadContent(c *gin.Context) ([]byte, string, string, error) {
+func isMultipartContentType(contentTypeHeader string) bool {
+	return strings.HasPrefix(contentTypeHeader, "multipart/form-data")
+}
+
+// uploadRequestLimit returns the configured limit and whether the middleware
+// installed a per-request override that must be enforced with MaxBytesReader.
+func (h *Handler) uploadRequestLimit(c *gin.Context) (int64, bool) {
 	limit := h.config.BufferSize
-	_, requestLimited := c.Get(config.RequestUploadLimitKey)
-	if configured, ok := c.Get(config.RequestUploadLimitKey); ok {
-		if effective, valid := configured.(int64); valid && effective > 0 {
-			limit = effective
-		}
+	configured, requestLimited := c.Get(config.RequestUploadLimitKey)
+	if effective, valid := configured.(int64); valid && effective > 0 {
+		limit = effective
 	}
-	contentTypeHeader := c.Request.Header.Get("Content-Type")
-	isMultipart := strings.HasPrefix(contentTypeHeader, "multipart/form-data")
-	base64Enabled := headerEnabled(c, "X-Base64")
+	return limit, requestLimited
+}
+
+// requestSizeLimit expands the content limit for encoded and multipart bodies.
+func requestSizeLimit(limit int64, multipart, base64Enabled bool) (int64, error) {
 	requestLimit := limit
 	if base64Enabled {
 		requestLimit = encodedBase64Limit(limit)
 	}
-	if isMultipart {
+	if multipart {
 		requestLimit = addLimit(requestLimit, config.MultipartOverheadBytes)
 	}
 	if requestLimit <= 0 {
-		return nil, "", "", fmt.Errorf("invalid buffer size configuration: %d", requestLimit)
+		return 0, fmt.Errorf("invalid buffer size configuration: %d", requestLimit)
+	}
+	return requestLimit, nil
+}
+
+func (h *Handler) readUploadContent(c *gin.Context) ([]byte, string, string, error) {
+	contentTypeHeader := c.Request.Header.Get("Content-Type")
+	multipart := isMultipartContentType(contentTypeHeader)
+	base64Enabled := headerEnabled(c, "X-Base64")
+	limit, requestLimited := h.uploadRequestLimit(c)
+	requestLimit, err := requestSizeLimit(limit, multipart, base64Enabled)
+	if err != nil {
+		return nil, "", "", err
 	}
 	if c.Request.ContentLength > requestLimit {
 		return nil, "", "", fmt.Errorf("content too large: request exceeds limit of %d bytes", requestLimit)
@@ -143,9 +161,8 @@ func (h *Handler) readUploadContent(c *gin.Context) ([]byte, string, string, err
 	var content []byte
 	var filename string
 	var contentType string
-	var err error
 
-	if contentTypeHeader != "" && strings.HasPrefix(contentTypeHeader, "multipart/form-data") {
+	if multipart {
 		content, filename, contentType, err = h.readMultipartUpload(c, limit)
 	} else {
 		content, filename, contentType, err = h.readDirectUpload(c, limit)
@@ -160,33 +177,38 @@ func (h *Handler) readUploadContent(c *gin.Context) ([]byte, string, string, err
 
 	// Check if content is base64 encoded
 	// Semantics: header presence enables base64 unless explicitly set to 0/false/no
-	if headerEnabled(c, "X-Base64") {
-		decoded, decodeErr := h.decodeBase64Content(content)
-		if decodeErr != nil {
-			return nil, filename, contentType, decodeErr
-		}
-
-		// Validate decoded content size
-		if int64(len(decoded)) > limit {
-			return nil, filename, contentType, fmt.Errorf("decoded content too large: %d bytes exceeds limit of %d bytes", len(decoded), limit)
-		}
-
-		// Validate decoded content is not empty
-		if len(decoded) == 0 {
-			return nil, filename, contentType, fmt.Errorf("decoded content is empty")
-		}
-
-		// Re-detect content type based on decoded content
-		contentType = utils.DetectContentType(filename, decoded)
-
-		if utils.IsDebugEnabled() {
-			log.Printf("[DEBUG] Base64 decoded: %d bytes → %d bytes", len(content), len(decoded))
-		}
-
-		return decoded, filename, contentType, nil
+	if base64Enabled {
+		return h.decodeUploadedContent(content, filename, contentType, limit)
 	}
 
 	return content, filename, contentType, nil
+}
+
+// decodeUploadedContent decodes a base64 body and validates the decoded size.
+func (h *Handler) decodeUploadedContent(content []byte, filename, contentType string, limit int64) ([]byte, string, string, error) {
+	decoded, err := h.decodeBase64Content(content)
+	if err != nil {
+		return nil, filename, contentType, err
+	}
+
+	// Validate decoded content size
+	if int64(len(decoded)) > limit {
+		return nil, filename, contentType, fmt.Errorf("decoded content too large: %d bytes exceeds limit of %d bytes", len(decoded), limit)
+	}
+
+	// Validate decoded content is not empty
+	if len(decoded) == 0 {
+		return nil, filename, contentType, fmt.Errorf("decoded content is empty")
+	}
+
+	// Re-detect content type based on decoded content
+	contentType = utils.DetectContentType(filename, decoded)
+
+	if utils.IsDebugEnabled() {
+		log.Printf("[DEBUG] Base64 decoded: %d bytes → %d bytes", len(content), len(decoded))
+	}
+
+	return decoded, filename, contentType, nil
 }
 
 // decodeBase64Content decodes base64 encoded content
