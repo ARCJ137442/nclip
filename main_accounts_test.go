@@ -232,7 +232,7 @@ func TestUploadSettingsManagerPermissionCSRFAndPersistence(t *testing.T) {
 	if w := manager.call("PUT", "/api/v1/settings/upload", gin.H{"upload_limit_mib": 2, "revision": 0}, true); w.Code != http.StatusOK {
 		t.Fatalf("settings update returned %d: %s", w.Code, w.Body.String())
 	}
-	w := admin.call("GET", "/api/v1/settings/upload", nil, false)
+	w = admin.call("GET", "/api/v1/settings/upload", nil, false)
 	if w.Code != http.StatusOK {
 		t.Fatalf("updated settings read returned %d: %s", w.Code, w.Body.String())
 	}
