@@ -10,10 +10,10 @@ import (
 )
 
 const (
-	DefaultUploadLimitBytes int64 = 5 * 1024 * 1024
-	MaxUploadLimitBytes     int64 = 100 * 1024 * 1024
-	MultipartOverheadBytes  int64 = 64 * 1024
-	MiB                            = 1024 * 1024
+	DefaultUploadLimitBytes      int64 = 5 * 1024 * 1024
+	MaxUploadLimitBytes          int64 = 100 * 1024 * 1024
+	MultipartOverheadBytes       int64 = 64 * 1024
+	MiB                                = 1024 * 1024
 )
 
 // UploadLimit stores the administrator's content quota and its service ceiling.
