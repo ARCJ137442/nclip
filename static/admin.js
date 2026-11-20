@@ -45,6 +45,7 @@ export async function startAdmin() {
     );
     $("user-count").textContent = t("userCount", { count: selected.length });
     for (const user of selected) {
+      const isManager = user.permissions.manage === true;
       const { el, content } = row(
         user.username,
         user.disabled ? t("disabled") : t("active"),
@@ -52,36 +53,47 @@ export async function startAdmin() {
       el.dataset.userId = user.id;
       const permissions = document.createElement("div");
       permissions.className = "permission-badges";
-      for (const key of ["upload", "download", "manage"])
+      for (const key of ["upload", "download"])
         if (user.permissions[key])
           permissions.append(
             badge(t("permission" + key[0].toUpperCase() + key.slice(1))),
           );
+      if (isManager) permissions.append(badge(t("manager")));
       if (!permissions.children.length)
         permissions.append(badge(t("noPermissions")));
+      permissions.append(
+        badge(
+          user.upload_limit_bytes == null
+            ? t("noPerUserUploadLimit")
+            : t("userUploadLimitValue", {
+                size: sizeLabel(user.upload_limit_bytes),
+              }),
+        ),
+      );
       content.append(permissions);
       const actions = document.createElement("div");
       actions.className = "row-actions";
-      actions.append(
-        button("edit", () => edit(user)),
-        button(
-          "deleteUser",
-          () =>
-            confirm(
-              t("deleteUserPrompt", { name: user.username }),
-              async () => {
-                await request("/api/v1/users/" + user.id, { method: "DELETE" });
-                if (user.id === access.user.id) {
-                  location.assign("/login");
-                  return;
-                }
-                await loadUsers();
-                status("userDeleted", "success");
-              },
-            ),
-          "danger",
-        ),
-      );
+      actions.append(button("edit", () => edit(user)));
+      if (!isManager)
+        actions.append(
+          button(
+            "deleteUser",
+            () =>
+              confirm(
+                t("deleteUserPrompt", { name: user.username }),
+                async () => {
+                  await request("/api/v1/users/" + user.id, { method: "DELETE" });
+                  if (user.id === access.user.id) {
+                    location.assign("/login");
+                    return;
+                  }
+                  await loadUsers();
+                  status("userDeleted", "success");
+                },
+              ),
+            "danger",
+          ),
+        );
       el.append(actions);
       list.append(el);
     }
@@ -93,17 +105,32 @@ export async function startAdmin() {
     renderUsers();
   }
   function edit(user = null) {
+    const isManager = user?.permissions.manage === true;
     editing = user;
     $("user-form").reset();
     $("user-form-error").textContent = "";
     $("user-dialog-title").textContent = t(user ? "editUser" : "createUser");
     $("edit-username").value = user?.username || "";
     $("edit-password").required = !user;
+    $("edit-username").disabled = isManager;
     $("edit-disabled").checked = !!user?.disabled;
-    for (const key of ["upload", "download", "manage"])
+    $("edit-disabled").disabled = isManager;
+    $("no-user-upload-limit").checked = !!user && user.upload_limit_bytes == null;
+    $("no-user-upload-limit").disabled = isManager;
+    $("user-upload-limit").value = user?.upload_limit_bytes == null
+      ? "100"
+      : String(user.upload_limit_bytes / (1024 * 1024));
+    $("user-upload-limit").disabled =
+      isManager || $("no-user-upload-limit").checked;
+    $("user-permissions").disabled = isManager;
+    $("manage-permission-option").hidden = !isManager;
+    $("permission-manage").checked = isManager;
+    $("permission-manage").disabled = !isManager;
+    for (const key of ["upload", "download"])
       $("permission-" + key).checked = !!user?.permissions[key];
+    $("manager-immutable-hint").hidden = !isManager;
     $("user-dialog").showModal();
-    $("edit-username").focus();
+    $(isManager ? "edit-password" : "edit-username").focus();
   }
   function closeEditor() {
     if (saving) return;
@@ -335,6 +362,10 @@ export async function startAdmin() {
     $("edit-password").value = "";
   });
   $("user-search").addEventListener("input", renderUsers);
+  $("no-user-upload-limit").addEventListener("change", (event) => {
+    $("user-upload-limit").disabled =
+      editing?.permissions.manage === true || event.currentTarget.checked;
+  });
   const tabs = ["users", "shares", "settings"];
   for (const key of tabs) {
     $(key + "-tab").addEventListener("click", () => tab(key));
@@ -356,16 +387,29 @@ export async function startAdmin() {
   $("user-form").addEventListener("submit", async (event) => {
     event.preventDefault();
     if (saving) return;
+    const isManager = editing?.permissions.manage === true;
+    const permissions = {
+      upload: $("permission-upload").checked,
+      download: $("permission-download").checked,
+      manage: isManager,
+    };
+    const uploadLimitMiB = Number($("user-upload-limit").value);
+    const uploadLimitBytes = isManager || $("no-user-upload-limit").checked
+      ? null
+      : uploadLimitMiB * 1024 * 1024;
+    if (
+      uploadLimitBytes !== null &&
+      (!Number.isInteger(uploadLimitMiB) ||
+        uploadLimitMiB < 1 ||
+        uploadLimitMiB > 100)
+    ) {
+      $("user-form-error").textContent = t("invalidUploadLimit");
+      return;
+    }
     saving = true;
     $("save-user").disabled = true;
     $("save-user").setAttribute("aria-busy", "true");
     $("user-form-error").textContent = "";
-    const permissions = Object.fromEntries(
-      ["upload", "download", "manage"].map((key) => [
-        key,
-        $("permission-" + key).checked,
-      ]),
-    );
     try {
       const response = await request(
         "/api/v1/users" + (editing ? "/" + editing.id : ""),
@@ -376,6 +420,7 @@ export async function startAdmin() {
             username: $("edit-username").value,
             password: $("edit-password").value,
             permissions,
+            upload_limit_bytes: uploadLimitBytes,
             disabled: $("edit-disabled").checked,
             version: editing?.version || 0,
           }),

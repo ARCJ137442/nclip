@@ -82,7 +82,7 @@ const messages = {
   ],
   uploadLimitLabel: ["单次分享总量上限（MiB）", "Maximum content per share (MiB)"],
   uploadLimitRange: ["快速调整", "Quick adjustment"],
-  uploadLimitCeiling: ["服务端允许的最高值为 {size}。", "The server maximum is {size}."],
+  uploadLimitCeiling: ["全局设置最高可设为 {size}；所有上传仍受 NCLIP_BUFFER_SIZE 限制。", "The global setting can be set up to {size}; all uploads remain bounded by NCLIP_BUFFER_SIZE."],
   saveSettings: ["保存设置", "Save settings"],
   reloadSettings: ["重新加载", "Reload"],
   uploadSettingsLoading: ["正在读取当前限额…", "Loading current limit…"],
@@ -96,6 +96,17 @@ const messages = {
   uploadSettingsLoaded: ["当前限额：{size}", "Current limit: {size}"],
   createUser: ["创建用户", "Create user"],
   editUser: ["修改用户", "Edit user"],
+  userUploadLimitLabel: ["单次上传内容上限（MiB）", "Per-upload content cap (MiB)"],
+  userUploadLimitHint: [
+    "普通默认值为 100 MiB；实际额度还受服务端 NCLIP_BUFFER_SIZE 限制。",
+    "The ordinary default is 100 MiB. Effective uploads are also capped by NCLIP_BUFFER_SIZE.",
+  ],
+  noPerUserUploadLimit: ["不设置用户上限", "No per-user cap"],
+  userUploadLimitValue: ["上传上限 {size}", "Upload cap {size}"],
+  invalidUploadLimit: [
+    "请输入 1–100 MiB 的整数上限，或选择不设置用户上限。",
+    "Enter a whole-number cap from 1 to 100 MiB, or choose no per-user cap.",
+  ],
   searchUsers: ["搜索用户", "Search users"],
   searchShares: ["分享码、文件名或类型", "Code, filename or type"],
   search: ["搜索", "Search"],
@@ -105,9 +116,14 @@ const messages = {
   permissionUpload: ["上传", "Upload"],
   permissionDownload: ["下载", "Download"],
   permissionManage: ["管理", "Manage"],
+  manager: ["管理员", "Manager"],
   managePermissionHint: [
-    "管理用户及全部分享；上传和下载分别授权。",
-    "Manage users and all shares. Upload and download are separate permissions.",
+    "管理员负责用户和全部分享；普通用户不能获得管理权限，上传和下载分别授权。",
+    "The manager administers users and all shares. Ordinary users cannot be granted manage permission; upload and download are separate.",
+  ],
+  managerImmutableHint: [
+    "管理员账号的用户名、权限、状态和上传上限固定；仍可重置密码。",
+    "The manager account's username, permissions, status, and upload cap are fixed. Its password can still be reset.",
   ],
   disabledAccount: ["停用账号", "Disable account"],
   disabled: ["已停用", "Disabled"],
@@ -132,8 +148,16 @@ const messages = {
   ],
   usernameExists: ["这个用户名已经存在。", "That username already exists."],
   lastManager: [
-    "必须保留至少一个可登录且具有管理权限的账号。",
-    "Keep at least one enabled account with management permission.",
+    "唯一管理员账号不能停用或删除。",
+    "The unique administrator account cannot be disabled or deleted.",
+  ],
+  adminExists: [
+    "系统只允许唯一管理员账号，普通用户不能获得管理权限。",
+    "Only the unique administrator can manage accounts; ordinary users cannot be granted manage permission.",
+  ],
+  adminImmutable: [
+    "唯一管理员的用户名、权限、状态和用户级上传上限固定；仍可重置密码。",
+    "The unique administrator's username, permissions, status, and per-user upload cap are fixed. Its password can still be reset.",
   ],
   userNotFound: [
     "用户不存在，可能已被其他管理员删除。",

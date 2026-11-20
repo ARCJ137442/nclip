@@ -140,7 +140,7 @@
               <button class="button secondary" type="button" data-upload-limit="100">100 MiB</button>
             </div>
             <p id="upload-limit-hint" class="hint" data-i18n="uploadLimitCeiling">
-              服务端允许的最高值为 100 MiB。
+              全局设置最高可设为 100 MiB；所有上传仍受 NCLIP_BUFFER_SIZE 限制。
             </p>
             <div class="settings-actions">
               <span id="upload-settings-state" class="hint" role="status" aria-live="polite"></span>
@@ -206,7 +206,27 @@
             >至少 8 字节；修改用户时留空则保持原密码。</small
           ></label
         >
-        <fieldset class="permissions">
+        <label class="field" for="user-upload-limit">
+          <span data-i18n="userUploadLimitLabel">单次上传内容上限（MiB）</span>
+          <input
+            id="user-upload-limit"
+            type="number"
+            min="1"
+            max="100"
+            step="1"
+            value="100"
+            inputmode="decimal"
+            aria-describedby="user-upload-limit-hint"
+          />
+          <small id="user-upload-limit-hint" class="hint" data-i18n="userUploadLimitHint">
+            普通默认值为 100 MiB；实际生效额度还受服务端 NCLIP_BUFFER_SIZE 限制。
+          </small>
+        </label>
+        <label class="check user-upload-limit-option">
+          <input id="no-user-upload-limit" type="checkbox" />
+          <span data-i18n="noPerUserUploadLimit">不设置用户上限</span>
+        </label>
+        <fieldset id="user-permissions" class="permissions">
           <legend data-i18n="permissions">权限</legend>
           <label class="check"
             ><input id="permission-upload" type="checkbox" /><span
@@ -218,7 +238,7 @@
               data-i18n="permissionDownload"
               >下载</span
             ></label
-          ><label class="check"
+          ><label class="check" id="manage-permission-option"
             ><input id="permission-manage" type="checkbox" /><span
               data-i18n="permissionManage"
               >管理</span
@@ -234,6 +254,9 @@
             >停用账号</span
           ></label
         >
+        <p id="manager-immutable-hint" class="hint" data-i18n="managerImmutableHint" hidden>
+          管理员账号的用户名、权限、状态和上传上限固定；仍可重置密码。
+        </p>
         <p id="user-form-error" class="form-error" role="alert"></p>
         <div class="dialog-actions">
           <button

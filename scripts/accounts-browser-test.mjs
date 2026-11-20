@@ -55,8 +55,12 @@ async function signIn(ctx, name, password, url = "/") {
     },
     { name, password },
   );
+  const destination =
+    url === "/" && name === adminName
+      ? "/admin"
+      : new URL(url, base).pathname;
   await Promise.all([
-    page.waitForURL((u) => u.pathname !== "/login"),
+    page.waitForURL((u) => u.pathname === destination),
     page.locator("#login-submit").click(),
   ]);
   return page;
@@ -87,26 +91,25 @@ let adminContext;
 try {
   adminContext = await context();
   const adminPage = await signIn(adminContext, adminName, adminPassword);
-  await adminPage.locator("#limits").filter({ hasText: "10.0 MiB" }).waitFor();
-  assert.equal(await adminPage.locator("#secondary-receive").isVisible(), true);
-  await adminPage.locator("#nav-admin").click();
+  assert.equal(new URL(adminPage.url()).pathname, "/admin");
   await adminPage.locator("#user-list article").waitFor();
   const admin = (await session(adminContext)).user;
-  await adminPage
-    .locator(`[data-user-id="${admin.id}"]`)
-    .getByRole("button", { name: "修改", exact: true })
-    .click();
-  await adminPage.locator("#edit-disabled").check();
-  await adminPage.locator("#save-user").click();
-  await adminPage
-    .locator("#user-form-error")
-    .filter({ hasText: "必须保留" })
-    .waitFor();
-  assert.equal(await adminPage.locator("#user-dialog").isVisible(), true);
+  const adminRow = adminPage.locator(`[data-user-id="${admin.id}"]`);
+  await adminRow.getByRole("button", { name: "修改", exact: true }).click();
+  assert.equal(await adminPage.locator("#edit-username").isDisabled(), true);
+  assert.equal(await adminPage.locator("#edit-disabled").isDisabled(), true);
+  assert.equal(await adminPage.locator("#user-permissions").isDisabled(), true);
+  assert.equal(await adminPage.locator("#user-upload-limit").isDisabled(), true);
+  assert.equal(await adminPage.locator("#edit-password").isDisabled(), false);
+  assert.equal(
+    await adminRow.getByRole("button", { name: "删除", exact: true }).count(),
+    0,
+  );
   await adminPage.locator("#close-user-dialog").click();
-  console.log("PASS native login, manager UI and last-manager guard");
+  console.log("PASS native login and immutable administrator controls");
 
   await adminPage.locator("#new-user").click();
+  assert.equal(await adminPage.locator("#manage-permission-option").isHidden(), true);
   await adminPage.locator("#edit-username").fill("upload-" + suffix);
   await adminPage.locator("#edit-password").fill("fixture-user-password");
   await adminPage.locator("#permission-upload").check();
@@ -121,9 +124,12 @@ try {
   const reader = await newUser(adminContext, "read-" + suffix, {
     download: true,
   });
-  const manager = await newUser(adminContext, "manage-" + suffix, {
-    manage: true,
+  const manageDenied = await mutate(adminContext, "/api/v1/users", "POST", {
+    username: "manage-" + suffix,
+    password: "fixture-user-password",
+    permissions: { manage: true },
   });
+  assert.equal(manageDenied.status(), 409);
   const uploadContext = await context(),
     uploadPage = await signIn(
       uploadContext,
@@ -207,26 +213,26 @@ try {
   const manageContext = await context(),
     managePage = await signIn(
       manageContext,
-      manager.username,
-      "fixture-user-password",
+      adminName,
+      adminPassword,
     );
   await managePage.locator("#user-list article").first().waitFor();
   assert.equal(new URL(managePage.url()).pathname, "/admin");
-  assert.equal(await managePage.locator("#nav-upload").isHidden(), true);
-  assert.equal(await managePage.locator("#nav-download").isHidden(), true);
+  assert.equal(await managePage.locator("#nav-upload").isHidden(), false);
+  assert.equal(await managePage.locator("#nav-download").isHidden(), false);
   await managePage.locator("#shares-tab").click();
   await managePage.locator("#share-list article").first().waitFor();
-  assert.equal(await managePage.locator("#share-list a").count(), 0);
+  assert.ok((await managePage.locator("#share-list a").count()) > 0);
   assert.equal(
     (await manageContext.request.get(base + "/raw/" + shares[0])).status(),
-    403,
+    200,
   );
   await managePage.screenshot({
     path: `${evidence}/manager.png`,
     fullPage: true,
   });
   console.log(
-    "PASS manage-only user/content administration without private downloads",
+    "PASS unique administrator permissions, rejected second manager, and private content policy",
   );
 
   const current = (
