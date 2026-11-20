@@ -206,6 +206,13 @@ func TestUploadSettingsManagerPermissionCSRFAndPersistence(t *testing.T) {
 	createAccount(t, admin, "uploadonly", gin.H{"upload": true})
 	uploader := signIn(t, router, "uploadonly", "test-user-password")
 
+	assertUploadSettingsAccess(t, router, manager, uploader)
+	assertUploadSettingsSave(t, manager)
+	assertUploadSettingsPersistence(t, admin, manager)
+}
+
+func assertUploadSettingsAccess(t *testing.T, router http.Handler, manager, uploader accountClient) {
+	t.Helper()
 	if w := (accountClient{router: router}).call("GET", "/api/v1/settings/upload", nil, false); w.Code != http.StatusUnauthorized {
 		t.Fatalf("anonymous settings read returned %d", w.Code)
 	}
@@ -226,13 +233,21 @@ func TestUploadSettingsManagerPermissionCSRFAndPersistence(t *testing.T) {
 	if initial.UploadLimitMiB != 4 || initial.Revision != 0 {
 		t.Fatalf("initial settings = (%d MiB, revision %d), want (4 MiB, revision 0)", initial.UploadLimitMiB, initial.Revision)
 	}
+}
+
+func assertUploadSettingsSave(t *testing.T, manager accountClient) {
+	t.Helper()
 	if w := manager.call("PUT", "/api/v1/settings/upload", gin.H{"upload_limit_mib": 2, "revision": 0}, false); w.Code != http.StatusForbidden {
 		t.Fatalf("settings update without CSRF returned %d", w.Code)
 	}
 	if w := manager.call("PUT", "/api/v1/settings/upload", gin.H{"upload_limit_mib": 2, "revision": 0}, true); w.Code != http.StatusOK {
 		t.Fatalf("settings update returned %d: %s", w.Code, w.Body.String())
 	}
-	w = admin.call("GET", "/api/v1/settings/upload", nil, false)
+}
+
+func assertUploadSettingsPersistence(t *testing.T, admin, manager accountClient) {
+	t.Helper()
+	w := admin.call("GET", "/api/v1/settings/upload", nil, false)
 	if w.Code != http.StatusOK {
 		t.Fatalf("updated settings read returned %d: %s", w.Code, w.Body.String())
 	}

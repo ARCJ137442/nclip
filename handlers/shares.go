@@ -65,6 +65,33 @@ func (u *shareUpload) add(key string, data []byte) error {
 	return nil
 }
 
+func readSharePart(p *multipart.Part, u *shareUpload, contentLimit int64) (string, bool) {
+	key := p.FormName()
+	limit := contentLimit - u.size
+	if key == "manifest" {
+		limit = maxManifestBytes
+	} else if limit > contentLimit {
+		limit = contentLimit
+	}
+	if limit < 0 {
+		return "content_too_large", false
+	}
+	data, err := io.ReadAll(io.LimitReader(p, limit+1))
+	if err != nil || int64(len(data)) > limit {
+		if key == "manifest" {
+			return "request_too_large", false
+		}
+		return "content_too_large", false
+	}
+	if key != "manifest" && u.size+int64(len(data)) > contentLimit {
+		return "content_too_large", false
+	}
+	if err := u.add(key, data); err != nil {
+		return err.Error(), false
+	}
+	return "", true
+}
+
 func readShareUpload(c *gin.Context, requestLimit, contentLimit int64) (*shareUpload, bool) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, requestLimit)
 	r, err := c.Request.MultipartReader()
@@ -82,36 +109,13 @@ func readShareUpload(c *gin.Context, requestLimit, contentLimit int64) (*shareUp
 			shareError(c, 413, "request_too_large_or_invalid")
 			return nil, false
 		}
-		key := p.FormName()
-		limit := contentLimit - u.size
-		if key == "manifest" {
-			limit = maxManifestBytes
-		} else if limit > contentLimit {
-			limit = contentLimit
-		}
-		if key != "manifest" && limit < 0 {
-			shareError(c, http.StatusRequestEntityTooLarge, "content_too_large")
-			return nil, false
-		}
-		if limit < 0 {
-			shareError(c, http.StatusRequestEntityTooLarge, "content_too_large")
-			return nil, false
-		}
-		data, err := io.ReadAll(io.LimitReader(p, limit+1))
-		if err != nil || int64(len(data)) > limit {
-			code := "request_too_large"
-			if key != "manifest" {
-				code = "content_too_large"
+		code, ok := readSharePart(p, u, contentLimit)
+		if !ok {
+			status := http.StatusBadRequest
+			if code == "content_too_large" || code == "request_too_large" {
+				status = http.StatusRequestEntityTooLarge
 			}
-			shareError(c, http.StatusRequestEntityTooLarge, code)
-			return nil, false
-		}
-		if key != "manifest" && u.size+int64(len(data)) > contentLimit {
-			shareError(c, http.StatusRequestEntityTooLarge, "content_too_large")
-			return nil, false
-		}
-		if err := u.add(key, data); err != nil {
-			shareError(c, 400, err.Error())
+			shareError(c, status, code)
 			return nil, false
 		}
 	}

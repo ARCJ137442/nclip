@@ -94,7 +94,7 @@ func (s *UploadLimit) Set(value int64, expectedRevision uint64) (revision uint64
 		return s.revision, fmt.Errorf("create upload limit settings temp file: %w", err)
 	}
 	tmpName := tmp.Name()
-	defer os.Remove(tmpName)
+	defer func() { _ = os.Remove(tmpName) }()
 	if err := tmp.Chmod(0o600); err != nil {
 		_ = tmp.Close()
 		return s.revision, fmt.Errorf("protect upload limit settings: %w", err)
