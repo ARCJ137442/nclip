@@ -318,11 +318,11 @@ export async function startComposer() {
   });
   $("composer").addEventListener("drop", (e) => {
     if (!isLink(e) || sending || $("composer").hidden) return;
+    const link = draggedLinks(e.dataTransfer);
+    if (!link) return;
     e.preventDefault();
     dragDepth = 0;
     $("drop-overlay").hidden = true;
-    const link = draggedLinks(e.dataTransfer);
-    if (!link) return;
     if (link.local) {
       status("localDrop", "error");
       $("attach").focus();
