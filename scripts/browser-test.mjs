@@ -72,9 +72,9 @@ try {
   await home();
   assert.equal(
     await page
-      .getByRole("heading", { name: "粘贴，然后分享", exact: true })
+      .getByRole("heading", { name: "发送内容", exact: true })
       .innerText(),
-    "粘贴，然后分享",
+    "发送内容",
   );
   await page.locator("#message").fill("  中文跨端测试\n保留末尾换行\n");
   await page.screenshot({
@@ -217,7 +217,10 @@ try {
     });
   });
   await page.locator("#send").click();
-  await page.locator("#status").filter({ hasText: "超过上传限制" }).waitFor();
+  await page
+    .locator("#status")
+    .filter({ hasText: /超过.*10\.0 MiB/ })
+    .waitFor();
   assert.equal(
     await page.locator("#message").inputValue(),
     "失败后仍保留的输入",

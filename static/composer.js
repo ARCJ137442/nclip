@@ -8,6 +8,7 @@ import {
   fileItem,
   textItem,
   copyText,
+  draggedLinks,
 } from "./clipboard.js";
 import { request, encodeShare } from "./share-api.js";
 
@@ -34,11 +35,34 @@ export async function startComposer() {
     $("candidate").hidden = true;
     invalidateRead();
   }
+  function draftBytes(items = draft()) {
+    return items.reduce(
+      (total, item) =>
+        total +
+        item.parts.reduce((sum, part) => sum + part.blob.size, 0),
+      0,
+    );
+  }
+  function updateDraftMeter() {
+    if (!$("draft-meter")) return;
+    const items = draft(),
+      size = draftBytes(items),
+      max = config?.upload_max_bytes || 0;
+    $("draft-size").textContent = sizeLabel(size);
+    $("draft-count").textContent = t(
+      items.length === 1 ? "draftItemsOne" : "draftItemsMany",
+      { count: items.length },
+    );
+    $("draft-meter-fill").style.width =
+      max > 0 ? `${Math.min(100, (size / max) * 100)}%` : "0%";
+    $("draft-meter").dataset.over = String(max > 0 && size > max);
+  }
   function changed() {
     hideCandidate();
     $("path-hint").hidden = !/^(?:[A-Za-z]:[\\/]|\\\\|file:\/\/)/.test(
       editor.value.trim(),
     );
+    updateDraftMeter();
   }
   async function renderDraft() {
     await renderItems($("draft-items"), attachments, {
@@ -56,6 +80,7 @@ export async function startComposer() {
         size: sizeLabel(config.upload_max_bytes),
         hours: config.default_ttl_seconds / 3600,
       });
+    updateDraftMeter();
   }
   async function append(items) {
     if (sending) return;
@@ -64,6 +89,8 @@ export async function startComposer() {
       status("tooMany", "error", { count: max });
       return;
     }
+    // Adding content is the recovery gesture for every composer error.
+    status("");
     for (const item of items) {
       const plain = item.parts.find((p) => p.mime === "text/plain");
       if (item.kind === "clipboard" && plain && !editor.value) {
@@ -253,6 +280,7 @@ export async function startComposer() {
     $("result").hidden = true;
     $("composer").hidden = false;
     void renderDraft();
+    updateDraftMeter();
     status("");
     editor.focus();
     void probe(true);
@@ -300,6 +328,48 @@ export async function startComposer() {
       if (!$("composer").hidden)
         void append(Array.from(e.dataTransfer.files, fileItem));
     }
+  });
+  // A dragged link carries only a URI. file: URIs cannot be read by the page,
+  // so refuse them with an actionable message instead of silently sharing the
+  // path as text; ordinary links keep their previous insertion outcome.
+  const isLink = (e) =>
+    !isFiles(e) &&
+    Array.from(e.dataTransfer?.types || []).includes("text/uri-list");
+  $("composer").addEventListener("dragover", (e) => {
+    if (isLink(e) && !sending && !$("composer").hidden) {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = "copy";
+    }
+  });
+  $("composer").addEventListener("drop", (e) => {
+    if (!isLink(e) || sending || $("composer").hidden) return;
+    const link = draggedLinks(e.dataTransfer);
+    if (!link) return;
+    e.preventDefault();
+    dragDepth = 0;
+    $("drop-overlay").hidden = true;
+    if (link.local) {
+      status("localDrop", "error");
+      // Keep the guidance next to the composer; the status row can sit below
+      // the fold on short screens.
+      $("path-hint").textContent = t("localDrop");
+      $("path-hint").hidden = false;
+      $("attach").focus();
+      return;
+    }
+    // Native link drops insert at the pointer; the caret is the closest
+    // stable approximation when the page has to handle the drop itself.
+    status("");
+    editor.setRangeText(
+      link.text,
+      editor.selectionStart ?? editor.value.length,
+      editor.selectionEnd ?? editor.value.length,
+      "end",
+    );
+    rich = null;
+    $("rich-hint").hidden = true;
+    changed();
+    editor.focus();
   });
   window.addEventListener("blur", () => {
     invalidateRead();

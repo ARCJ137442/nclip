@@ -6,6 +6,7 @@ import {
   pastedItems,
   textItem,
   fileItem,
+  draggedLinks,
 } from "../static/clipboard.js";
 import { encodeShare, decodeShare, request } from "../static/share-api.js";
 
@@ -68,6 +69,47 @@ test("real pasted files take precedence over the duplicate HTML representation",
   assert.equal(items.length, 1);
   assert.equal(items[0].kind, "file");
   assert.equal(items[0].parts[0].blob, file);
+});
+
+test("dropped file links are recognized without treating them as files", () => {
+  const data = {
+    types: ["text/uri-list", "text/plain"],
+    getData: (type) =>
+      type === "text/uri-list"
+        ? "# comment\r\nfile:///G:/Downloads/%E6%96%87%E6%A1%A3.md\r\n"
+        : "",
+  };
+  assert.deepEqual(draggedLinks(data), {
+    text: "file:///G:/Downloads/%E6%96%87%E6%A1%A3.md",
+    local: true,
+  });
+});
+
+test("dropped ordinary links keep their text outcome", () => {
+  const data = {
+    types: ["text/uri-list"],
+    getData: () => "https://example.com/a\nhttps://example.com/b",
+  };
+  assert.deepEqual(draggedLinks(data), {
+    text: "https://example.com/a\nhttps://example.com/b",
+    local: false,
+  });
+});
+
+test("real file drops and non-link drags are left to the file path", () => {
+  const file = new File(["bytes"], "report.txt", { type: "text/plain" });
+  assert.equal(
+    draggedLinks({ files: [file], types: ["Files"], getData: () => "" }),
+    null,
+  );
+  assert.equal(
+    draggedLinks({ types: ["text/plain"], getData: () => "G:\\Downloads" }),
+    null,
+  );
+  assert.equal(
+    draggedLinks({ types: ["text/uri-list"], getData: () => "not a url" }),
+    null,
+  );
 });
 
 test("clipboard write failures never report a successful rich copy", async () => {

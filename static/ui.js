@@ -205,7 +205,7 @@ export function setup() {
         event.stopPropagation();
       }
       if (event.key === "Escape")
-        el.closest("label")?.querySelector("input")?.focus();
+        el.parentElement?.querySelector("input")?.focus();
     });
   });
   for (const name of ["language", "theme"]) {
