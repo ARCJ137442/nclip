@@ -325,6 +325,10 @@ export async function startComposer() {
     $("drop-overlay").hidden = true;
     if (link.local) {
       status("localDrop", "error");
+      // Keep the guidance next to the composer; the status row can sit below
+      // the fold on short screens.
+      $("path-hint").textContent = t("localDrop");
+      $("path-hint").hidden = false;
       $("attach").focus();
       return;
     }
