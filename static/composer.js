@@ -35,11 +35,34 @@ export async function startComposer() {
     $("candidate").hidden = true;
     invalidateRead();
   }
+  function draftBytes(items = draft()) {
+    return items.reduce(
+      (total, item) =>
+        total +
+        item.parts.reduce((sum, part) => sum + part.blob.size, 0),
+      0,
+    );
+  }
+  function updateDraftMeter() {
+    if (!$("draft-meter")) return;
+    const items = draft(),
+      size = draftBytes(items),
+      max = config?.upload_max_bytes || 0;
+    $("draft-size").textContent = sizeLabel(size);
+    $("draft-count").textContent = t(
+      items.length === 1 ? "draftItemsOne" : "draftItemsMany",
+      { count: items.length },
+    );
+    $("draft-meter-fill").style.width =
+      max > 0 ? `${Math.min(100, (size / max) * 100)}%` : "0%";
+    $("draft-meter").dataset.over = String(max > 0 && size > max);
+  }
   function changed() {
     hideCandidate();
     $("path-hint").hidden = !/^(?:[A-Za-z]:[\\/]|\\\\|file:\/\/)/.test(
       editor.value.trim(),
     );
+    updateDraftMeter();
   }
   async function renderDraft() {
     await renderItems($("draft-items"), attachments, {
@@ -57,6 +80,7 @@ export async function startComposer() {
         size: sizeLabel(config.upload_max_bytes),
         hours: config.default_ttl_seconds / 3600,
       });
+    updateDraftMeter();
   }
   async function append(items) {
     if (sending) return;
@@ -256,6 +280,7 @@ export async function startComposer() {
     $("result").hidden = true;
     $("composer").hidden = false;
     void renderDraft();
+    updateDraftMeter();
     status("");
     editor.focus();
     void probe(true);

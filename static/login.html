@@ -10,11 +10,17 @@
     <div class="workspace">
       {{template "app-header" .}}
       <main class="login-layout">
-        <section class="panel login-panel">
+        <section class="login-story">
+          <h1 data-i18n="loginStory">把内容
+传到另一端。</h1>
+          <p data-i18n="loginStoryHint">
+            文字、截图和文件，都能装进一条链接。
+          </p>
+        </section>
+        <section class="login-panel">
           <div class="section-heading">
-            <span class="eyebrow" data-i18n="privateSpace">你的私有剪贴板</span>
-            <h1 data-i18n="loginTitle">登录 nclip</h1>
-            <p data-i18n="loginHint">登录后，继续传递内容。</p>
+            <h2 data-i18n="loginTitle">登录 nclip</h2>
+            <p data-i18n="loginHint">登录后继续发送和接收。</p>
           </div>
           <form id="login-form" action="/login" method="post" autocomplete="on">
             <input type="hidden" name="next" value="{{.Next}}" />
@@ -60,7 +66,7 @@
               登录
             </button>
             <p class="hint" data-i18n="loginAccountHint">
-              账号由管理员创建，可使用密码管理器自动填充。
+              账号由管理员创建。
             </p>
           </form>
         </section>

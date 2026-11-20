@@ -11,77 +11,110 @@
       {{template "app-header" .}}
       <main>
         <section id="composer" class="panel composer">
-          <div class="section-heading">
-            <h1 data-i18n="compose">粘贴，然后分享</h1>
-            <p data-i18n="composeHint">文字、截图和文件，一起生成一个链接。</p>
+          <div class="composer-head">
+            <div class="composer-title">
+              <h1 data-i18n="compose">发送内容</h1>
+              <p data-i18n="composeHint">
+                粘贴文字、截图或文件，生成一条分享链接。
+              </p>
+            </div>
+            <div
+              id="draft-meter"
+              class="draft-meter"
+              role="status"
+              aria-live="polite"
+            >
+              <div class="draft-meter-row">
+                <span data-i18n="draftState">待发送</span>
+                <strong id="draft-size">0 B</strong>
+              </div>
+              <span id="draft-count" class="draft-count">0 项</span>
+              <span class="draft-meter-track" aria-hidden="true"
+                ><span id="draft-meter-fill"></span
+              ></span>
+            </div>
           </div>
           <fieldset id="draft-controls">
-            <label class="sr-only" for="message" data-i18n="compose"
-              >粘贴，然后分享</label
-            ><textarea
-              id="message"
-              data-i18n-placeholder="placeholder"
-              placeholder="在这里输入，或直接粘贴内容…"
-              spellcheck="false"
-            ></textarea>
-            <div id="draft-items" class="items"></div>
-            <p id="rich-hint" class="hint" data-i18n="richEdit" hidden></p>
-            <p id="path-hint" class="hint" data-i18n="pathHint" hidden></p>
-            <div class="compose-toolbar">
-              <div class="input-actions">
-                <button
-                  type="button"
-                  id="paste"
-                  class="button secondary"
-                  data-icon="clipboard"
+            <div class="compose-grid">
+              <div class="editor-pane">
+                <label class="field-caption" for="message" data-i18n="contentLabel"
+                  >文字</label
                 >
-                  <span data-i18n="paste">粘贴</span></button
-                ><button
-                  type="button"
-                  id="attach"
-                  class="button secondary"
-                  data-icon="attach"
-                >
-                  <span data-i18n="attach">添加文件</span></button
-                ><input id="files" type="file" multiple hidden /><button
-                  id="open-clipboard-receive"
-                  class="button secondary"
-                  type="button"
-                  hidden
-                ></button>
+                <textarea
+                  id="message"
+                  data-i18n-placeholder="placeholder"
+                  placeholder="在这里输入，或直接粘贴内容…"
+                  spellcheck="false"
+                ></textarea>
+                <div id="draft-items" class="items"></div>
+                <p id="rich-hint" class="hint" data-i18n="richEdit" hidden></p>
+                <p id="path-hint" class="hint" data-i18n="pathHint" hidden></p>
               </div>
-              <span class="shortcut" data-i18n="shortcut"
-                >Ctrl / ⌘ + Enter 发送</span
-              >
-            </div>
-            <div class="send-row">
-              <div class="sharing-options">
-                <label class="check"
-                  ><input id="burn" type="checkbox" /><span data-i18n="burn"
-                    >一次性接收</span
-                  ><span class="help-dot" tabindex="0" data-help="burnHint"
-                    >ⓘ</span
-                  ></label
-                ><label class="check" id="public-option" hidden
-                  ><input id="public-share" type="checkbox" /><span
-                    data-i18n="publicShare"
-                    >公网分享</span
-                  ><span
-                    class="help-dot"
-                    tabindex="0"
-                    data-help="publicShareHint"
-                    >ⓘ</span
-                  ></label
-                >
-              </div>
-              <button
-                id="send"
-                type="button"
-                class="button primary"
-                data-icon="send"
-              >
-                <span data-i18n="send">生成链接</span>
-              </button>
+              <aside class="transfer-pane" aria-labelledby="transfer-title">
+                <h2 id="transfer-title" data-i18n="transferTitle">发送设置</h2>
+                <div class="transfer-actions">
+                  <button
+                    type="button"
+                    id="paste"
+                    class="button secondary action-button"
+                    data-icon="clipboard"
+                  >
+                    <span data-i18n="paste">粘贴</span></button
+                  ><button
+                    type="button"
+                    id="attach"
+                    class="button secondary action-button"
+                    data-icon="attach"
+                  >
+                    <span data-i18n="attach">添加文件</span></button
+                  ><input id="files" type="file" multiple hidden /><button
+                    id="open-clipboard-receive"
+                    class="button secondary"
+                    type="button"
+                    hidden
+                  ></button>
+                </div>
+                <div class="sharing-options">
+                  <div class="option-row">
+                    <label class="check" for="burn"
+                      ><input id="burn" type="checkbox" /><span
+                        data-i18n="burn"
+                        >一次性接收</span
+                      ></label
+                    ><button
+                      class="help-dot"
+                      type="button"
+                      data-help="burnHint"
+                    ></button>
+                  </div>
+                  <div id="public-option" class="option-row" hidden>
+                    <label class="check" for="public-share"
+                      ><input id="public-share" type="checkbox" /><span
+                        data-i18n="publicShare"
+                        >公网分享</span
+                      ></label
+                    ><button
+                      class="help-dot"
+                      type="button"
+                      data-help="publicShareHint"
+                    ></button>
+                  </div>
+                </div>
+                <p id="limits" class="hint capacity-note"></p>
+                <div class="send-block">
+                  <button
+                    id="send"
+                    type="button"
+                    class="button primary send-button"
+                    data-icon="send"
+                  >
+                    <span data-i18n="send">生成链接</span>
+                  </button>
+                  <span class="shortcut" data-i18n="shortcut"
+                    >Ctrl / ⌘ + Enter 发送</span
+                  >
+                </div>
+              </aside>
             </div>
           </fieldset>
           <div id="candidate" class="candidate" hidden>
@@ -99,12 +132,15 @@
               发送并复制链接
             </button>
           </div>
-          <p id="limits" class="hint"></p>
         </section>
         <section id="result" class="panel result" hidden tabindex="-1">
-          <span class="result-check" data-icon="check"></span>
-          <h1 data-i18n="sent">上传完成</h1>
-          <p id="result-message"></p>
+          <div class="result-summary">
+            <span class="result-check" data-icon="check"></span>
+            <div>
+              <h1 data-i18n="sent">上传完成</h1>
+              <p id="result-message"></p>
+            </div>
+          </div>
           <div class="link-row">
             <input
               id="share-url"
@@ -158,7 +194,7 @@
     </div>
     <div id="drop-overlay" hidden>
       <span data-icon="attach"></span
-      ><span data-i18n="drop">放下文件，添加到待发送内容</span>
+      ><span data-i18n="drop">放下文件，添加到本次发送</span>
     </div>
     <script type="module" src="/static/script.js?v={{.Version}}"></script>
   </body>
