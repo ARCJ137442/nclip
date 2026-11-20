@@ -65,6 +65,8 @@ export async function startComposer() {
       status("tooMany", "error", { count: max });
       return;
     }
+    // Adding content is the recovery gesture for every composer error.
+    status("");
     for (const item of items) {
       const plain = item.parts.find((p) => p.mime === "text/plain");
       if (item.kind === "clipboard" && plain && !editor.value) {
@@ -328,6 +330,7 @@ export async function startComposer() {
     }
     // Native link drops insert at the pointer; the caret is the closest
     // stable approximation when the page has to handle the drop itself.
+    status("");
     editor.setRangeText(
       link.text,
       editor.selectionStart ?? editor.value.length,
