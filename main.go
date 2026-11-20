@@ -214,8 +214,8 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 		if err != nil {
 			panic(fmt.Errorf("initialize accounts: %w", err))
 		}
-		// Round the legacy byte setting down to the whole-MiB browser-share
-		// quota. Other upload routes keep using BufferSize unchanged.
+		// The global setting remains a browser-share limit; BufferSize is the
+		// hard server limit applied to all upload routes.
 		initialUploadLimit := min(max(config.MiB, cfg.BufferSize/config.MiB*config.MiB), config.MaxUploadLimitBytes)
 		uploadLimit, err := config.OpenUploadLimit(cfg.DataDir, initialUploadLimit, config.MaxUploadLimitBytes)
 		if err != nil {

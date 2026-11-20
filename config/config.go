@@ -9,6 +9,8 @@ import (
 )
 
 // Config holds all configuration for the nclip service
+const RequestUploadLimitKey = "account.upload_limit_bytes"
+
 type Config struct {
 	Port        int           `json:"port"`
 	URL         string        `json:"url"`

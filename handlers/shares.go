@@ -33,11 +33,31 @@ func NewSharesHandler(service *services.PasteService, cfg *config.Config) *Share
 // UIConfig contains only public, authoritative settings used by the composer.
 func (h *SharesHandler) UIConfig(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	maxBytes := h.config.BufferSize
-	if h.uploadLimit != nil {
-		maxBytes, _, _ = h.uploadLimit.Snapshot()
+	c.JSON(200, gin.H{"upload_max_bytes": h.effectiveUploadLimit(c), "default_ttl_seconds": int64(h.config.DefaultTTL.Seconds()), "max_items": maxShareItems, "upload_auth": h.config.UploadAuth, "clipboard_formats": []string{"text/plain", "text/html", "image/png"}})
+}
+
+func (h *SharesHandler) effectiveUploadLimit(c *gin.Context) int64 {
+	user, authenticated := CurrentAccount(c)
+	if !authenticated {
+		limit := h.config.BufferSize
+		if limit <= 0 {
+			return 0
+		}
+		if h.uploadLimit != nil {
+			if shared, _, _ := h.uploadLimit.Snapshot(); shared < limit {
+				limit = shared
+			}
+		}
+		return limit
 	}
-	c.JSON(200, gin.H{"upload_max_bytes": maxBytes, "default_ttl_seconds": int64(h.config.DefaultTTL.Seconds()), "max_items": maxShareItems, "upload_auth": h.config.UploadAuth, "clipboard_formats": []string{"text/plain", "text/html", "image/png"}})
+
+	limit := EffectiveUploadLimit(user, h.config.BufferSize)
+	if user.UploadLimitBytes != nil && h.uploadLimit != nil {
+		if shared, _, _ := h.uploadLimit.Snapshot(); shared < limit {
+			limit = shared
+		}
+	}
+	return limit
 }
 
 func shareError(c *gin.Context, status int, code string) { c.JSON(status, gin.H{"error": code}) }
@@ -150,15 +170,11 @@ func (h *SharesHandler) shareURL(c *gin.Context, slug string) string {
 	return base + "/" + slug
 }
 
-// Create accepts a manifest and named binary fields. The aggregate part bytes
-// are limited by the configured quota; no clipboard body enters application logs.
+// Create accepts a manifest and named binary fields. Aggregate part bytes are
+// limited by the effective user, browser-share, and server caps.
 func (h *SharesHandler) Create(c *gin.Context) {
-	contentLimit := h.config.BufferSize
-	requestLimit := contentLimit
-	if h.uploadLimit != nil {
-		contentLimit, _, _ = h.uploadLimit.Snapshot()
-		requestLimit = contentLimit + config.MultipartOverheadBytes + maxManifestBytes
-	}
+	contentLimit := h.effectiveUploadLimit(c)
+	requestLimit := contentLimit + config.MultipartOverheadBytes + maxManifestBytes
 	u, ok := readShareUpload(c, requestLimit, contentLimit)
 	if !ok {
 		return

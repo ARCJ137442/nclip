@@ -2,6 +2,7 @@ package upload
 
 import (
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -78,9 +79,66 @@ func (h *Handler) parseTTL(c *gin.Context) (time.Time, error) {
 
 // readUploadContent extracts content, filename, and content-type from request
 // Supports X-Base64 header for base64 encoded content
+func addLimit(a, b int64) int64 {
+	maxInt := int64(^uint64(0) >> 1)
+	if a > maxInt-b {
+		return maxInt
+	}
+	return a + b
+}
+
+func encodedBase64Limit(limit int64) int64 {
+	if limit <= 0 {
+		return limit
+	}
+	maxInt := int64(^uint64(0) >> 1)
+	if limit > maxInt/4*3 {
+		return maxInt
+	}
+	groups := limit / 3
+	remainder := limit % 3
+	encoded := groups * 4
+	if remainder > 0 {
+		encoded += 4
+	}
+	return encoded + 2
+}
+
+func tooLargeReadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var maxBytesError *http.MaxBytesError
+	return errors.As(err, &maxBytesError) || strings.Contains(strings.ToLower(err.Error()), "request body too large") || strings.Contains(strings.ToLower(err.Error()), "message too large")
+}
+
 func (h *Handler) readUploadContent(c *gin.Context) ([]byte, string, string, error) {
 	limit := h.config.BufferSize
+	_, requestLimited := c.Get(config.RequestUploadLimitKey)
+	if configured, ok := c.Get(config.RequestUploadLimitKey); ok {
+		if effective, valid := configured.(int64); valid && effective > 0 {
+			limit = effective
+		}
+	}
 	contentTypeHeader := c.Request.Header.Get("Content-Type")
+	isMultipart := strings.HasPrefix(contentTypeHeader, "multipart/form-data")
+	base64Enabled := headerEnabled(c, "X-Base64")
+	requestLimit := limit
+	if base64Enabled {
+		requestLimit = encodedBase64Limit(limit)
+	}
+	if isMultipart {
+		requestLimit = addLimit(requestLimit, config.MultipartOverheadBytes)
+	}
+	if requestLimit <= 0 {
+		return nil, "", "", fmt.Errorf("invalid buffer size configuration: %d", requestLimit)
+	}
+	if c.Request.ContentLength > requestLimit {
+		return nil, "", "", fmt.Errorf("content too large: request exceeds limit of %d bytes", requestLimit)
+	}
+	if requestLimited {
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, requestLimit)
+	}
 
 	var content []byte
 	var filename string
@@ -94,6 +152,9 @@ func (h *Handler) readUploadContent(c *gin.Context) ([]byte, string, string, err
 	}
 
 	if err != nil {
+		if tooLargeReadError(err) {
+			return nil, filename, contentType, fmt.Errorf("content too large: request exceeds limit of %d bytes", requestLimit)
+		}
 		return nil, filename, contentType, err
 	}
 
@@ -160,6 +221,9 @@ func (h *Handler) decodeBase64Content(encoded []byte) ([]byte, error) {
 func (h *Handler) readMultipartUpload(c *gin.Context, limit int64) ([]byte, string, string, error) {
 	file, header, err := c.Request.FormFile("file")
 	if err != nil {
+		if tooLargeReadError(err) {
+			return nil, "", "", fmt.Errorf("content too large: request exceeds multipart limit")
+		}
 		return nil, "", "", fmt.Errorf("no file provided")
 	}
 	defer func() { _ = file.Close() }()
@@ -169,7 +233,7 @@ func (h *Handler) readMultipartUpload(c *gin.Context, limit int64) ([]byte, stri
 	// If content is base64 encoded, adjust limit
 	effectiveLimit := limit
 	if headerEnabled(c, "X-Base64") {
-		effectiveLimit = int64(float64(limit) * 1.34)
+		effectiveLimit = encodedBase64Limit(limit)
 	}
 
 	if header.Size > 0 && header.Size > effectiveLimit {
@@ -178,6 +242,9 @@ func (h *Handler) readMultipartUpload(c *gin.Context, limit int64) ([]byte, stri
 
 	content, exceeded, err := h.readLimitedContent(file, effectiveLimit)
 	if err != nil {
+		if tooLargeReadError(err) {
+			return nil, filename, "", fmt.Errorf("content too large: multipart request exceeds limit")
+		}
 		return nil, filename, "", fmt.Errorf("failed to read file")
 	}
 	if exceeded {
@@ -195,17 +262,14 @@ func (h *Handler) readDirectUpload(c *gin.Context, limit int64) ([]byte, string,
 	// Adjust limit for base64 overhead if needed
 	effectiveLimit := limit
 	if headerEnabled(c, "X-Base64") {
-		// Base64 increases size by ~33%, plus potential padding
-		// Use 1.34x multiplier to account for overhead
-		effectiveLimit = int64(float64(limit) * 1.34)
-	}
-
-	if contentLength := c.Request.ContentLength; contentLength > 0 && contentLength > effectiveLimit {
-		return nil, "", "", fmt.Errorf("content too large: %d bytes exceeds limit of %d bytes", contentLength, effectiveLimit)
+		effectiveLimit = encodedBase64Limit(limit)
 	}
 
 	content, exceeded, err := h.readLimitedContent(c.Request.Body, effectiveLimit)
 	if err != nil {
+		if tooLargeReadError(err) {
+			return nil, "", "", fmt.Errorf("content too large: request exceeds limit")
+		}
 		return nil, "", "", fmt.Errorf("failed to read content")
 	}
 	if exceeded {
@@ -334,13 +398,17 @@ func (h *Handler) isCli(c *gin.Context) bool {
 }
 
 // Upload handles paste upload via POST /
+func tooLargeError(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "content too large") || strings.Contains(err.Error(), "decoded content too large"))
+}
+
 func (h *Handler) Upload(c *gin.Context) {
 	content, filename, contentType, err := h.readUploadContent(c)
 	if err != nil {
 		log.Printf("[ERROR] %v", err)
 		c.Header("Content-Type", "application/json; charset=utf-8")
 		status := http.StatusBadRequest
-		if strings.Contains(err.Error(), "content too large") {
+		if tooLargeError(err) {
 			status = http.StatusRequestEntityTooLarge
 		}
 		c.JSON(status, gin.H{"error": err.Error()})
@@ -395,7 +463,11 @@ func (h *Handler) UploadBurn(c *gin.Context) {
 	if err != nil {
 		log.Printf("[ERROR] %v", err)
 		c.Header("Content-Type", "application/json; charset=utf-8")
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		status := http.StatusBadRequest
+		if tooLargeError(err) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
 

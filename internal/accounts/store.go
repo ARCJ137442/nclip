@@ -30,12 +30,13 @@ type Permissions struct {
 
 // User is the public account representation. Password hashes never leave Store.
 type User struct {
-	ID          string      `json:"id"`
-	Username    string      `json:"username"`
-	Permissions Permissions `json:"permissions"`
-	Disabled    bool        `json:"disabled"`
-	CreatedAt   time.Time   `json:"created_at"`
-	Version     uint64      `json:"version"`
+	ID               string      `json:"id"`
+	Username         string      `json:"username"`
+	Permissions      Permissions `json:"permissions"`
+	UploadLimitBytes *int64      `json:"upload_limit_bytes"`
+	Disabled         bool        `json:"disabled"`
+	CreatedAt        time.Time   `json:"created_at"`
+	Version          uint64      `json:"version"`
 }
 
 type record struct {
@@ -61,12 +62,15 @@ type Authentication struct {
 type UserChange struct {
 	ID, Username, Password string
 	Permissions            Permissions
+	UploadLimitBytes       *int64
+	UploadLimitSet         bool
 	Disabled               bool
 	Version                uint64
 }
 
 type database struct {
 	Version  int                `json:"version"`
+	AdminID  string             `json:"admin_id"`
 	Users    map[string]record  `json:"users"`
 	Sessions map[string]Session `json:"sessions"`
 }
@@ -84,6 +88,10 @@ const passwordCost = 12
 const sessionLifetime = 7 * 24 * time.Hour
 const maxSessionsPerUser = 10
 const maxUsers = 1000
+const DefaultUploadLimitBytes int64 = 100 * 1024 * 1024
+const MinUploadLimitBytes int64 = 1024 * 1024
+const MaxUploadLimitBytes int64 = 100 * 1024 * 1024
+const accountDatabaseVersion = 2
 
 var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{2,63}$`)
 
@@ -98,14 +106,34 @@ func Open(dir, username, passwordFile string) (*Store, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		return nil, fmt.Errorf("protect account directory: %w", err)
+	}
 	s := &Store{path: filepath.Join(dir, "accounts.json")}
 	data, err := os.ReadFile(s.path) // #nosec G304 -- configured private account directory
 	if err == nil {
-		if err := json.Unmarshal(data, &s.state); err != nil {
+		if err := os.Chmod(s.path, 0o600); err != nil {
+			return nil, fmt.Errorf("protect account database: %w", err)
+		}
+		var saved database
+		if err := json.Unmarshal(data, &saved); err != nil {
 			return nil, fmt.Errorf("decode accounts: %w", err)
 		}
-		if s.state.Version != 1 || s.state.Users == nil || s.state.Sessions == nil || !hasManager(s.state.Users) {
-			return nil, fmt.Errorf("invalid account database")
+		switch saved.Version {
+		case 1:
+			if err := migrateV1(&saved, os.Getenv("NCLIP_OWNER_USERNAME")); err != nil {
+				return nil, err
+			}
+			if err := s.commit(saved); err != nil {
+				return nil, fmt.Errorf("migrate accounts: %w", err)
+			}
+		case accountDatabaseVersion:
+			s.state = saved
+		default:
+			return nil, fmt.Errorf("unsupported account database version %d", saved.Version)
+		}
+		if err := validateDatabase(s.state); err != nil {
+			return nil, err
 		}
 	} else if errors.Is(err, os.ErrNotExist) {
 		if err := s.bootstrap(username, passwordFile); err != nil {
@@ -171,25 +199,105 @@ func (s *Store) bootstrap(username, passwordFile string) error {
 	if err != nil {
 		return err
 	}
-	state := database{Version: 1, Users: map[string]record{id: {User: User{ID: id, Username: name, Permissions: Permissions{Upload: true, Download: true, Manage: true}, CreatedAt: time.Now().UTC(), Version: 1}, PasswordHash: hash}}, Sessions: map[string]Session{}}
+	state := database{Version: accountDatabaseVersion, AdminID: id, Users: map[string]record{id: {User: User{ID: id, Username: name, Permissions: Permissions{Upload: true, Download: true, Manage: true}, UploadLimitBytes: nil, CreatedAt: time.Now().UTC(), Version: 1}, PasswordHash: hash}}, Sessions: map[string]Session{}}
 	return s.commit(state)
 }
 
-func hasManager(users map[string]record) bool {
-	for _, u := range users {
+func enabledManagerIDs(users map[string]record) []string {
+	ids := make([]string, 0, 1)
+	for id, u := range users {
 		if !u.Disabled && u.Permissions.Manage {
-			return true
+			ids = append(ids, id)
 		}
 	}
-	return false
+	return ids
+}
+
+func migrateV1(saved *database, ownerUsername string) error {
+	if saved.Users == nil || saved.Sessions == nil {
+		return fmt.Errorf("invalid account database")
+	}
+	managers := enabledManagerIDs(saved.Users)
+	if ownerUsername != "" {
+		name, err := normalizeUsername(ownerUsername)
+		if err != nil {
+			return fmt.Errorf("invalid NCLIP_OWNER_USERNAME: %w", err)
+		}
+		for id, user := range saved.Users {
+			if user.Username == name && !user.Disabled && user.Permissions.Manage {
+				managers = []string{id}
+				break
+			}
+		}
+		if len(managers) != 1 || saved.Users[managers[0]].Username != name {
+			return fmt.Errorf("NCLIP_OWNER_USERNAME must name an enabled manager")
+		}
+	} else if len(managers) != 1 {
+		return fmt.Errorf("account migration requires exactly one enabled manager or NCLIP_OWNER_USERNAME")
+	}
+	adminID := managers[0]
+	for id, user := range saved.Users {
+		if id != adminID {
+			user.Permissions.Manage = false
+			quota := DefaultUploadLimitBytes
+			user.UploadLimitBytes = &quota
+		} else {
+			user.Permissions = Permissions{Upload: true, Download: true, Manage: true}
+			user.UploadLimitBytes = nil
+		}
+		user.Version++
+		saved.Users[id] = user
+	}
+	saved.Version = accountDatabaseVersion
+	saved.AdminID = adminID
+	saved.Sessions = map[string]Session{}
+	return nil
+}
+
+func validUploadLimit(value int64) bool {
+	return value >= MinUploadLimitBytes && value <= MaxUploadLimitBytes && value%MinUploadLimitBytes == 0
+}
+
+func validateDatabase(state database) error {
+	if state.Version != accountDatabaseVersion || state.Users == nil || len(state.Users) == 0 || len(state.Users) > maxUsers || state.Sessions == nil || state.AdminID == "" {
+		return fmt.Errorf("invalid account database")
+	}
+	admin, ok := state.Users[state.AdminID]
+	if !ok || admin.Disabled || !admin.Permissions.Manage || !admin.Permissions.Upload || !admin.Permissions.Download || admin.UploadLimitBytes != nil {
+		return fmt.Errorf("invalid administrator account")
+	}
+	seenNames := make(map[string]struct{}, len(state.Users))
+	for id, user := range state.Users {
+		if id == "" || user.ID != id {
+			return fmt.Errorf("invalid account identifier")
+		}
+		name, err := normalizeUsername(user.Username)
+		if err != nil || name != user.Username {
+			return fmt.Errorf("invalid username for account %q", user.ID)
+		}
+		if _, exists := seenNames[name]; exists {
+			return fmt.Errorf("duplicate account username %q", name)
+		}
+		seenNames[name] = struct{}{}
+		if id != state.AdminID && user.Permissions.Manage {
+			return fmt.Errorf("multiple account managers are not allowed")
+		}
+		if user.UploadLimitBytes != nil && (*user.UploadLimitBytes < MinUploadLimitBytes || *user.UploadLimitBytes > MaxUploadLimitBytes || *user.UploadLimitBytes%MinUploadLimitBytes != 0) {
+			return fmt.Errorf("invalid upload limit for account %q", user.Username)
+		}
+	}
+	return nil
 }
 
 func (s *Store) clone() database {
-	return database{Version: 1, Users: maps.Clone(s.state.Users), Sessions: maps.Clone(s.state.Sessions)}
+	return database{Version: accountDatabaseVersion, AdminID: s.state.AdminID, Users: maps.Clone(s.state.Users), Sessions: maps.Clone(s.state.Sessions)}
 }
 
 // commit publishes in-memory state only after the file replacement succeeds.
 func (s *Store) commit(next database) (result error) {
+	if err := validateDatabase(next); err != nil {
+		return err
+	}
 	data, err := json.Marshal(next)
 	if err != nil {
 		return err
@@ -240,7 +348,7 @@ func (s *Store) Authenticate(username, password string) (Authentication, error) 
 	if err != nil || found.ID == "" || found.Disabled {
 		return Authentication{}, ErrInput("invalid_credentials")
 	}
-	return Authentication{User: found.User, revision: found.Version}, nil
+	return Authentication{User: cloneUser(found.User), revision: found.Version}, nil
 }
 
 // NewSession rotates a fresh opaque token after credential authentication.
@@ -297,7 +405,7 @@ func (s *Store) Current(raw string) (User, Session, bool) {
 	if !ok || u.Disabled || u.Version != session.Revision {
 		return User{}, Session{}, false
 	}
-	return u.User, session, true
+	return cloneUser(u.User), session, true
 }
 
 // Logout removes the current opaque session without affecting other devices.
@@ -315,7 +423,7 @@ func (s *Store) List() []User {
 	defer s.mu.RUnlock()
 	users := make([]User, 0, len(s.state.Users))
 	for _, u := range s.state.Users {
-		users = append(users, u.User)
+		users = append(users, cloneUser(u.User))
 	}
 	sort.Slice(users, func(i, j int) bool { return users[i].Username < users[j].Username })
 	return users
@@ -352,28 +460,57 @@ func (s *Store) SaveUser(actorID string, change UserChange) (User, error) {
 	if change.ID != "" && u.Version != change.Version {
 		return User{}, ErrInput("user_changed")
 	}
+	if change.UploadLimitSet && change.UploadLimitBytes != nil && !validUploadLimit(*change.UploadLimitBytes) {
+		return User{}, ErrInput("upload_limit_out_of_range")
+	}
+	if u.ID == s.state.AdminID {
+		if name != u.Username || change.Disabled || !change.Permissions.Upload || !change.Permissions.Download || !change.Permissions.Manage || change.UploadLimitSet && change.UploadLimitBytes != nil {
+			return User{}, ErrInput("admin_immutable")
+		}
+		u.UploadLimitBytes = nil
+	} else {
+		if change.Permissions.Manage {
+			return User{}, ErrInput("admin_exists")
+		}
+		if change.UploadLimitSet {
+			u.UploadLimitBytes = cloneLimit(change.UploadLimitBytes)
+		} else if change.ID == "" {
+			quota := DefaultUploadLimitBytes
+			u.UploadLimitBytes = &quota
+		}
+	}
 	u.Username = name
 	u.Permissions = change.Permissions
 	u.Disabled = change.Disabled
 	u.Version++
 	next := s.clone()
 	next.Users[u.ID] = u
-	if !hasManager(next.Users) {
-		return User{}, ErrInput("last_manager")
-	}
 	revokeSessions(&next, u.ID)
 	if err := s.commit(next); err != nil {
 		return User{}, err
 	}
-	return u.User, nil
+	return cloneUser(u.User), nil
 }
 
 func (s *Store) requireManager(id string) error {
 	u, ok := s.state.Users[id]
-	if !ok || u.Disabled || !u.Permissions.Manage {
+	if !ok || u.Disabled || id != s.state.AdminID || !u.Permissions.Manage {
 		return ErrInput("permission_denied")
 	}
 	return nil
+}
+
+func cloneLimit(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func cloneUser(user User) User {
+	user.UploadLimitBytes = cloneLimit(user.UploadLimitBytes)
+	return user
 }
 
 func (s *Store) editRecord(id, hash string) (record, error) {
@@ -397,7 +534,8 @@ func (s *Store) editRecord(id, hash string) (record, error) {
 	if err != nil {
 		return record{}, err
 	}
-	return record{User: User{ID: id, CreatedAt: time.Now().UTC()}, PasswordHash: hash}, nil
+	quota := DefaultUploadLimitBytes
+	return record{User: User{ID: id, UploadLimitBytes: &quota, CreatedAt: time.Now().UTC()}, PasswordHash: hash}, nil
 }
 
 func revokeSessions(next *database, userID string) {
@@ -415,14 +553,14 @@ func (s *Store) DeleteUser(actorID, id string) error {
 	if err := s.requireManager(actorID); err != nil {
 		return err
 	}
+	if id == s.state.AdminID {
+		return ErrInput("admin_immutable")
+	}
 	if _, ok := s.state.Users[id]; !ok {
 		return ErrInput("user_not_found")
 	}
 	next := s.clone()
 	delete(next.Users, id)
 	revokeSessions(&next, id)
-	if !hasManager(next.Users) {
-		return ErrInput("last_manager")
-	}
 	return s.commit(next)
 }

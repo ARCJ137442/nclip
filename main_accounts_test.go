@@ -2,7 +2,9 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -131,12 +133,11 @@ func TestAccountsFormSessionAndCSRF(t *testing.T) {
 func TestAccountsPermissionMatrixAndPublicShares(t *testing.T) {
 	router := accountRouter(t)
 	admin := signIn(t, router, "admin", "test-admin-password")
-	createAccount(t, admin, "uploadonly", gin.H{"upload": true})
-	createAccount(t, admin, "downloadonly", gin.H{"download": true})
-	createAccount(t, admin, "manageonly", gin.H{"manage": true})
+	uploadID := createAccount(t, admin, "uploadonly", gin.H{"upload": true})
+	downloadID := createAccount(t, admin, "downloadonly", gin.H{"download": true})
 	upload := signIn(t, router, "uploadonly", "test-user-password")
 	download := signIn(t, router, "downloadonly", "test-user-password")
-	manager := signIn(t, router, "manageonly", "test-user-password")
+	manager := admin
 	for _, client := range []accountClient{upload, download} {
 		if w := client.call("GET", "/api/v1/users", nil, false); w.Code != 403 {
 			t.Fatalf("user management leaked %d", w.Code)
@@ -145,20 +146,30 @@ func TestAccountsPermissionMatrixAndPublicShares(t *testing.T) {
 	if w := download.call("POST", "/", nil, true); w.Code != 403 {
 		t.Fatalf("reader uploaded %d", w.Code)
 	}
-	if w := manager.call("POST", "/", nil, true); w.Code != 403 {
-		t.Fatalf("manage granted upload %d", w.Code)
+	adminPaste := accountLegacyPaste(t, manager, false)
+	if w := manager.call("GET", "/raw/"+adminPaste, nil, false); w.Code != http.StatusOK {
+		t.Fatalf("administrator upload permission did not store content: %d", w.Code)
 	}
 	if w := manager.call("GET", "/api/v1/users", nil, false); w.Code != 200 {
 		t.Fatal(w.Body.String())
 	}
+	for _, id := range []string{uploadID, downloadID} {
+		w := manager.call("PUT", "/api/v1/users/"+id, gin.H{"username": map[string]string{uploadID: "uploadonly", downloadID: "downloadonly"}[id], "permissions": gin.H{"upload": id == uploadID, "download": id == downloadID}, "upload_limit_bytes": int64(1024), "version": 1}, true)
+		if w.Code != 400 {
+			t.Fatalf("invalid user cap returned %d: %s", w.Code, w.Body.String())
+		}
+	}
 	private := accountLegacyPaste(t, upload, false)
-	for _, client := range []accountClient{upload, manager, {router: router}} {
+	for _, client := range []accountClient{upload, {router: router}} {
 		if w := client.call("GET", "/raw/"+private, nil, false); w.Code == 200 {
 			t.Fatal("private content leaked")
 		}
 	}
 	if w := download.call("GET", "/raw/"+private, nil, false); w.Code != 200 {
 		t.Fatalf("reader failed %d", w.Code)
+	}
+	if w := manager.call("GET", "/raw/"+private, nil, false); w.Code != 200 {
+		t.Fatalf("administrator read failed %d", w.Code)
 	}
 	if w := download.call("DELETE", "/"+private, nil, true); w.Code != 403 {
 		t.Fatal("reader deleted content")
@@ -170,6 +181,19 @@ func TestAccountsPermissionMatrixAndPublicShares(t *testing.T) {
 	if w := manager.call("GET", "/api/v1/admin/shares", nil, false); w.Code != 200 || strings.Contains(w.Body.String(), "password_hash") {
 		t.Fatal("bad administration listing")
 	}
+}
+
+func accountSignupClients(t *testing.T, router http.Handler) (accountClient, accountClient, accountClient, string, string) {
+	t.Helper()
+	admin := signIn(t, router, "admin", "test-admin-password")
+	adminID := adminSessionUserID(t, admin)
+	uploadID := createAccount(t, admin, "smallupload", gin.H{"upload": true})
+	_ = createAccount(t, admin, "smallread", gin.H{"download": true})
+	quota := int64(config.MiB)
+	if w := admin.call("PUT", "/api/v1/users/"+uploadID, gin.H{"username": "smallupload", "permissions": gin.H{"upload": true}, "upload_limit_bytes": quota, "version": 1}, true); w.Code != http.StatusOK {
+		t.Fatalf("set user quota %d: %s", w.Code, w.Body.String())
+	}
+	return admin, signIn(t, router, "smallupload", "test-user-password"), signIn(t, router, "smallread", "test-user-password"), adminID, uploadID
 }
 
 func accountLegacyPaste(t *testing.T, client accountClient, public bool) string {
@@ -198,17 +222,130 @@ func accountLegacyPaste(t *testing.T, client accountClient, public bool) string 
 	return result.Slug
 }
 
+func TestPerUserUploadLimitAllLegacyEndpoints(t *testing.T) {
+	router := accountRouter(t)
+	_, uploader, _, _, _ := accountSignupClients(t, router)
+	atLimit := []struct {
+		path   string
+		body   []byte
+		base64 bool
+	}{
+		{path: "/", body: bytes.Repeat([]byte("x"), int(config.MiB))},
+		{path: "/burn/", body: bytes.Repeat([]byte("x"), int(config.MiB))},
+		{path: "/base64", body: []byte(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), int(config.MiB)))), base64: true},
+	}
+	for _, tc := range atLimit {
+		request := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(tc.body))
+		request.Header.Set("Content-Type", "text/plain")
+		request.Header.Set("Origin", "https://clip.test")
+		request.Header.Set("Sec-Fetch-Site", "same-origin")
+		request.Header.Set("X-CSRF-Token", uploader.csrf)
+		if tc.base64 {
+			request.Header.Set("X-Base64", "true")
+		}
+		request.AddCookie(uploader.cookie)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusOK {
+			t.Errorf("%s rejected exact user limit: %d: %s", tc.path, response.Code, response.Body.String())
+		}
+	}
+	tests := []struct {
+		path   string
+		body   []byte
+		base64 bool
+	}{
+		{path: "/", body: bytes.Repeat([]byte("x"), int(config.MiB)+1)},
+		{path: "/burn/", body: bytes.Repeat([]byte("x"), int(config.MiB)+1)},
+		{path: "/base64", body: []byte(base64.StdEncoding.EncodeToString(bytes.Repeat([]byte("x"), int(config.MiB)+1))), base64: true},
+	}
+	for _, tc := range tests {
+		request := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(tc.body))
+		request.Header.Set("Content-Type", "text/plain")
+		request.Header.Set("Origin", "https://clip.test")
+		request.Header.Set("Sec-Fetch-Site", "same-origin")
+		request.Header.Set("X-CSRF-Token", uploader.csrf)
+		if tc.base64 {
+			request.Header.Set("X-Base64", "true")
+		}
+		request.AddCookie(uploader.cookie)
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, request)
+		if response.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s returned %d, want 413: %s", tc.path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func accountShareRequest(router http.Handler, client accountClient, size int) *httptest.ResponseRecorder {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	_ = writer.WriteField("manifest", `{"version":1,"items":[{"kind":"file","name":"payload.bin","parts":[{"key":"file","mime":"application/octet-stream"}]}]}`)
+	part, _ := writer.CreateFormFile("file", "payload.bin")
+	_, _ = part.Write(bytes.Repeat([]byte("x"), size))
+	_ = writer.Close()
+	request := httptest.NewRequest(http.MethodPost, "/api/v1/shares", &body)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("Origin", "https://clip.test")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
+	request.Header.Set("X-CSRF-Token", client.csrf)
+	request.AddCookie(client.cookie)
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	return response
+}
+
+func TestPerUserUploadLimitBrowserShares(t *testing.T) {
+	router := accountRouter(t)
+	admin, uploader, _, _, uploadID := accountSignupClients(t, router)
+	if response := admin.call("PUT", "/api/v1/users/"+uploadID, gin.H{"username": "smallupload", "permissions": gin.H{"upload": true}, "upload_limit_bytes": 2 * config.MiB, "version": 2}, true); response.Code != http.StatusOK {
+		t.Fatalf("raise user quota above global setting %d: %s", response.Code, response.Body.String())
+	}
+	uploader = signIn(t, router, "smallupload", "test-user-password")
+	if response := admin.call("PUT", "/api/v1/settings/upload", gin.H{"upload_limit_mib": 1, "revision": 0}, true); response.Code != http.StatusOK {
+		t.Fatalf("set low global share limit %d: %s", response.Code, response.Body.String())
+	}
+	if response := accountShareRequest(router, uploader, int(config.MiB+1)); response.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over-limit edge share returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := accountShareRequest(router, uploader, int(config.MiB)); response.Code != http.StatusCreated {
+		t.Fatalf("at-limit edge share returned %d: %s", response.Code, response.Body.String())
+	}
+	if response := accountShareRequest(router, admin, 2*config.MiB); response.Code != http.StatusCreated {
+		t.Fatalf("administrator was constrained by global browser-share setting: %d %s", response.Code, response.Body.String())
+	}
+}
+
 func TestUploadSettingsManagerPermissionCSRFAndPersistence(t *testing.T) {
 	router := accountRouter(t)
 	admin := signIn(t, router, "admin", "test-admin-password")
-	createAccount(t, admin, "manageonly", gin.H{"manage": true})
-	manager := signIn(t, router, "manageonly", "test-user-password")
-	createAccount(t, admin, "uploadonly", gin.H{"upload": true})
+	adminID := adminSessionUserID(t, admin)
+	uploaderID := createAccount(t, admin, "uploadonly", gin.H{"upload": true})
 	uploader := signIn(t, router, "uploadonly", "test-user-password")
 
-	assertUploadSettingsAccess(t, router, manager, uploader)
-	assertUploadSettingsSave(t, manager)
-	assertUploadSettingsPersistence(t, admin, manager)
+	assertUploadSettingsAccess(t, router, admin, uploader)
+	assertUploadSettingsSave(t, admin)
+	assertUploadSettingsPersistence(t, admin, admin)
+	if w := admin.call("PUT", "/api/v1/users/"+uploaderID, gin.H{"username": "uploadonly", "permissions": gin.H{"upload": true}, "upload_limit_bytes": nil, "version": 1}, true); w.Code != http.StatusOK {
+		t.Fatalf("admin could not clear per-user limit: %d %s", w.Code, w.Body.String())
+	}
+	if w := admin.call("PUT", "/api/v1/users/"+adminID, gin.H{"username": "admin", "permissions": gin.H{"upload": true, "download": true, "manage": true}, "upload_limit_bytes": config.MiB, "version": 1}, true); w.Code != http.StatusConflict {
+		t.Fatalf("admin per-user cap change returned %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func adminSessionUserID(t *testing.T, admin accountClient) string {
+	t.Helper()
+	w := admin.call("GET", "/api/v1/session", nil, false)
+	var result struct {
+		User struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	return result.User.ID
 }
 
 func assertUploadSettingsAccess(t *testing.T, router http.Handler, manager, uploader accountClient) {
@@ -262,7 +399,7 @@ func assertUploadSettingsPersistence(t *testing.T, admin, manager accountClient)
 		t.Fatalf("active setting = (%d MiB, revision %d), want (2 MiB, revision 1)", current.UploadLimitMiB, current.Revision)
 	}
 	w = manager.call("GET", "/api/v1/ui-config", nil, false)
-	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"upload_max_bytes":2097152`) {
+	if w.Code != http.StatusOK || !strings.Contains(w.Body.String(), `"upload_max_bytes":4194304`) {
 		t.Fatalf("public UI config did not reflect saved limit: %d %s", w.Code, w.Body.String())
 	}
 	if w := manager.call("PUT", "/api/v1/settings/upload", gin.H{"upload_limit_mib": 3, "revision": 0}, true); w.Code != http.StatusConflict {
@@ -275,8 +412,8 @@ func TestReceiveEntryWorksBeforeJavaScript(t *testing.T) {
 	admin := signIn(t, router, "admin", "test-admin-password")
 	slug := accountLegacyPaste(t, admin, false)
 	home := admin.call("GET", "/", nil, false)
-	if home.Code != 200 || !strings.Contains(home.Body.String(), `src="/static/script.js`) {
-		t.Fatalf("composer template incomplete: %d", home.Code)
+	if home.Code != http.StatusSeeOther || home.Header().Get("Location") != "/admin" {
+		t.Fatalf("administrator home destination: %d %s", home.Code, home.Header().Get("Location"))
 	}
 	for _, value := range []string{slug, strings.ToLower(slug), "https://clip.test/raw/" + slug} {
 		w := admin.call("GET", "/receive?code="+url.QueryEscape(value), nil, false)

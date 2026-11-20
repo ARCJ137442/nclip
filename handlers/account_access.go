@@ -146,7 +146,15 @@ func (h *AccountHandler) publicOrMissingShare(c *gin.Context) bool {
 	if errors.Is(err, storage.ErrNotFound) {
 		return true
 	}
-	return err == nil && paste != nil && (paste.Public || paste.IsExpired())
+	return err == nil && paste != nil && paste.IsExpired()
+}
+
+func (h *AccountHandler) publicShare(c *gin.Context) bool {
+	if !shareRead(c) {
+		return false
+	}
+	paste, err := h.pastes.Get(c.Param("slug"))
+	return err == nil && paste != nil && paste.Public && !paste.IsExpired()
 }
 
 func requiredPermission(c *gin.Context) string {
@@ -164,6 +172,19 @@ func requiredPermission(c *gin.Context) string {
 		return "upload"
 	}
 	return ""
+}
+
+// EffectiveUploadLimit combines a user's optional per-upload cap with the
+// server's configured hard limit. The shared setting is applied separately
+// only to browser share uploads.
+func EffectiveUploadLimit(user accounts.User, serverLimit int64) int64 {
+	if serverLimit <= 0 {
+		return 0
+	}
+	if user.UploadLimitBytes != nil && *user.UploadLimitBytes < serverLimit {
+		return *user.UploadLimitBytes
+	}
+	return serverLimit
 }
 
 func allowed(user accounts.User, permission string) bool {
@@ -241,10 +262,13 @@ func (h *AccountHandler) Gate() gin.HandlerFunc {
 		}
 		if ok {
 			c.Set(accountContext, user)
+			if permission := requiredPermission(c); permission == "upload" && c.Request.URL.Path != "/api/v1/shares" {
+				c.Set(config.RequestUploadLimitKey, EffectiveUploadLimit(user, h.config.BufferSize))
+			}
 		}
 		// Missing/expired links have no protected content; let the normal 404
 		// page explain them, including a public one-time link after consumption.
-		if h.publicOrMissingShare(c) {
+		if h.publicOrMissingShare(c) || !ok && h.publicShare(c) {
 			c.Next()
 			return
 		}
@@ -252,7 +276,8 @@ func (h *AccountHandler) Gate() gin.HandlerFunc {
 			h.loginRequired(c)
 			return
 		}
-		if !allowed(user, requiredPermission(c)) {
+		permission := requiredPermission(c)
+		if !(permission == "download" && h.publicShare(c)) && !allowed(user, permission) {
 			h.forbidden(c)
 			return
 		}

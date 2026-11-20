@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/url"
@@ -130,16 +131,16 @@ func (h *AccountHandler) Home(c *gin.Context) {
 		web.Index(c)
 		return
 	}
+	if user.Permissions.Manage {
+		c.Redirect(http.StatusSeeOther, "/admin")
+		return
+	}
 	if user.Permissions.Upload {
-		NewWebUIHandler(h.config).Index(c)
+		web.Index(c)
 		return
 	}
 	if user.Permissions.Download {
 		h.ReceivePage(c)
-		return
-	}
-	if user.Permissions.Manage {
-		c.Redirect(303, "/admin")
 		return
 	}
 	c.HTML(200, "account-error.html", gin.H{"Version": h.config.Version})
@@ -193,24 +194,38 @@ func (h *AccountHandler) AdminPage(c *gin.Context) {
 }
 
 // Users lists public user records only.
-func (h *AccountHandler) Users(c *gin.Context) { c.JSON(200, gin.H{"items": h.store.List()}) }
+func (h *AccountHandler) Users(c *gin.Context) {
+	actor, _ := CurrentAccount(c)
+	c.JSON(200, gin.H{"items": h.store.List(), "admin_id": actor.ID})
+}
 
 // SaveUser replaces the explicit account settings and revokes old sessions.
 func (h *AccountHandler) SaveUser(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 8192)
 	var input struct {
-		Username    string                `json:"username"`
-		Password    string                `json:"password"`
-		Permissions *accounts.Permissions `json:"permissions"`
-		Disabled    bool                  `json:"disabled"`
-		Version     uint64                `json:"version"`
+		Username        string                `json:"username"`
+		Password        string                `json:"password"`
+		Permissions     *accounts.Permissions `json:"permissions"`
+		UploadLimitJSON json.RawMessage       `json:"upload_limit_bytes"`
+		Disabled        bool                  `json:"disabled"`
+		Version         uint64                `json:"version"`
 	}
 	if c.ShouldBindJSON(&input) != nil || input.Permissions == nil {
 		c.JSON(400, gin.H{"error": "invalid_request"})
 		return
 	}
+	var uploadLimit *int64
+	limitSet := len(input.UploadLimitJSON) > 0
+	if limitSet && string(input.UploadLimitJSON) != "null" {
+		var value int64
+		if json.Unmarshal(input.UploadLimitJSON, &value) != nil {
+			c.JSON(400, gin.H{"error": "invalid_request"})
+			return
+		}
+		uploadLimit = &value
+	}
 	actor, _ := CurrentAccount(c)
-	user, err := h.store.SaveUser(actor.ID, accounts.UserChange{ID: c.Param("id"), Username: input.Username, Password: input.Password, Permissions: *input.Permissions, Disabled: input.Disabled, Version: input.Version})
+	user, err := h.store.SaveUser(actor.ID, accounts.UserChange{ID: c.Param("id"), Username: input.Username, Password: input.Password, Permissions: *input.Permissions, UploadLimitBytes: uploadLimit, UploadLimitSet: limitSet, Disabled: input.Disabled, Version: input.Version})
 	if err != nil {
 		accountError(c, err)
 		return
@@ -235,7 +250,7 @@ func accountError(c *gin.Context, err error) {
 		if input == "permission_denied" {
 			status = 403
 		}
-		if input == "username_exists" || input == "last_manager" || input == "user_changed" {
+		if input == "username_exists" || input == "last_manager" || input == "user_changed" || input == "admin_exists" || input == "admin_immutable" {
 			status = 409
 		}
 		if input == "user_not_found" {

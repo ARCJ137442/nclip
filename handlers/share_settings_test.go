@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/johnwmail/nclip/config"
+	"github.com/johnwmail/nclip/internal/accounts"
 	"github.com/johnwmail/nclip/internal/services"
 	"github.com/johnwmail/nclip/storage"
 )
@@ -64,6 +65,42 @@ func TestSharesUploadLimitAllowsMultipartFramingButCapsContent(t *testing.T) {
 	}
 }
 
+func TestShareUploadLimitIsPerUserAndServerBounded(t *testing.T) {
+	limit, err := config.OpenUploadLimit(t.TempDir(), 2*config.MiB, config.MaxUploadLimitBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &SharesHandler{config: &config.Config{BufferSize: 20 * config.MiB}, uploadLimit: limit}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/api/v1/ui-config", nil)
+	context, _ := gin.CreateTestContext(response)
+	context.Request = request
+	quota := int64(8 * config.MiB)
+	context.Set(accountContext, accounts.User{UploadLimitBytes: &quota})
+	handler.UIConfig(context)
+	var payload struct {
+		UploadMaxBytes int64 `json:"upload_max_bytes"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.UploadMaxBytes != 2*config.MiB {
+		t.Fatalf("edge user limit = %d, want global 2 MiB", payload.UploadMaxBytes)
+	}
+
+	response = httptest.NewRecorder()
+	context, _ = gin.CreateTestContext(response)
+	context.Request = request
+	context.Set(accountContext, accounts.User{})
+	handler.UIConfig(context)
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.UploadMaxBytes != 20*config.MiB {
+		t.Fatalf("unlimited user limit = %d, want server 20 MiB", payload.UploadMaxBytes)
+	}
+}
+
 func TestUploadLimitUIConfigUsesRuntimeValue(t *testing.T) {
 	limit, err := config.OpenUploadLimit(t.TempDir(), 5*config.MiB, config.MaxUploadLimitBytes)
 	if err != nil {
@@ -72,7 +109,7 @@ func TestUploadLimitUIConfigUsesRuntimeValue(t *testing.T) {
 	if _, err := limit.Set(12*config.MiB, 0); err != nil {
 		t.Fatal(err)
 	}
-	handler := &SharesHandler{config: &config.Config{BufferSize: config.MiB}, uploadLimit: limit}
+	handler := &SharesHandler{config: &config.Config{BufferSize: 20 * config.MiB}, uploadLimit: limit}
 	response := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodGet, "/api/v1/ui-config", nil)
 	context, _ := gin.CreateTestContext(response)
@@ -86,5 +123,26 @@ func TestUploadLimitUIConfigUsesRuntimeValue(t *testing.T) {
 	}
 	if response.Code != http.StatusOK || payload.UploadMaxBytes != 12*config.MiB || strings.Contains(response.Body.String(), "revision") {
 		t.Fatalf("unexpected UI config response %d: %s", response.Code, response.Body.String())
+	}
+}
+
+func TestShareUIConfigAppliesGlobalAndServerLimitsToAnonymousRequests(t *testing.T) {
+	limit, err := config.OpenUploadLimit(t.TempDir(), 5*config.MiB, config.MaxUploadLimitBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &SharesHandler{config: &config.Config{BufferSize: 2 * config.MiB}, uploadLimit: limit}
+	response := httptest.NewRecorder()
+	context, _ := gin.CreateTestContext(response)
+	context.Request = httptest.NewRequest(http.MethodGet, "/api/v1/ui-config", nil)
+	handler.UIConfig(context)
+	var payload struct {
+		UploadMaxBytes int64 `json:"upload_max_bytes"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.UploadMaxBytes != 2*config.MiB {
+		t.Fatalf("anonymous share limit = %d, want server limit 2 MiB", payload.UploadMaxBytes)
 	}
 }
