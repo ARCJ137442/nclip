@@ -26,7 +26,7 @@ func (r *chunkReader) Read(p []byte) (int, error) {
 
 func TestValidUTF8CarriesSplitRunesBetweenChunks(t *testing.T) {
 	first := append(bytes.Repeat([]byte("a"), 64*1024-1), 0xe4)
-	reader := &chunkReader{chunks: [][]byte{first, []byte{0xb8, 0xad}}}
+	reader := &chunkReader{chunks: [][]byte{first, {0xb8, 0xad}}}
 	if err := validUTF8(reader); err != nil {
 		t.Fatalf("valid split rune rejected: %v", err)
 	}
