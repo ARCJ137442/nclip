@@ -18,6 +18,39 @@
             <span data-i18n="createUser">创建用户</span>
           </button>
         </div>
+        <div
+          id="admin-activity"
+          class="activity-strip"
+          hidden
+        >
+          <span class="activity-marker" aria-hidden="true"></span>
+          <div
+            class="activity-copy"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            <strong id="admin-activity-title"></strong>
+            <span id="admin-activity-detail"></span>
+          </div>
+          <button
+            id="admin-activity-retry"
+            class="button secondary"
+            type="button"
+            data-i18n="retryOperation"
+            hidden
+          >
+            重试
+          </button>
+          <button
+            id="admin-activity-close"
+            class="button quiet"
+            type="button"
+            data-i18n="dismiss"
+          >
+            关闭
+          </button>
+        </div>
         <div class="admin-tabs" role="tablist" aria-label="Administration">
           <button
             id="users-tab"
@@ -257,6 +290,13 @@
           管理员账号的用户名、权限、状态和上传上限固定；仍可重置密码。
         </p>
         <p id="user-form-error" class="form-error" role="alert"></p>
+        <p
+          id="user-form-status"
+          class="operation-line"
+          role="status"
+          aria-live="polite"
+          hidden
+        ></p>
         <div class="dialog-actions">
           <button
             id="save-user"

@@ -33,7 +33,12 @@ export function loginForm() {
   render();
   window.addEventListener("preferenceschange", render);
   form.addEventListener("submit", () => {
-    document.getElementById("login-submit").disabled = true;
+    const submit = document.getElementById("login-submit");
+    submit.disabled = true;
+    submit.textContent = t("loggingIn");
     form.setAttribute("aria-busy", "true");
+    const status = document.getElementById("login-status");
+    status.textContent = t("loginChecking");
+    status.hidden = false;
   });
 }

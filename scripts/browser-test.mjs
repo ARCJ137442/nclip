@@ -11,6 +11,7 @@ const evidence = process.env.NCLIP_EVIDENCE_DIR || "browser-evidence";
 await mkdir(evidence, { recursive: true });
 const browser = await chromium.launch({
   headless: true,
+  args: process.env.NCLIP_BROWSER_ARGS?.split(/\s+/).filter(Boolean),
   ...(process.env.NCLIP_BROWSER_CHANNEL
     ? { channel: process.env.NCLIP_BROWSER_CHANNEL }
     : {}),
@@ -53,6 +54,11 @@ async function home() {
 async function send() {
   await page.locator("#send").click();
   await waitVisible("result");
+  assert.equal(
+    await page.locator("#result-stages li[data-state=done]").count(),
+    4,
+  );
+  assert.match(await page.locator("#result-facts").innerText(), /10\.0 MiB|B/);
   const url = await page.locator("#share-url").inputValue();
   assert.match(url, new RegExp(`^${base}/[A-Z2-9]+$`));
   slugs.add(url.split("/").pop());
@@ -61,6 +67,8 @@ async function send() {
 async function open(url) {
   await page.goto(url);
   await page.locator("#received-items article").first().waitFor();
+  await page.locator("#receive-outcome").waitFor({ state: "visible" });
+  assert.match(await page.locator("#receive-outcome-facts").innerText(), /校验通过/);
 }
 async function pasteFromSystem() {
   await page.locator("#paste").click();
@@ -176,6 +184,7 @@ try {
   );
   await page.locator("#receive").click();
   await page.locator("#received-items article").waitFor();
+  assert.match(await page.locator("#receive-outcome-facts").innerText(), /已销毁/);
   assert.equal(
     (await context.request.get(`${base}/api/v1/shares/${slug}`)).status(),
     404,

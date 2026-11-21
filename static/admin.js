@@ -15,7 +15,79 @@ export async function startAdmin() {
     shareResult = null,
     shareRequest = 0,
     confirmAction = null,
-    saving = false;
+    saving = false,
+    activityToken = 0,
+    activitySpec = null,
+    activityRetry = null;
+  function renderActivity() {
+    const region = $("admin-activity");
+    if (!activitySpec) {
+      region.hidden = true;
+      return;
+    }
+    region.hidden = false;
+    region.dataset.state = activitySpec.state;
+    region.setAttribute(
+      "aria-busy",
+      String(activitySpec.state === "working"),
+    );
+    $("admin-activity-title").textContent = t(
+      activitySpec.titleKey,
+      activitySpec.titleValues,
+    );
+    const stamp = activitySpec.at.toLocaleTimeString(
+      document.documentElement.lang,
+      { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false },
+    );
+    $("admin-activity-detail").textContent = [activitySpec.detail, stamp]
+      .filter(Boolean)
+      .join(" · ");
+    $("admin-activity-retry").hidden = !activityRetry;
+    $("admin-activity-close").hidden = activitySpec.state === "working";
+  }
+  function beginActivity(titleKey, titleValues = {}, detail = "") {
+    const token = ++activityToken;
+    activityRetry = null;
+    activitySpec = {
+      titleKey,
+      titleValues,
+      detail,
+      state: "working",
+      at: new Date(),
+    };
+    renderActivity();
+    return token;
+  }
+  function settleActivity(
+    token,
+    titleKey,
+    titleValues = {},
+    { detail = "", state = "done", retry = null } = {},
+  ) {
+    if (token !== activityToken) return;
+    activityRetry = retry;
+    activitySpec = {
+      titleKey,
+      titleValues,
+      detail,
+      state,
+      at: new Date(),
+    };
+    renderActivity();
+  }
+  function announceActivity(titleKey, titleValues = {}, detail = "") {
+    const token = ++activityToken;
+    activityRetry = null;
+    activitySpec = {
+      titleKey,
+      titleValues,
+      detail,
+      state: "done",
+      at: new Date(),
+    };
+    renderActivity();
+    return token;
+  }
   function badge(label, extra = "") {
     const el = document.createElement("span");
     el.className = "badge " + extra;
@@ -82,13 +154,35 @@ export async function startAdmin() {
               confirm(
                 t("deleteUserPrompt", { name: user.username }),
                 async () => {
-                  await request("/api/v1/users/" + user.id, { method: "DELETE" });
-                  if (user.id === access.user.id) {
-                    location.assign("/login");
-                    return;
+                  const token = beginActivity("adminDeletingUser", {
+                    name: user.username,
+                  });
+                  try {
+                    await request("/api/v1/users/" + user.id, {
+                      method: "DELETE",
+                    });
+                    if (user.id === access.user.id) {
+                      location.assign("/login");
+                      return;
+                    }
+                    try {
+                      await loadUsers();
+                    } catch {
+                      /* Deletion succeeded; the list exposes its own retry. */
+                    }
+                    announceActivity(
+                      "adminUserDeleted",
+                      { name: user.username },
+                      t("userDeleted"),
+                    );
+                    status("userDeleted", "success");
+                  } catch (error) {
+                    settleActivity(token, "adminRequestFailed", {}, {
+                      detail: accountMessage(error.message),
+                      state: "error",
+                    });
+                    throw error;
                   }
-                  await loadUsers();
-                  status("userDeleted", "success");
                 },
               ),
             "danger",
@@ -100,9 +194,25 @@ export async function startAdmin() {
     if (!selected.length) list.textContent = t("noUsers");
   }
   async function loadUsers() {
-    const response = await request("/api/v1/users");
-    users = (await response.json()).items;
-    renderUsers();
+    const token = beginActivity("adminReadingUsers");
+    $("user-list").setAttribute("aria-busy", "true");
+    try {
+      const response = await request("/api/v1/users");
+      users = (await response.json()).items;
+      renderUsers();
+      settleActivity(token, "adminUsersReady", {}, {
+        detail: t("userCount", { count: users.length }),
+      });
+    } catch (error) {
+      settleActivity(token, "adminUsersFailed", {}, {
+        detail: accountMessage(error.message),
+        state: "error",
+        retry: () => loadUsers(),
+      });
+      throw error;
+    } finally {
+      $("user-list").removeAttribute("aria-busy");
+    }
   }
   function edit(user = null) {
     const isManager = user?.permissions.manage === true;
@@ -194,11 +304,31 @@ export async function startAdmin() {
           "delete",
           () =>
             confirm(t("deleteSharePrompt", { code: share.id }), async () => {
-              await request("/api/v1/admin/shares/" + share.id, {
-                method: "DELETE",
+              const token = beginActivity("adminDeletingShare", {
+                code: share.id,
               });
-              await loadShares();
-              status("deleted", "success");
+              try {
+                await request("/api/v1/admin/shares/" + share.id, {
+                  method: "DELETE",
+                });
+                try {
+                  await loadShares();
+                } catch {
+                  /* Deletion succeeded; the list exposes its own retry. */
+                }
+                announceActivity(
+                  "adminShareDeleted",
+                  { code: share.id },
+                  t("deleted"),
+                );
+                status("deleted", "success");
+              } catch (error) {
+                settleActivity(token, "adminRequestFailed", {}, {
+                  detail: accountMessage(error.message),
+                  state: "error",
+                });
+                throw error;
+              }
             }),
           "danger",
         ),
@@ -217,6 +347,8 @@ export async function startAdmin() {
   async function loadShares() {
     const version = ++shareRequest;
     status("loading");
+    const token = beginActivity("adminReadingShares");
+    $("share-list").setAttribute("aria-busy", "true");
     try {
       const response = await request(
         "/api/v1/admin/shares?" +
@@ -229,8 +361,25 @@ export async function startAdmin() {
       sharePages = result.pages;
       renderShares();
       status("");
+      settleActivity(token, "adminSharesReady", {}, {
+        detail: t("shareCount", {
+          count: result.total,
+          size: sizeLabel(result.total_bytes),
+        }),
+      });
     } catch (error) {
-      if (version === shareRequest) failure(error);
+      if (version === shareRequest) {
+        failure(error);
+        settleActivity(token, "adminSharesFailed", {}, {
+          detail: accountMessage(error.message),
+          state: "error",
+          retry: () => loadShares(),
+        });
+      }
+    } finally {
+      if (version === shareRequest) {
+        $("share-list").removeAttribute("aria-busy");
+      }
     }
   }
   function setUploadDraft(value) {
@@ -245,6 +394,8 @@ export async function startAdmin() {
   }
   async function loadUploadSettings({ discardDraft = false } = {}) {
     if (uploadDraftDirty && !discardDraft) return;
+    const token = beginActivity("adminLoadingSettings");
+    $("settings-panel").setAttribute("aria-busy", "true");
     $("upload-settings-state").textContent = t("uploadSettingsLoading");
     $("reload-upload-settings").hidden = true;
     try {
@@ -264,6 +415,9 @@ export async function startAdmin() {
       $("upload-settings-state").textContent = t("uploadSettingsLoaded", {
         size: `${value} MiB`,
       });
+      settleActivity(token, "adminSettingsReady", {}, {
+        detail: t("uploadSettingsLoaded", { size: `${value} MiB` }),
+      });
     } catch (error) {
       $("upload-settings-state").textContent = "";
       $("upload-settings-error").textContent =
@@ -271,6 +425,16 @@ export async function startAdmin() {
           ? t("uploadSettingsUnavailable")
           : accountMessage(error.message);
       $("reload-upload-settings").hidden = false;
+      settleActivity(token, "adminRequestFailed", {}, {
+        detail:
+          error.message === "settings_unavailable"
+            ? t("uploadSettingsUnavailable")
+            : accountMessage(error.message),
+        state: "error",
+        retry: () => loadUploadSettings({ discardDraft: true }),
+      });
+    } finally {
+      $("settings-panel").removeAttribute("aria-busy");
     }
   }
   async function tab(name) {
@@ -306,8 +470,10 @@ export async function startAdmin() {
       return;
     }
     saving = true;
+    const token = beginActivity("adminSavingSettings");
     $("save-upload-settings").disabled = true;
     $("save-upload-settings").setAttribute("aria-busy", "true");
+    $("settings-panel").setAttribute("aria-busy", "true");
     $("upload-settings-error").textContent = "";
     try {
       const response = await request("/api/v1/settings/upload", {
@@ -328,6 +494,7 @@ export async function startAdmin() {
         size: `${uploadSettings.ceiling_mib} MiB`,
       });
       $("upload-settings-state").textContent = t("uploadSettingsSaved");
+      announceActivity("adminSettingsSaved", {}, t("uploadSettingsSaved"));
     } catch (error) {
       if (error.message === "upload_limit_changed") {
         try {
@@ -341,19 +508,46 @@ export async function startAdmin() {
         }
         $("reload-upload-settings").hidden = false;
         $("upload-settings-error").textContent = t("uploadSettingsChanged");
+        settleActivity(token, "adminRequestFailed", {}, {
+          detail: t("uploadSettingsChanged"),
+          state: "error",
+          retry: () => loadUploadSettings({ discardDraft: true }),
+        });
       } else {
         $("upload-settings-error").textContent =
           error.message === "upload_limit_out_of_range"
             ? t("invalidRequest")
             : t("uploadSettingsFailed");
+        settleActivity(token, "adminRequestFailed", {}, {
+          detail:
+            error.message === "upload_limit_out_of_range"
+              ? t("invalidRequest")
+              : t("uploadSettingsFailed"),
+          state: "error",
+          retry: () => $("upload-settings-form").requestSubmit(),
+        });
       }
     } finally {
       saving = false;
       $("save-upload-settings").disabled = false;
       $("save-upload-settings").removeAttribute("aria-busy");
+      $("settings-panel").removeAttribute("aria-busy");
     }
   });
   $("new-user").addEventListener("click", () => edit());
+  $("admin-activity-close").addEventListener("click", () => {
+    activityToken++;
+    activityRetry = null;
+    activitySpec = null;
+    renderActivity();
+  });
+  $("admin-activity-retry").addEventListener("click", () => {
+    if (!activityRetry) return;
+    const retry = activityRetry;
+    activityRetry = null;
+    $("admin-activity-retry").hidden = true;
+    Promise.resolve(retry()).catch((error) => failure(error));
+  });
   $("close-user-dialog").addEventListener("click", closeEditor);
   $("user-dialog").addEventListener("cancel", (event) => {
     if (saving) event.preventDefault();
@@ -407,8 +601,13 @@ export async function startAdmin() {
       return;
     }
     saving = true;
+    const name = $("edit-username").value;
+    const activity = beginActivity("adminSavingUser", { name });
     $("save-user").disabled = true;
     $("save-user").setAttribute("aria-busy", "true");
+    $("user-dialog").setAttribute("aria-busy", "true");
+    $("user-form-status").textContent = t("operationSavingUser");
+    $("user-form-status").hidden = false;
     $("user-form-error").textContent = "";
     try {
       const response = await request(
@@ -432,18 +631,36 @@ export async function startAdmin() {
         location.assign("/login");
         return;
       }
-      await loadUsers();
+      try {
+        await loadUsers();
+      } catch {
+        /* The list keeps its own retry action; the save itself succeeded. */
+      }
+      announceActivity("adminUserSaved", { name }, t("userSaved"));
       status("userSaved", "success");
       document
         .querySelector(`[data-user-id="${CSS.escape(result.user.id)}"] button`)
         ?.focus();
     } catch (error) {
       $("user-form-error").textContent = accountMessage(error.message);
-      if (error.message === "user_changed") void loadUsers();
+      settleActivity(activity, "adminRequestFailed", {}, {
+        detail: accountMessage(error.message),
+        state: "error",
+      });
+      if (error.message === "user_changed") {
+        try {
+          await loadUsers();
+        } catch {
+          /* Already surfaced by the list operation. */
+        }
+        announceActivity("adminRequestFailed", {}, accountMessage(error.message));
+      }
     } finally {
       saving = false;
       $("save-user").disabled = false;
       $("save-user").removeAttribute("aria-busy");
+      $("user-dialog").removeAttribute("aria-busy");
+      $("user-form-status").hidden = true;
     }
   });
   $("confirm-cancel").addEventListener("click", () =>
@@ -481,6 +698,7 @@ export async function startAdmin() {
   window.addEventListener("preferenceschange", () => {
     renderUsers();
     renderShares();
+    renderActivity();
     $("user-dialog-title").textContent = t(editing ? "editUser" : "createUser");
     if (uploadSettings && !uploadDraftDirty)
       $("upload-settings-state").textContent = t("uploadSettingsLoaded", {

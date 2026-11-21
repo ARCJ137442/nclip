@@ -30,7 +30,11 @@ export async function startReceiver(slug) {
     consumed = false,
     dead = false,
     bundleURL = null,
-    receiveController = null;
+    receiveController = null,
+    receiveStartedAt = 0,
+    receivePhase = "",
+    receiveAttempt = 0,
+    receiveStats = null;
   const endpoint = `/api/v1/shares/${encodeURIComponent(slug)}`;
   function etaLabel(seconds) {
     const part = timeParts(seconds);
@@ -61,8 +65,44 @@ export async function startReceiver(slug) {
             eta != null ? ` · ${t("transferEta", { time: etaLabel(eta) })}` : ""
           }`
         : "";
+    const elapsed = (performance.now() - receiveStartedAt) / 1000;
+    $("receive-freshness").textContent =
+      elapsed >= 1
+        ? t("transferElapsed", { time: etaLabel(elapsed) })
+        : "";
+  }
+  function paintReceiveStages(phase) {
+    const order = ["connecting", "downloading", "verifying", "ready"];
+    const active = order.indexOf(phase);
+    for (const [index, stage] of order.entries()) {
+      const item = $("receive-stages").querySelector(
+        `[data-stage="${stage}"]`,
+      );
+      if (!item) continue;
+      const state =
+        phase === "ready"
+          ? "done"
+          : index < active
+            ? "done"
+            : index === active
+              ? "active"
+              : "pending";
+      item.dataset.state = state;
+      if (state === "active") item.setAttribute("aria-current", "step");
+      else item.removeAttribute("aria-current");
+    }
+  }
+  function failReceiveStage(state) {
+    const item = $("receive-stages").querySelector(
+      `[data-stage="${receivePhase || "connecting"}"]`,
+    );
+    if (item) {
+      item.dataset.state = state;
+      item.removeAttribute("aria-current");
+    }
   }
   function setReceivePhase(phase) {
+    receivePhase = phase;
     $("receive-progress").dataset.phase = phase;
     $("receive-phase").textContent = t(
       {
@@ -71,6 +111,7 @@ export async function startReceiver(slug) {
         parsing: "receiveParsing",
       }[phase] || "receiveConnecting",
     );
+    paintReceiveStages(phase);
   }
   async function copy(item, plainOnly = false) {
     try {
@@ -112,6 +153,21 @@ export async function startReceiver(slug) {
     $("receive-title").textContent = t(title);
     if (consumed) $("receive-subtitle").textContent += ` · ${t("received")}`;
   }
+  function renderReceiveOutcome() {
+    if (!receiveStats) {
+      $("receive-outcome").hidden = true;
+      return;
+    }
+    $("receive-outcome").hidden = false;
+    $("receive-outcome-title").textContent = t("receiveReadyTitle");
+    $("receive-outcome-facts").textContent = [
+      t("receiveOutcome", {
+        size: sizeLabel(receiveStats.size),
+        time: etaLabel(receiveStats.elapsed),
+      }),
+      receiveStats.consumed ? t("receiveCopyRemoved") : t("receiveCopyKept"),
+    ].join(" · ");
+  }
   async function load(consume = false) {
     if (busy || dead || consumed) return;
     busy = true;
@@ -125,6 +181,22 @@ export async function startReceiver(slug) {
     $("receive-note").hidden = !burn;
     if (burn) $("receive-note").textContent = t("receiveOneTimeNote");
     $("receive-progress").hidden = false;
+    receiveStats = null;
+    renderReceiveOutcome();
+    receiveAttempt++;
+    receiveStartedAt = performance.now();
+    const expectedSize = metadata?.manifest?.items?.reduce(
+      (sum, item) =>
+        sum + item.parts.reduce((total, part) => total + part.size, 0),
+      0,
+    );
+    $("receive-attempt").textContent = [
+      t("receiveAttempt", { count: receiveAttempt }),
+      expectedSize > 0 ? sizeLabel(expectedSize) : "",
+    ]
+      .filter(Boolean)
+      .join(" · ");
+    $("receive-freshness").textContent = "";
     setReceivePhase("connecting");
     paintReceive({ received: 0, total: 0, percent: 0 });
     status(consume ? "receiving" : "loading");
@@ -152,6 +224,7 @@ export async function startReceiver(slug) {
       consumed = consume && metadata.burn_after_read;
       $("receive-progress").hidden = true;
       $("receive-gate").hidden = true;
+      setReceivePhase("ready");
       await render();
       details();
       $("delete-share").hidden = consumed || !can("manage");
@@ -172,9 +245,23 @@ export async function startReceiver(slug) {
           }
         }
       } else status("");
+      const contentSize = items.reduce(
+        (sum, item) =>
+          sum + item.parts.reduce((total, part) => total + part.blob.size, 0),
+        0,
+      );
+      receiveStats = {
+        size: contentSize,
+        elapsed: Math.max(
+          0,
+          (performance.now() - receiveStartedAt) / 1000,
+        ),
+        consumed,
+      };
+      renderReceiveOutcome();
     } catch (error) {
-      $("receive-progress").hidden = true;
       if (error.message === "aborted") {
+        failReceiveStage("canceled");
         if (burn) {
           dead = true;
           status("oneTimeNetwork", "error");
@@ -183,6 +270,7 @@ export async function startReceiver(slug) {
           $("retry").hidden = false;
         }
       } else {
+        failReceiveStage("error");
         failure(error);
         if (!consume) $("retry").hidden = false;
         else if (error.status === 0 || !error.status) {
@@ -215,6 +303,8 @@ export async function startReceiver(slug) {
       });
       dead = true;
       items = null;
+      receiveStats = null;
+      renderReceiveOutcome();
       $("received-items").replaceChildren();
       $("receive-gate").hidden = true;
       $("delete-share").hidden = true;
@@ -228,10 +318,11 @@ export async function startReceiver(slug) {
   window.addEventListener("preferenceschange", () => {
     details();
     void render();
+    renderReceiveOutcome();
     // The phase replaced the markup's i18n default; re-render it in the newly
     // selected language instead of leaving a stale translation.
     if (!$("receive-progress").hidden) {
-      setReceivePhase($("receive-progress").dataset.phase || "connecting");
+      setReceivePhase(receivePhase || "connecting");
       if (metadata?.burn_after_read && !$("receive-note").hidden)
         $("receive-note").textContent = t("receiveOneTimeNote");
     }

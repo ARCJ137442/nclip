@@ -11,6 +11,7 @@ const evidence = process.env.NCLIP_EVIDENCE_DIR || "accounts-evidence";
 await mkdir(evidence, { recursive: true });
 const browser = await chromium.launch({
   headless: true,
+  args: process.env.NCLIP_BROWSER_ARGS?.split(/\s+/).filter(Boolean),
   ...(process.env.NCLIP_BROWSER_CHANNEL
     ? { channel: process.env.NCLIP_BROWSER_CHANNEL }
     : {}),
@@ -83,6 +84,10 @@ async function send(page, publicShare = false, burn = false) {
   await page.locator("#burn").setChecked(burn);
   await page.locator("#send").click();
   await page.locator("#result").waitFor({ state: "visible" });
+  assert.equal(
+    await page.locator("#result-stages li[data-state=done]").count(),
+    4,
+  );
   const url = await page.locator("#share-url").inputValue();
   shares.push(url.split("/").pop());
   return url;
@@ -98,7 +103,10 @@ try {
   await adminRow.getByRole("button", { name: "修改", exact: true }).click();
   assert.equal(await adminPage.locator("#edit-username").isDisabled(), true);
   assert.equal(await adminPage.locator("#edit-disabled").isDisabled(), true);
-  assert.equal(await adminPage.locator("#user-permissions").isDisabled(), true);
+  assert.equal(
+    await adminPage.locator("#user-permissions").evaluate((el) => el.disabled),
+    true,
+  );
   assert.equal(await adminPage.locator("#user-upload-limit").isDisabled(), true);
   assert.equal(await adminPage.locator("#edit-password").isDisabled(), false);
   assert.equal(
@@ -116,6 +124,10 @@ try {
   await adminPage.locator("#save-user").click();
   await adminPage.locator("#user-dialog").waitFor({ state: "hidden" });
   await adminPage.locator("#status").filter({ hasText: "已保存" }).waitFor();
+  await adminPage
+    .locator("#admin-activity-title")
+    .filter({ hasText: "已保存" })
+    .waitFor();
   const uploader = (
     await (await adminContext.request.get(base + "/api/v1/users")).json()
   ).items.find((user) => user.username === "upload-" + suffix);
@@ -222,6 +234,10 @@ try {
   assert.equal(await managePage.locator("#nav-download").isHidden(), false);
   await managePage.locator("#shares-tab").click();
   await managePage.locator("#share-list article").first().waitFor();
+  await managePage
+    .locator("#admin-activity-title")
+    .filter({ hasText: "分享列表已更新" })
+    .waitFor();
   assert.ok((await managePage.locator("#share-list a").count()) > 0);
   assert.equal(
     (await manageContext.request.get(base + "/raw/" + shares[0])).status(),

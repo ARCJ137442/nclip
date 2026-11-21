@@ -35,6 +35,28 @@
             </div>
           </div>
           <section id="transfer" class="transfer" hidden>
+            <ol
+              id="transfer-stages"
+              class="stage-rail"
+              aria-label="上传阶段"
+            >
+              <li data-stage="preparing" data-state="done">
+                <span class="stage-dot" aria-hidden="true"></span
+                ><span data-i18n="stagePreparing">准备</span>
+              </li>
+              <li data-stage="uploading" data-state="active" aria-current="step">
+                <span class="stage-dot" aria-hidden="true"></span
+                ><span data-i18n="stageUploading">上传</span>
+              </li>
+              <li data-stage="saving" data-state="pending">
+                <span class="stage-dot" aria-hidden="true"></span
+                ><span data-i18n="stageSaving">服务器</span>
+              </li>
+              <li data-stage="complete" data-state="pending">
+                <span class="stage-dot" aria-hidden="true"></span
+                ><span data-i18n="stageComplete">完成</span>
+              </li>
+            </ol>
             <div class="transfer-head">
               <span id="transfer-phase" class="transfer-phase" data-i18n="transferUploading"
                 >正在上传</span
@@ -63,6 +85,10 @@
             <div class="transfer-meta">
               <span id="transfer-bytes"></span>
               <span id="transfer-rate"></span>
+            </div>
+            <div class="transfer-context">
+              <span id="transfer-attempt"></span>
+              <span id="transfer-freshness"></span>
             </div>
             <p id="transfer-note" class="hint" hidden></p>
             <div id="transfer-actions" class="transfer-controls" hidden>
@@ -190,6 +216,26 @@
               <p id="result-message"></p>
             </div>
           </div>
+          <ol id="result-stages" class="stage-rail result-stages" aria-label="上传阶段">
+            <li data-stage="preparing" data-state="done">
+              <span class="stage-dot" aria-hidden="true"></span
+              ><span data-i18n="stagePreparing">准备</span>
+            </li>
+            <li data-stage="uploading" data-state="done">
+              <span class="stage-dot" aria-hidden="true"></span
+              ><span data-i18n="stageUploading">上传</span>
+            </li>
+            <li data-stage="saving" data-state="done">
+              <span class="stage-dot" aria-hidden="true"></span
+              ><span data-i18n="stageSaving">服务器</span>
+            </li>
+            <li data-stage="complete" data-state="done">
+              <span class="stage-dot" aria-hidden="true"></span
+              ><span data-i18n="stageComplete">完成</span>
+            </li>
+          </ol>
+          <div id="result-facts" class="result-facts"></div>
+          <div id="result-items" class="result-items"></div>
           <div class="link-row">
             <input
               id="share-url"

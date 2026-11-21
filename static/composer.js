@@ -11,7 +11,7 @@ import {
   draggedLinks,
 } from "./clipboard.js";
 import { request, uploadShare, encodeShare } from "./share-api.js";
-import { createProgress, timeParts } from "./transfer.js";
+import { createProgress, timeParts, transferStages } from "./transfer.js";
 
 export async function startComposer() {
   const editor = $("message");
@@ -25,6 +25,11 @@ export async function startComposer() {
     fullySent = false,
     lastAttempt = null,
     transferController = null,
+    transferStartedAt = 0,
+    transferFailure = null,
+    lastCompleted = null,
+    resultMessage = null,
+    attempt = 0,
     lastCopiedURL = "";
   function draft() {
     return [
@@ -79,6 +84,15 @@ export async function startComposer() {
       count: part.count,
     });
   }
+  function paintStages(root, states) {
+    for (const [stage, state] of Object.entries(states)) {
+      const item = root.querySelector(`[data-stage="${stage}"]`);
+      if (!item) continue;
+      item.dataset.state = state;
+      if (state === "active") item.setAttribute("aria-current", "step");
+      else item.removeAttribute("aria-current");
+    }
+  }
   function paintTransfer({ received, total, percent, rate, eta }) {
     const track = $("transfer-track");
     $("transfer-percent").textContent =
@@ -101,8 +115,13 @@ export async function startComposer() {
             eta != null ? ` · ${t("transferEta", { time: etaLabel(eta) })}` : ""
           }`
         : "";
+    const elapsed = (performance.now() - transferStartedAt) / 1000;
+    $("transfer-freshness").textContent =
+      elapsed >= 1
+        ? t("transferElapsed", { time: etaLabel(elapsed) })
+        : "";
   }
-  function setTransferPhase(phase) {
+  function setTransferPhase(phase, error = null) {
     $("transfer").dataset.phase = phase;
     $("transfer-phase").textContent = t(
       {
@@ -115,18 +134,49 @@ export async function startComposer() {
     $("transfer-cancel").hidden = !["uploading", "saving"].includes(phase);
     $("transfer-actions").hidden = !["error", "canceled"].includes(phase);
     $("transfer-note").hidden = !["error", "canceled"].includes(phase);
+    paintStages(
+      $("transfer-stages"),
+      transferStages(phase, { fullySent, status: error?.status || 0 }),
+    );
     if (phase === "saving") {
       $("transfer-track").dataset.unknown = "true";
       $("transfer-track").removeAttribute("aria-valuenow");
       $("transfer-percent").textContent = "";
       $("transfer-rate").textContent = "";
+      $("transfer-freshness").textContent = t("transferLastBytes", {
+        time: new Date().toLocaleTimeString(document.documentElement.lang, {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+          hour12: false,
+        }),
+      });
     }
-    if (phase === "error") $("transfer-note").textContent = t("transferFailedNote");
-    // Only a fully handed-off body can have reached the server.
-    if (phase === "canceled")
-      $("transfer-note").textContent = t(
-        fullySent ? "transferCanceledNote" : "transferCanceledEarly",
+    if (phase === "error") {
+      $("transfer-phase").textContent = t(
+        fullySent
+          ? error?.status
+            ? "transferRejected"
+            : "transferUnconfirmed"
+          : "transferFailed",
       );
+      $("transfer-note").textContent = t(
+        fullySent
+          ? error?.status
+            ? "transferRejectedNote"
+            : "transferUnconfirmedNote"
+          : "transferFailedNote",
+      );
+    }
+    // Only a fully handed-off body can have reached the server.
+    if (phase === "canceled") {
+      $("transfer-phase").textContent = t(
+        fullySent ? "transferCanceledUnknown" : "transferCanceled",
+      );
+      $("transfer-note").textContent = t(
+        fullySent ? "transferUnconfirmedNote" : "transferCanceledEarly",
+      );
+    }
   }
   async function renderDraft() {
     await renderItems($("draft-items"), attachments, {
@@ -227,6 +277,50 @@ export async function startComposer() {
       status("copyFailed", "error");
     }
   }
+  function itemLabel(item) {
+    if (item.kind === "file") return item.name;
+    if (item.parts.some((part) => part.mime === "image/png"))
+      return t("image");
+    if (item.parts.some((part) => part.mime === "text/html")) return t("rich");
+    return t("text");
+  }
+  function setResultFacts(items, elapsed) {
+    lastCompleted = { items, elapsed };
+    const size = draftBytes(items);
+    const facts = [
+      t("resultFactItems", { count: items.length, size: sizeLabel(size) }),
+      t("resultFactTime", { time: etaLabel(elapsed) || "—" }),
+    ];
+    if (elapsed >= 0.5 && size >= 64 * 1024)
+      facts.push(
+        t("resultFactRate", {
+          rate: sizeLabel(Math.max(1, Math.round(size / elapsed))),
+        }),
+      );
+    facts.push(
+      $("public-share").checked ? t("resultPublic") : t("resultAuthenticated"),
+    );
+    if ($("burn").checked) facts.push(t("resultOneTime"));
+    const root = $("result-facts");
+    root.replaceChildren(
+      ...facts.map((text) => {
+        const span = document.createElement("span");
+        span.textContent = text;
+        return span;
+      }),
+    );
+    const names = items.map(itemLabel);
+    const visible = names.slice(0, 4).join(" · ");
+    $("result-items").textContent =
+      visible +
+      (names.length > 4
+        ? ` · ${t("resultItemMore", { count: names.length - 4 })}`
+        : "");
+  }
+  function setResultMessage(key) {
+    resultMessage = key;
+    $("result-message").textContent = t(key);
+  }
   async function runUpload(items, revision = draftRevision) {
     if (sending) return;
     if (!items.length) {
@@ -257,6 +351,9 @@ export async function startComposer() {
     // draft still holds exactly the content being sent.
     lastAttempt = { items, revision };
     fullySent = false;
+    transferFailure = null;
+    attempt++;
+    transferStartedAt = performance.now();
     sending = true;
     invalidateRead();
     // The sent content is a snapshot: the editor stays usable for the next
@@ -267,6 +364,14 @@ export async function startComposer() {
     $("result").hidden = true;
     $("new-share").hidden = false;
     $("transfer").hidden = false;
+    $("transfer-attempt").textContent = [
+      t("transferAttempt", { count: attempt }),
+      t("resultFactItems", {
+        count: items.length,
+        size: sizeLabel(draftBytes(items)),
+      }),
+    ].join(" · ");
+    $("transfer-freshness").textContent = "";
     setTransferPhase("uploading");
     paintTransfer({ received: 0, total: 0, percent: 0 });
     status("uploading");
@@ -292,7 +397,7 @@ export async function startComposer() {
             if (loaded < total && at - painted < 100) return;
             painted = at;
             paintTransfer(clock.update(loaded, total));
-            if (total > 0 && loaded >= total) {
+            if (total > 0 && loaded >= total && !fullySent) {
               fullySent = true;
               setTransferPhase("saving");
             }
@@ -307,16 +412,20 @@ export async function startComposer() {
       $("native-share").hidden = !navigator.share;
       $("transfer").hidden = true;
       hideCandidate();
+      setResultFacts(
+        items,
+        Math.max(0, (performance.now() - transferStartedAt) / 1000),
+      );
       $("result").hidden = false;
       if (draftRevision !== revision) {
         // The draft no longer matches the sent snapshot: keep it visible,
         // do not steal focus, and do not overwrite the clipboard.
         $("new-share").hidden = true;
-        $("result-message").textContent = t("sentBackground");
+        setResultMessage("sentBackground");
         status("sent", "success");
       } else {
         $("composer").hidden = true;
-        $("result-message").textContent = t("sentManual");
+        setResultMessage("sentManual");
         $("result").focus({ preventScroll: true });
         status("sent", "success");
         await copyLink();
@@ -326,7 +435,8 @@ export async function startComposer() {
         setTransferPhase("canceled");
         status("transferCanceled", "error");
       } else {
-        setTransferPhase("error");
+        transferFailure = error;
+        setTransferPhase("error", error);
         failure(error, config);
       }
     } finally {
@@ -398,6 +508,14 @@ export async function startComposer() {
     $("public-share").checked = false;
     $("result").hidden = true;
     $("composer").hidden = false;
+    attempt = 0;
+    transferFailure = null;
+    lastCompleted = null;
+    resultMessage = null;
+    $("transfer-attempt").textContent = "";
+    $("transfer-freshness").textContent = "";
+    $("result-facts").replaceChildren();
+    $("result-items").replaceChildren();
     void renderDraft();
     updateDraftMeter();
     status("");
@@ -510,13 +628,20 @@ export async function startComposer() {
   });
   window.addEventListener("preferenceschange", () => {
     updateLimits();
+    if (!$("result").hidden && lastCompleted)
+      setResultFacts(lastCompleted.items, lastCompleted.elapsed);
+    if (!$("result").hidden && resultMessage)
+      $("result-message").textContent = t(resultMessage);
     if (!preferences.suggestions) hideCandidate();
     else void probe(true);
     void renderDraft();
     // The phase text replaced the markup's i18n default; re-render it in the
     // newly selected language instead of leaving a stale translation.
     if (!$("transfer").hidden)
-      setTransferPhase($("transfer").dataset.phase || "uploading");
+      setTransferPhase(
+        $("transfer").dataset.phase || "uploading",
+        transferFailure,
+      );
   });
   try {
     config = await (await request("/api/v1/ui-config")).json();

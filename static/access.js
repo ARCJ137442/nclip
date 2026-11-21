@@ -1,5 +1,7 @@
 // Only preference settings persist in localStorage. Identity comes from the
 // server; authentication stays in an HttpOnly cookie.
+import { t } from "./i18n.js";
+
 export const access = { enabled: false, user: null, csrf_token: "" };
 export function can(permission) {
   return !access.enabled || !!access.user?.permissions?.[permission];
@@ -64,7 +66,10 @@ export function setupNavigation() {
     if (event.key === "Escape") id("account-menu").open = false;
   });
   id("logout").addEventListener("click", async () => {
-    id("logout").disabled = true;
+    const logout = id("logout");
+    logout.disabled = true;
+    logout.setAttribute("aria-busy", "true");
+    logout.textContent = t("loggingOut");
     try {
       const response = await fetch("/api/v1/logout", {
         method: "POST",
@@ -77,7 +82,9 @@ export function setupNavigation() {
       window.dispatchEvent(
         new CustomEvent("accountfailure", { detail: "sessionFailed" }),
       );
-      id("logout").disabled = false;
+      logout.disabled = false;
+      logout.removeAttribute("aria-busy");
+      logout.textContent = t("logout");
     }
   });
 }

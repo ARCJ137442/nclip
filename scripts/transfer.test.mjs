@@ -1,7 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { percentOf, timeParts, createProgress } from "../static/transfer.js";
+import {
+  percentOf,
+  timeParts,
+  createProgress,
+  transferStages,
+} from "../static/transfer.js";
 import { requestStream, RequestError } from "../static/share-api.js";
 
 test("percentOf needs a total and clamps the range", () => {
@@ -59,6 +64,39 @@ test("transfers shorter than the sample window invent no rate", () => {
   assert.equal(view.percent, 100);
   assert.equal(view.rate, 0);
   assert.equal(view.eta, 0);
+});
+
+test("transfer stages separate a server rejection from a lost response", () => {
+  assert.deepEqual(transferStages("uploading", { fullySent: false }), {
+    preparing: "done",
+    uploading: "active",
+    saving: "pending",
+    complete: "pending",
+  });
+  assert.deepEqual(
+    transferStages("error", { fullySent: true, status: 413 }),
+    {
+      preparing: "done",
+      uploading: "done",
+      saving: "error",
+      complete: "pending",
+    },
+  );
+  assert.deepEqual(
+    transferStages("error", { fullySent: true, status: 0 }),
+    {
+      preparing: "done",
+      uploading: "done",
+      saving: "unknown",
+      complete: "pending",
+    },
+  );
+  assert.deepEqual(transferStages("canceled", { fullySent: false }), {
+    preparing: "done",
+    uploading: "canceled",
+    saving: "pending",
+    complete: "pending",
+  });
 });
 
 // The download path must count the stream it forwards, not buffer a copy.

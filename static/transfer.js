@@ -12,6 +12,35 @@ export function timeParts(seconds) {
   return { unit: "minutes", count: Math.max(1, Math.ceil(seconds / 60)) };
 }
 
+// A failed response and a lost response are different facts. Keep the stage
+// rail honest about that difference instead of painting every failure red.
+export function transferStages(phase, { fullySent = false, status = 0 } = {}) {
+  const stages = {
+    preparing: "pending",
+    uploading: "pending",
+    saving: "pending",
+    complete: "pending",
+  };
+  if (phase === "uploading" || phase === "saving") {
+    stages.preparing = "done";
+    stages.uploading = phase === "saving" ? "done" : "active";
+    if (phase === "saving") stages.saving = "active";
+    return stages;
+  }
+  if (phase === "complete") {
+    return { preparing: "done", uploading: "done", saving: "done", complete: "done" };
+  }
+  stages.preparing = "done";
+  if (!fullySent) {
+    stages.uploading = phase === "canceled" ? "canceled" : "error";
+    return stages;
+  }
+  stages.uploading = "done";
+  if (phase === "canceled") stages.saving = "unknown";
+  else stages.saving = status > 0 ? "error" : "unknown";
+  return stages;
+}
+
 // Samples the wire rate at most every 250 ms and smooths it so the label does
 // not jump on every progress event. `total <= 0` means the size is unknown.
 export function createProgress(now = () => performance.now()) {

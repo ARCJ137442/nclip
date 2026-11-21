@@ -16,6 +16,24 @@
             <h1 id="receive-title" data-i18n="contents">收到一份内容</h1>
             <p id="receive-subtitle"></p>
           </div>
+          <ol id="receive-stages" class="stage-rail" aria-label="接收阶段">
+            <li data-stage="connecting" data-state="pending">
+              <span class="stage-dot" aria-hidden="true"></span
+              ><span data-i18n="stageConnecting">连接</span>
+            </li>
+            <li data-stage="downloading" data-state="pending">
+              <span class="stage-dot" aria-hidden="true"></span
+              ><span data-i18n="stageReceiving">接收</span>
+            </li>
+            <li data-stage="verifying" data-state="pending">
+              <span class="stage-dot" aria-hidden="true"></span
+              ><span data-i18n="stageVerifying">校验</span>
+            </li>
+            <li data-stage="ready" data-state="pending">
+              <span class="stage-dot" aria-hidden="true"></span
+              ><span data-i18n="stageReady">可用</span>
+            </li>
+          </ol>
           <section id="receive-progress" class="transfer" hidden>
             <div class="transfer-head">
               <span id="receive-phase" class="transfer-phase"></span>
@@ -44,8 +62,16 @@
               <span id="receive-bytes"></span>
               <span id="receive-rate"></span>
             </div>
+            <div class="transfer-context">
+              <span id="receive-attempt"></span>
+              <span id="receive-freshness"></span>
+            </div>
             <p id="receive-note" class="hint" hidden></p>
           </section>
+          <div id="receive-outcome" class="receive-outcome" hidden>
+            <strong id="receive-outcome-title"></strong>
+            <span id="receive-outcome-facts"></span>
+          </div>
           <div id="receive-gate" hidden>
             <strong data-i18n="oneTimeTitle">这是一份一次性内容</strong>
             <p data-i18n="oneTimeHint"></p>
