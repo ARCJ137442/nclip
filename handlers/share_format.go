@@ -1,9 +1,6 @@
 package handlers
 
 import (
-	"archive/zip"
-	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
@@ -12,6 +9,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/johnwmail/nclip/internal/spool"
 	"github.com/johnwmail/nclip/models"
 	"github.com/johnwmail/nclip/utils"
 )
@@ -107,29 +105,19 @@ func validateManifest(m *models.ShareManifest) error {
 	return nil
 }
 
-func validClipboardBytes(part models.SharePart, data []byte) bool {
-	if strings.HasPrefix(part.MIME, "text/") {
-		return utf8.Valid(data)
-	}
-	if part.MIME == "image/png" {
-		return http.DetectContentType(data) == "image/png"
-	}
-	return false
-}
-
-func validateSharePayload(m *models.ShareManifest, parts map[string][]byte) error {
+func validateShareFiles(m *models.ShareManifest, parts map[string]*spool.File) error {
 	used := 0
 	for i := range m.Items {
 		for j := range m.Items[i].Parts {
-			p := &m.Items[i].Parts[j]
-			data, ok := parts[p.Key]
-			if !ok || len(data) == 0 {
+			part := &m.Items[i].Parts[j]
+			file, ok := parts[part.Key]
+			if !ok || file == nil || file.Size == 0 {
 				return fmt.Errorf("empty_or_missing_part")
 			}
-			if m.Items[i].Kind == "clipboard" && !validClipboardBytes(*p, data) {
+			if m.Items[i].Kind == "clipboard" && !validClipboardFile(*part, file) {
 				return fmt.Errorf("invalid_clipboard_data")
 			}
-			p.Size = int64(len(data))
+			part.Size = file.Size
 			used++
 		}
 	}
@@ -139,43 +127,56 @@ func validateSharePayload(m *models.ShareManifest, parts map[string][]byte) erro
 	return nil
 }
 
-func writeZipEntry(zw *zip.Writer, name string, data []byte) error {
-	w, err := zw.CreateHeader(&zip.FileHeader{Name: name, Method: zip.Store})
-	if err != nil {
-		return err
+func validClipboardFile(part models.SharePart, file *spool.File) bool {
+	if part.MIME == "image/png" {
+		return http.DetectContentType(file.Head) == "image/png"
 	}
-	_, err = w.Write(data)
-	return err
+	if !strings.HasPrefix(part.MIME, "text/") {
+		return false
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return false
+	}
+	defer func() { _, _ = file.Seek(0, io.SeekStart) }()
+	return validUTF8(file) == nil
 }
 
-func encodeStoredShare(m *models.ShareManifest, parts map[string][]byte) ([]byte, string, error) {
-	if len(m.Items) == 1 && len(m.Items[0].Parts) == 1 {
-		m.Encoding = "raw"
-		p := &m.Items[0].Parts[0]
-		p.Entry = ""
-		return parts[p.Key], p.MIME, nil
-	}
-	m.Encoding = "zip-v1"
-	var buf bytes.Buffer
-	zw := zip.NewWriter(&buf)
-	for _, item := range m.Items {
-		for _, p := range item.Parts {
-			if err := writeZipEntry(zw, p.Entry, parts[p.Key]); err != nil {
-				return nil, "", err
+var errInvalidUTF8 = fmt.Errorf("invalid_utf8")
+
+// validUTF8 validates a stream in chunks while carrying at most the three
+// bytes of an incomplete rune between reads.
+func validUTF8(r io.Reader) error {
+	buf := make([]byte, 64*1024)
+	carry := make([]byte, 0, utf8.UTFMax-1)
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			data := make([]byte, 0, len(carry)+n)
+			data = append(data, carry...)
+			data = append(data, buf[:n]...)
+			cut := len(data)
+			start := cut - 1
+			for start >= 0 && cut-start < utf8.UTFMax && !utf8.RuneStart(data[start]) {
+				start--
 			}
+			if start >= 0 && !utf8.FullRune(data[start:cut]) {
+				cut = start
+			}
+			if !utf8.Valid(data[:cut]) {
+				return errInvalidUTF8
+			}
+			carry = append(carry[:0], data[cut:]...)
+		}
+		if err == io.EOF {
+			if len(carry) != 0 {
+				return errInvalidUTF8
+			}
+			return nil
+		}
+		if err != nil {
+			return err
 		}
 	}
-	manifest, err := json.Marshal(m)
-	if err != nil {
-		return nil, "", err
-	}
-	if err := writeZipEntry(zw, "manifest.json", manifest); err != nil {
-		return nil, "", err
-	}
-	if err := zw.Close(); err != nil {
-		return nil, "", err
-	}
-	return buf.Bytes(), "application/zip", nil
 }
 
 func manifestFor(p *models.Paste) models.ShareManifest {
@@ -191,60 +192,4 @@ func manifestFor(p *models.Paste) models.ShareManifest {
 		kind = "clipboard"
 	}
 	return models.ShareManifest{Version: 1, Encoding: "raw", Items: []models.ShareItem{{Kind: kind, Name: p.ID + utils.ExtensionByMime(contentType), Parts: []models.SharePart{{Key: "original", MIME: contentType, Size: p.Size}}}}}
-}
-
-func readArchivePart(f *zip.File, size, max int64) ([]byte, error) {
-	if f == nil || size < 0 || size > max {
-		return nil, fmt.Errorf("invalid_archive")
-	}
-	r, err := f.Open()
-	if err != nil {
-		return nil, err
-	}
-	data, readErr := io.ReadAll(io.LimitReader(r, size+1))
-	closeErr := r.Close()
-	if readErr != nil || closeErr != nil || int64(len(data)) != size {
-		return nil, fmt.Errorf("invalid_archive")
-	}
-	return data, nil
-}
-
-func unpackArchive(m models.ShareManifest, content []byte) (map[string][]byte, error) {
-	zr, err := zip.NewReader(bytes.NewReader(content), int64(len(content)))
-	if err != nil {
-		return nil, err
-	}
-	entries := map[string]*zip.File{}
-	for _, f := range zr.File {
-		entries[f.Name] = f
-	}
-	parts := map[string][]byte{}
-	for _, item := range m.Items {
-		for _, p := range item.Parts {
-			data, err := readArchivePart(entries[p.Entry], p.Size, int64(len(content)))
-			if err != nil {
-				return nil, err
-			}
-			parts[p.Key] = data
-		}
-	}
-	return parts, nil
-}
-
-func unpackShare(p *models.Paste, content []byte) (models.ShareManifest, map[string][]byte, error) {
-	m := manifestFor(p)
-	if int64(len(content)) != p.Size {
-		return m, nil, fmt.Errorf("size_mismatch")
-	}
-	if m.Encoding == "raw" {
-		if len(m.Items) != 1 || len(m.Items[0].Parts) != 1 {
-			return m, nil, fmt.Errorf("invalid_archive")
-		}
-		return m, map[string][]byte{m.Items[0].Parts[0].Key: content}, nil
-	}
-	if m.Encoding != "zip-v1" {
-		return m, nil, fmt.Errorf("unsupported_version")
-	}
-	parts, err := unpackArchive(m, content)
-	return m, parts, err
 }

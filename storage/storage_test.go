@@ -1,7 +1,9 @@
 package storage
 
 import (
+	"bytes"
 	"errors"
+	"io"
 	"os"
 	"testing"
 
@@ -67,6 +69,21 @@ func (m *MockPasteStore) StoreContent(id string, content []byte) error {
 	return nil
 }
 
+func (m *MockPasteStore) StoreContentStream(id string, content io.Reader, size int64) error {
+	if m.closed {
+		return errors.New("store is closed")
+	}
+	data, err := io.ReadAll(io.LimitReader(content, size+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != size {
+		return errors.New("content size mismatch")
+	}
+	m.content[id] = data
+	return nil
+}
+
 // GetContent retrieves the raw content for a paste
 func (m *MockPasteStore) GetContent(id string) ([]byte, error) {
 	if m.closed {
@@ -77,6 +94,17 @@ func (m *MockPasteStore) GetContent(id string) ([]byte, error) {
 		return nil, nil
 	}
 	return c, nil
+}
+
+func (m *MockPasteStore) OpenContent(id string) (io.ReadCloser, int64, error) {
+	if m.closed {
+		return nil, 0, errors.New("store is closed")
+	}
+	c, ok := m.content[id]
+	if !ok {
+		return nil, 0, ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(c)), int64(len(c)), nil
 }
 
 // GetContentPrefix returns up to n bytes of content for testing purposes

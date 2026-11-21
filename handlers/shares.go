@@ -1,13 +1,16 @@
 package handlers
 
 import (
+	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
 	"net/http"
 	"net/textproto"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +18,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/johnwmail/nclip/config"
 	"github.com/johnwmail/nclip/internal/services"
+	"github.com/johnwmail/nclip/internal/spool"
 	"github.com/johnwmail/nclip/models"
+	"github.com/johnwmail/nclip/storage"
 	"github.com/johnwmail/nclip/utils"
 )
 
@@ -66,72 +71,89 @@ func shareError(c *gin.Context, status int, code string) { c.JSON(status, gin.H{
 type shareUpload struct {
 	manifest     models.ShareManifest
 	manifestSeen bool
-	parts        map[string][]byte
+	parts        map[string]*spool.File
 	size         int64
+	dir          string
 }
 
-func (u *shareUpload) add(key string, data []byte) error {
+func newShareUpload(dir string) *shareUpload {
+	return &shareUpload{parts: map[string]*spool.File{}, dir: dir}
+}
+
+func (u *shareUpload) add(key string, file *spool.File) error {
 	if key == "manifest" {
-		if u.manifestSeen || json.Unmarshal(data, &u.manifest) != nil {
+		if u.manifestSeen {
 			return fmt.Errorf("invalid_manifest")
 		}
-		u.manifestSeen = true
 		return nil
 	}
 	if !validPartKey(key) || u.parts[key] != nil || len(u.parts) >= maxShareItems*3 {
 		return fmt.Errorf("invalid_parts")
 	}
-	u.parts[key] = data
-	u.size += int64(len(data))
+	u.parts[key] = file
+	u.size += file.Size
 	return nil
+}
+
+func (u *shareUpload) cleanup() {
+	for _, file := range u.parts {
+		_ = file.Remove()
+	}
 }
 
 func readSharePart(p *multipart.Part, u *shareUpload, contentLimit int64) (string, bool) {
 	key := p.FormName()
-	limit := contentLimit - u.size
 	if key == "manifest" {
-		limit = maxManifestBytes
-	} else if limit > contentLimit {
-		limit = contentLimit
+		data, err := io.ReadAll(io.LimitReader(p, maxManifestBytes+1))
+		if err != nil || len(data) > maxManifestBytes {
+			return "request_too_large", false
+		}
+		if !u.manifestSeen && json.Unmarshal(data, &u.manifest) == nil {
+			u.manifestSeen = true
+			return "", true
+		}
+		return "invalid_manifest", false
 	}
+	limit := contentLimit - u.size
 	if limit < 0 {
 		return "content_too_large", false
 	}
-	data, err := io.ReadAll(io.LimitReader(p, limit+1))
-	if err != nil || int64(len(data)) > limit {
-		if key == "manifest" {
-			return "request_too_large", false
+	file, err := spool.Write(u.dir, "nclip-share-part-*", p, limit, 512)
+	if err != nil {
+		if err == spool.ErrTooLarge {
+			return "content_too_large", false
 		}
-		return "content_too_large", false
+		return "invalid_parts", false
 	}
-	if key != "manifest" && u.size+int64(len(data)) > contentLimit {
-		return "content_too_large", false
-	}
-	if err := u.add(key, data); err != nil {
+	if err := u.add(key, file); err != nil {
+		_ = file.Remove()
 		return err.Error(), false
 	}
 	return "", true
 }
 
-func readShareUpload(c *gin.Context, requestLimit, contentLimit int64) (*shareUpload, bool) {
+func readShareUpload(c *gin.Context, requestLimit, contentLimit int64, dir string) (*shareUpload, bool) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, requestLimit)
 	r, err := c.Request.MultipartReader()
 	if err != nil {
 		shareError(c, 400, "invalid_multipart")
 		return nil, false
 	}
-	u := &shareUpload{parts: map[string][]byte{}}
+	u := newShareUpload(dir)
 	for {
 		p, err := r.NextPart()
 		if err == io.EOF {
 			break
 		}
 		if err != nil {
+			u.cleanup()
 			shareError(c, 413, "request_too_large_or_invalid")
 			return nil, false
 		}
 		code, ok := readSharePart(p, u, contentLimit)
+		_ = p.Close()
 		if !ok {
+			u.cleanup()
 			status := http.StatusBadRequest
 			if code == "content_too_large" || code == "request_too_large" {
 				status = http.StatusRequestEntityTooLarge
@@ -141,6 +163,7 @@ func readShareUpload(c *gin.Context, requestLimit, contentLimit int64) (*shareUp
 		}
 	}
 	if !u.manifestSeen {
+		u.cleanup()
 		shareError(c, 400, "invalid_manifest")
 		return nil, false
 	}
@@ -171,20 +194,121 @@ func (h *SharesHandler) shareURL(c *gin.Context, slug string) string {
 	return base + "/" + slug
 }
 
+func (h *SharesHandler) tempDir() (string, error) {
+	base := h.config.DataDir
+	if base == "" {
+		base = os.TempDir()
+	}
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return "", err
+	}
+	return os.MkdirTemp(base, ".nclip-share-*")
+}
+
+// buildStoredShare turns spooled parts into either the original single part or
+// a server-built ZIP. Both paths stream bytes; only headers and the manifest
+// are held in memory.
+func buildStoredShare(m *models.ShareManifest, upload *shareUpload) (*spool.File, string, error) {
+	if len(m.Items) == 1 && len(m.Items[0].Parts) == 1 {
+		return buildRawShare(m, upload)
+	}
+	return buildZipShare(m, upload)
+}
+
+func buildRawShare(m *models.ShareManifest, upload *shareUpload) (*spool.File, string, error) {
+	m.Encoding = "raw"
+	part := &m.Items[0].Parts[0]
+	part.Entry = ""
+	file := upload.parts[part.Key]
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, "", err
+	}
+	return file, part.MIME, nil
+}
+
+func buildZipShare(m *models.ShareManifest, upload *shareUpload) (*spool.File, string, error) {
+	m.Encoding = "zip-v1"
+	file, err := os.CreateTemp(upload.dir, "nclip-share-archive-*")
+	if err != nil {
+		return nil, "", err
+	}
+	path := file.Name()
+	published := false
+	defer func() {
+		if !published {
+			_ = file.Close()
+			_ = os.Remove(path)
+		}
+	}()
+	zw := zip.NewWriter(file)
+	if err := writeShareZipParts(zw, m, upload); err != nil {
+		return nil, "", err
+	}
+	manifest, err := json.Marshal(m)
+	if err != nil {
+		return nil, "", err
+	}
+	entry, err := zw.CreateHeader(&zip.FileHeader{Name: "manifest.json", Method: zip.Store})
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := entry.Write(manifest); err != nil {
+		return nil, "", err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, "", err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		return nil, "", err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, "", err
+	}
+	published = true
+	return &spool.File{File: file, Path: path, Size: info.Size()}, "application/zip", nil
+}
+
+func writeShareZipParts(zw *zip.Writer, m *models.ShareManifest, upload *shareUpload) error {
+	for _, item := range m.Items {
+		for _, part := range item.Parts {
+			source := upload.parts[part.Key]
+			if _, err := source.Seek(0, io.SeekStart); err != nil {
+				return err
+			}
+			entry, err := zw.CreateHeader(&zip.FileHeader{Name: part.Entry, Method: zip.Store})
+			if err != nil {
+				return err
+			}
+			if _, err := io.Copy(entry, source); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // Create accepts a manifest and named binary fields. Aggregate part bytes are
 // limited by the effective user, browser-share, and server caps.
 func (h *SharesHandler) Create(c *gin.Context) {
 	contentLimit := h.effectiveUploadLimit(c)
 	requestLimit := contentLimit + config.MultipartOverheadBytes + maxManifestBytes
-	u, ok := readShareUpload(c, requestLimit, contentLimit)
+	dir, err := h.tempDir()
+	if err != nil {
+		shareError(c, 500, "temporary_storage_unavailable")
+		return
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+	u, ok := readShareUpload(c, requestLimit, contentLimit, dir)
 	if !ok {
 		return
 	}
+	defer u.cleanup()
 	if err := validateManifest(&u.manifest); err != nil {
 		shareError(c, 400, err.Error())
 		return
 	}
-	if err := validateSharePayload(&u.manifest, u.parts); err != nil {
+	if err := validateShareFiles(&u.manifest, u.parts); err != nil {
 		shareError(c, 400, err.Error())
 		return
 	}
@@ -193,18 +317,27 @@ func (h *SharesHandler) Create(c *gin.Context) {
 		shareError(c, 400, err.Error())
 		return
 	}
-	content, contentType, err := encodeStoredShare(&u.manifest, u.parts)
+	content, contentType, err := buildStoredShare(&u.manifest, u)
 	if err != nil {
 		shareError(c, 500, "archive_failed")
 		return
 	}
+	defer func() { _ = content.Remove() }()
 	burn := c.GetHeader("X-Burn") == "true"
 	visibility := c.GetHeader("X-Nclip-Visibility")
 	if visibility != "" && visibility != "authenticated" && visibility != "public" {
 		shareError(c, 400, "invalid_visibility")
 		return
 	}
-	resp, err := h.service.CreatePaste(services.CreatePasteRequest{Content: content, ContentType: contentType, TTL: ttl, BurnAfterRead: burn, Share: &u.manifest, Public: visibility == "public"})
+	resp, err := h.service.CreatePasteStream(services.CreatePasteStreamRequest{
+		Content:       content,
+		Size:          content.Size,
+		ContentType:   contentType,
+		TTL:           ttl,
+		BurnAfterRead: burn,
+		Share:         &u.manifest,
+		Public:        visibility == "public",
+	})
 	if err != nil {
 		shareError(c, 500, "store_failed")
 		return
@@ -247,17 +380,12 @@ func (h *SharesHandler) Receive(c *gin.Context) {
 	h.sendContent(c, true)
 }
 
-func writeShareFile(mw *multipart.Writer, key, contentType string, data []byte) error {
+func writeShareFileHeader(mw *multipart.Writer, key, contentType string) (io.Writer, error) {
 	header := make(textproto.MIMEHeader)
 	// ASCII filenames work with browser formData(); real names live in the manifest.
 	header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{"name": key, "filename": key}))
 	header.Set("Content-Type", contentType)
-	w, err := mw.CreatePart(header)
-	if err != nil {
-		return err
-	}
-	_, err = w.Write(data)
-	return err
+	return mw.CreatePart(header)
 }
 
 // shareBoundary returns one boundary for both the sizing and writing passes.
@@ -267,7 +395,7 @@ func shareBoundary() string {
 	return multipart.NewWriter(io.Discard).Boundary()
 }
 
-func writeShareMultipart(w io.Writer, boundary string, p *models.Paste, manifest []byte, m models.ShareManifest, parts map[string][]byte, content []byte) error {
+func writeShareMultipart(w io.Writer, boundary string, p *models.Paste, manifest []byte, m models.ShareManifest, stored *storedShare) error {
 	mw := multipart.NewWriter(w)
 	if err := mw.SetBoundary(boundary); err != nil {
 		return err
@@ -277,14 +405,14 @@ func writeShareMultipart(w io.Writer, boundary string, p *models.Paste, manifest
 	}
 	for _, item := range m.Items {
 		for _, part := range item.Parts {
-			if err := writeShareFile(mw, part.Key, part.MIME, parts[part.Key]); err != nil {
+			if err := writeStoredSharePart(mw, stored, part); err != nil {
 				return err
 			}
 		}
 	}
 	// After consume /raw is gone. Include the ZIP for an in-memory download.
 	if p.BurnAfterRead && m.Encoding == "zip-v1" {
-		if err := writeShareFile(mw, "archive", "application/zip", content); err != nil {
+		if err := writeStoredSharePart(mw, stored, models.SharePart{Key: "archive", MIME: "application/zip", Size: stored.file.Size}); err != nil {
 			return err
 		}
 	}
@@ -298,11 +426,112 @@ func (c *byteCounter) Write(data []byte) (int, error) {
 	return len(data), nil
 }
 
-// shareResponseSize measures the exact multipart body before it is written.
-// The measurement pass uses no payload-sized buffer; only the write pass does.
-func shareResponseSize(boundary string, p *models.Paste, manifest []byte, m models.ShareManifest, parts map[string][]byte, content []byte) (int64, error) {
+type storedShare struct {
+	file  *spool.File
+	zip   *zip.Reader
+	parts map[string]*zip.File
+}
+
+func openStoredShare(m *models.ShareManifest, file *spool.File) (*storedShare, error) {
+	stored := &storedShare{file: file}
+	if m.Encoding == "raw" {
+		if len(m.Items) != 1 || len(m.Items[0].Parts) != 1 || m.Items[0].Parts[0].Size != file.Size {
+			return nil, fmt.Errorf("invalid_archive")
+		}
+		return stored, nil
+	}
+	if m.Encoding != "zip-v1" {
+		return nil, fmt.Errorf("unsupported_version")
+	}
+	zr, err := zip.NewReader(file, file.Size)
+	if err != nil {
+		return nil, err
+	}
+	stored.zip = zr
+	stored.parts = map[string]*zip.File{}
+	for _, entry := range zr.File {
+		stored.parts[entry.Name] = entry
+	}
+	for _, item := range m.Items {
+		for _, part := range item.Parts {
+			entry := stored.parts[part.Entry]
+			if entry == nil || int64(entry.UncompressedSize64) != part.Size {
+				return nil, fmt.Errorf("invalid_archive")
+			}
+			reader, err := entry.Open()
+			if err != nil {
+				return nil, err
+			}
+			_, copyErr := io.Copy(io.Discard, reader)
+			closeErr := reader.Close()
+			if copyErr != nil || closeErr != nil {
+				return nil, fmt.Errorf("invalid_archive")
+			}
+		}
+	}
+	return stored, nil
+}
+
+func (s *storedShare) openPart(part models.SharePart) (io.ReadCloser, error) {
+	if part.Key == "archive" {
+		return io.NopCloser(io.NewSectionReader(s.file, 0, s.file.Size)), nil
+	}
+	if s.zip == nil {
+		return io.NopCloser(io.NewSectionReader(s.file, 0, s.file.Size)), nil
+	}
+	entry := s.parts[part.Entry]
+	if entry == nil {
+		return nil, fmt.Errorf("invalid_archive")
+	}
+	return entry.Open()
+}
+
+func writeStoredSharePart(mw *multipart.Writer, stored *storedShare, part models.SharePart) error {
+	partWriter, err := writeShareFileHeader(mw, part.Key, part.MIME)
+	if err != nil {
+		return err
+	}
+	reader, err := stored.openPart(part)
+	if err != nil {
+		return err
+	}
+	written, copyErr := io.Copy(partWriter, reader)
+	closeErr := reader.Close()
+	if copyErr != nil || closeErr != nil {
+		return fmt.Errorf("stream part")
+	}
+	if written != part.Size {
+		return fmt.Errorf("part size mismatch")
+	}
+	return nil
+}
+
+// shareResponseSize measures framing plus known payload sizes without reading
+// the payload a second time.
+func shareResponseSize(boundary string, p *models.Paste, manifest []byte, m models.ShareManifest) (int64, error) {
 	var size byteCounter
-	if err := writeShareMultipart(&size, boundary, p, manifest, m, parts, content); err != nil {
+	mw := multipart.NewWriter(&size)
+	if err := mw.SetBoundary(boundary); err != nil {
+		return 0, err
+	}
+	if err := mw.WriteField("manifest", string(manifest)); err != nil {
+		return 0, err
+	}
+	for _, item := range m.Items {
+		for _, part := range item.Parts {
+			if _, err := writeShareFileHeader(mw, part.Key, part.MIME); err != nil {
+				return 0, err
+			}
+			size += byteCounter(part.Size)
+		}
+	}
+	if p.BurnAfterRead && m.Encoding == "zip-v1" {
+		if _, err := writeShareFileHeader(mw, "archive", "application/zip"); err != nil {
+			return 0, err
+		}
+		size += byteCounter(p.Size)
+	}
+	if err := mw.Close(); err != nil {
 		return 0, err
 	}
 	return int64(size), nil
@@ -317,37 +546,49 @@ func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 		shareError(c, 409, "confirmation_required")
 		return
 	}
-	content, err := h.service.GetPasteContent(p.ID)
+	dir, err := h.tempDir()
 	if err != nil {
-		shareError(c, 404, "not_found")
+		shareError(c, 500, "temporary_storage_unavailable")
 		return
 	}
-	// Validate the full archive and measure the response before the
-	// irreversible consume operation.
-	m, parts, err := unpackShare(p, content)
+	defer func() { _ = os.RemoveAll(dir) }()
+	m := manifestFor(p)
+	var file *spool.File
+	var stored *storedShare
+	err = h.service.ReadPasteStream(p.ID, p.BurnAfterRead, func(_ *models.Paste, source io.Reader, size int64) error {
+		var writeErr error
+		file, writeErr = spool.Write(dir, "nclip-receive-*", source, size, 0)
+		if writeErr != nil {
+			return writeErr
+		}
+		if file.Size != size {
+			return fmt.Errorf("size_mismatch")
+		}
+		stored, writeErr = openStoredShare(&m, file)
+		return writeErr
+	})
 	if err != nil {
+		if errors.Is(err, storage.ErrNotFound) {
+			shareError(c, 404, "not_found_or_consumed")
+			return
+		}
 		shareError(c, 500, "invalid_archive_or_size")
 		return
 	}
+	defer func() { _ = file.Remove() }()
 	manifest, err := json.Marshal(m)
 	if err != nil {
 		shareError(c, 500, "invalid_archive_or_size")
 		return
 	}
 	boundary := shareBoundary()
-	size, sizeErr := shareResponseSize(boundary, p, manifest, m, parts, content)
-	if p.BurnAfterRead {
-		if _, _, err = h.service.ConsumePaste(p.ID); err != nil {
-			shareError(c, 404, "not_found_or_consumed")
-			return
-		}
-	}
+	size, sizeErr := shareResponseSize(boundary, p, manifest, m)
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Content-Type", "multipart/form-data; boundary="+boundary)
 	if sizeErr == nil {
 		c.Header("Content-Length", strconv.FormatInt(size, 10))
 	}
-	if err := writeShareMultipart(c.Writer, boundary, p, manifest, m, parts, content); err != nil {
+	if err := writeShareMultipart(c.Writer, boundary, p, manifest, m, stored); err != nil {
 		// The response may be partial, so do not append JSON or replay consumption.
 		_ = c.Error(err)
 	}

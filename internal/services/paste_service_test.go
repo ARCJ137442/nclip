@@ -1,6 +1,9 @@
 package services
 
 import (
+	"bytes"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +13,47 @@ import (
 	"github.com/johnwmail/nclip/models"
 	"github.com/johnwmail/nclip/storage"
 )
+
+func TestReadPasteStreamDoesNotConsumeOnCallbackFailure(t *testing.T) {
+	fs, err := storage.NewFilesystemStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewPasteService(fs, &config.Config{})
+	expires := time.Now().Add(time.Hour)
+	paste := &models.Paste{ID: "burnstream", CreatedAt: time.Now(), ExpiresAt: &expires, Size: 5, ContentType: "text/plain", BurnAfterRead: true}
+	if err := fs.StoreContent(paste.ID, []byte("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if err := fs.Store(paste); err != nil {
+		t.Fatal(err)
+	}
+
+	interrupted := errors.New("interrupted")
+	err = service.ReadPasteStream(paste.ID, true, func(_ *models.Paste, _ io.Reader, _ int64) error {
+		return interrupted
+	})
+	if !errors.Is(err, interrupted) {
+		t.Fatalf("error = %v, want callback error", err)
+	}
+	if _, err := service.GetPaste(paste.ID); err != nil {
+		t.Fatalf("failed callback consumed the paste: %v", err)
+	}
+
+	var copyBuffer bytes.Buffer
+	if err := service.ReadPasteStream(paste.ID, true, func(_ *models.Paste, source io.Reader, size int64) error {
+		_, err := io.CopyN(&copyBuffer, source, size)
+		return err
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if copyBuffer.String() != "hello" {
+		t.Fatalf("content = %q", copyBuffer.String())
+	}
+	if _, err := service.GetPaste(paste.ID); err == nil {
+		t.Fatal("successful callback did not consume the paste")
+	}
+}
 
 func TestGetPasteDeletesExpired(t *testing.T) {
 	// Setup temporary filesystem store

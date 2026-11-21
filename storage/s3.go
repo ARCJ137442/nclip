@@ -190,15 +190,22 @@ func (s *S3Store) IncrementReadCount(id string) error {
 }
 
 func (s *S3Store) StoreContent(id string, content []byte) error {
+	return s.StoreContentStream(id, bytes.NewReader(content), int64(len(content)))
+}
+
+// StoreContentStream lets the AWS SDK stream a request body into S3 without
+// materialising another copy in the application.
+func (s *S3Store) StoreContentStream(id string, content io.Reader, size int64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(applyS3Prefix(s.prefix, id)),
-		Body:   bytes.NewReader(content),
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(applyS3Prefix(s.prefix, id)),
+		Body:          io.LimitReader(content, size),
+		ContentLength: aws.Int64(size),
 	})
 	if err != nil {
-		log.Printf("[ERROR] S3 StoreContent: failed to put content for %s: %v", id, err)
+		log.Printf("[ERROR] S3 StoreContentStream: failed to put content for %s: %v", id, err)
 		if utils.IsDebugEnabled() {
 			log.Printf("[DEBUG] S3 bucket: %s, prefix: %s, key: %s", s.bucket, s.prefix, applyS3Prefix(s.prefix, id))
 			for _, e := range os.Environ() {
@@ -237,6 +244,36 @@ func (s *S3Store) GetContent(id string) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+// OpenContent keeps the S3 response body open so callers can stream it.
+func (s *S3Store) OpenContent(id string) (io.ReadCloser, int64, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(applyS3Prefix(s.prefix, id)),
+	})
+	if err != nil {
+		cancel()
+		log.Printf("[ERROR] S3 OpenContent: failed to get content for %s: %v", id, err)
+		return nil, 0, err
+	}
+	size := int64(0)
+	if obj.ContentLength != nil {
+		size = *obj.ContentLength
+	}
+	return &cancelReadCloser{ReadCloser: obj.Body, cancel: cancel}, size, nil
+}
+
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (c *cancelReadCloser) Close() error {
+	err := c.ReadCloser.Close()
+	c.cancel()
+	return err
 }
 
 // StatContent checks if the object exists in S3 and returns its size.

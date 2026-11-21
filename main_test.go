@@ -67,6 +67,17 @@ func (m *MockStore) StoreContent(id string, content []byte) error {
 	return nil
 }
 
+func (m *MockStore) StoreContentStream(id string, content io.Reader, size int64) error {
+	data, err := io.ReadAll(io.LimitReader(content, size+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != size {
+		return io.ErrUnexpectedEOF
+	}
+	return m.StoreContent(id, data)
+}
+
 // GetContent retrieves the raw content for a paste
 func (m *MockStore) GetContent(id string) ([]byte, error) {
 	c, ok := m.content[id]
@@ -74,6 +85,14 @@ func (m *MockStore) GetContent(id string) ([]byte, error) {
 		return nil, nil
 	}
 	return c, nil
+}
+
+func (m *MockStore) OpenContent(id string) (io.ReadCloser, int64, error) {
+	c, ok := m.content[id]
+	if !ok {
+		return nil, 0, nil
+	}
+	return io.NopCloser(bytes.NewReader(c)), int64(len(c)), nil
 }
 
 // GetContentPrefix reads up to n bytes of content for tests and also from the
@@ -918,5 +937,25 @@ func TestDeletePasteAuthEnforced(t *testing.T) {
 	}
 	if response["deleted"] != true {
 		t.Errorf("Expected deleted=true, got %v", response["deleted"])
+	}
+}
+
+func TestStreamingResponsesBypassErrorBuffer(t *testing.T) {
+	for _, tc := range []struct {
+		method, path string
+		want         bool
+	}{
+		{http.MethodGet, "/raw/ABCDE", true},
+		{http.MethodGet, "/ABCDE", true},
+		{http.MethodGet, "/api/v1/shares/ABCDE/content", true},
+		{http.MethodPost, "/api/v1/shares/ABCDE/receive", true},
+		{http.MethodGet, "/api/v1/users", false},
+		{http.MethodGet, "/admin", false},
+		{http.MethodGet, "/health", false},
+		{http.MethodGet, "/static/style.css", false},
+	} {
+		if got := streamsResponse(tc.method, tc.path); got != tc.want {
+			t.Errorf("streamsResponse(%s, %s) = %v, want %v", tc.method, tc.path, got, tc.want)
+		}
 	}
 }

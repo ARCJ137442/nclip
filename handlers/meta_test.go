@@ -1,8 +1,10 @@
 package handlers
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -33,6 +35,18 @@ func (m *MockPasteStore) StoreContent(id string, content []byte) error {
 	return nil
 }
 
+func (m *MockPasteStore) StoreContentStream(id string, content io.Reader, size int64) error {
+	data, err := io.ReadAll(io.LimitReader(content, size+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) != size {
+		return io.ErrUnexpectedEOF
+	}
+	m.content[id] = data
+	return nil
+}
+
 // GetContent retrieves the raw content for a paste
 func (m *MockPasteStore) GetContent(id string) ([]byte, error) {
 	c, ok := m.content[id]
@@ -40,6 +54,14 @@ func (m *MockPasteStore) GetContent(id string) ([]byte, error) {
 		return nil, nil
 	}
 	return c, nil
+}
+
+func (m *MockPasteStore) OpenContent(id string) (io.ReadCloser, int64, error) {
+	c, ok := m.content[id]
+	if !ok {
+		return nil, 0, storage.ErrNotFound
+	}
+	return io.NopCloser(bytes.NewReader(c)), int64(len(c)), nil
 }
 
 func (m *MockPasteStore) Store(paste *models.Paste) error {

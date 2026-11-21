@@ -365,10 +365,9 @@ func jsonRecovery() gin.HandlerFunc {
 // This helps intermediaries and CDNs forward a predictable JSON payload.
 func canonicalErrors() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// These handlers already emit JSON errors. Streaming multipart directly
-		// avoids buffering a second copy of the payload in our 128 MiB deployment.
-		if strings.HasPrefix(c.Request.URL.Path, "/api/v1/shares/") &&
-			(strings.HasSuffix(c.Request.URL.Path, "/content") || strings.HasSuffix(c.Request.URL.Path, "/receive")) {
+		// Streaming handlers already emit JSON errors. They must not pass
+		// through the response buffer used for small API error canonicalization.
+		if streamsResponse(c.Request.Method, c.Request.URL.Path) {
 			c.Next()
 			return
 		}
@@ -424,6 +423,18 @@ func canonicalErrors() gin.HandlerFunc {
 			}
 		}
 	}
+}
+
+func streamsResponse(method, path string) bool {
+	if strings.HasPrefix(path, "/api/v1/shares/") &&
+		(strings.HasSuffix(path, "/content") || strings.HasSuffix(path, "/receive")) {
+		return true
+	}
+	if strings.HasPrefix(path, "/raw/") {
+		return true
+	}
+	slug := strings.Trim(path, "/")
+	return method == http.MethodGet && !strings.Contains(slug, "/") && utils.IsValidSlug(slug)
 }
 
 // getErrorMessage extracts a suitable error message from the response body,

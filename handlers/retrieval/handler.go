@@ -2,14 +2,17 @@ package retrieval
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/johnwmail/nclip/config"
 	"github.com/johnwmail/nclip/internal/services"
+	"github.com/johnwmail/nclip/internal/spool"
 	"github.com/johnwmail/nclip/models"
 	"github.com/johnwmail/nclip/storage"
 	"github.com/johnwmail/nclip/utils"
@@ -163,30 +166,53 @@ func (h *Handler) View(c *gin.Context) {
 // viewCLI handles CLI (curl/wget/powershell) clients; streams full content and consumes one-time pastes through the shared service
 // NOTE: Size verification is performed in View() before calling this function.
 func (h *Handler) viewCLI(c *gin.Context, slug string, paste *models.Paste) {
-	var content []byte
-	var err error
-	if paste.BurnAfterRead {
-		_, content, err = h.service.ConsumePaste(slug)
-	} else {
-		content, err = h.service.GetPasteContent(slug)
-	}
+	err := h.streamLegacy(c, slug, paste.BurnAfterRead, paste.ContentType)
 	if err != nil {
 		log.Printf("[ERROR] View CLI: content not found or deleted for slug %s: %v", slug, err)
 		h.renderNotFound(c, "Paste not available or deleted")
 		return
 	}
+}
 
-	if paste.BurnAfterRead {
-		c.Header("Content-Type", paste.ContentType)
-		c.Header("Content-Length", fmt.Sprintf("%d", paste.Size))
-		_, _ = c.Writer.Write(content)
-		return
+// streamLegacy preserves deletion-before-delivery for one-time reads. A burn
+// payload is copied and validated locally first; only then is the server copy
+// deleted and the response body started.
+func (h *Handler) streamLegacy(c *gin.Context, slug string, consume bool, contentType string) error {
+	if !consume {
+		return h.service.ReadPasteStream(slug, false, func(_ *models.Paste, source io.Reader, size int64) error {
+			c.Header("Content-Type", contentType)
+			c.Header("Content-Length", fmt.Sprintf("%d", size))
+			_, err := io.CopyN(c.Writer, source, size)
+			return err
+		})
 	}
+	return h.consumeLegacy(c, slug, func(current *models.Paste, size int64) {
+		c.Header("Content-Type", current.ContentType)
+		c.Header("Content-Length", fmt.Sprintf("%d", size))
+	})
+}
 
-	// Non-burn path: serve content normally
-	c.Header("Content-Type", paste.ContentType)
-	c.Header("Content-Length", fmt.Sprintf("%d", paste.Size))
-	c.Data(http.StatusOK, paste.ContentType, content)
+func (h *Handler) consumeLegacy(c *gin.Context, slug string, configure func(*models.Paste, int64)) error {
+	dir := h.config.DataDir
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	var content *spool.File
+	err := h.service.ReadPasteStream(slug, true, func(current *models.Paste, source io.Reader, size int64) error {
+		file, err := spool.Write(dir, ".nclip-burn-*", source, size, 0)
+		if err != nil {
+			return err
+		}
+		content = file
+		configure(current, size)
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = content.Remove() }()
+	_, err = io.CopyN(c.Writer, content, content.Size)
+	return err
 }
 
 // viewBrowser handles HTML view rendering; uses MaxRenderSize to determine full vs preview
@@ -268,27 +294,16 @@ func (h *Handler) Raw(c *gin.Context) {
 		return
 	}
 	// Non-burn path: load content now and validate size before serving
-	content, cerr := h.service.GetPasteContent(slug)
+	cerr := h.service.ReadPasteStream(slug, false, func(current *models.Paste, source io.Reader, size int64) error {
+		setRawHeaders(c, current, slug, size)
+		_, copyErr := io.CopyN(c.Writer, source, size)
+		return copyErr
+	})
 	if cerr != nil {
 		log.Printf("[ERROR] Raw: content not found or deleted for slug %s: %v", slug, cerr)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Paste content not found or deleted"})
 		return
 	}
-	// NOTE: early size verification is performed in View(); do not do late checks here.
-	c.Header("Content-Type", paste.ContentType)
-	c.Header("Content-Length", fmt.Sprintf("%d", paste.Size))
-	ext := utils.ExtensionByMime(paste.ContentType)
-	filename := slug
-	if ext != "" {
-		filename = slug + ext
-	}
-	escaped := url.PathEscape(filename)
-	if utils.IsTextContent(paste.ContentType) {
-		c.Header("Content-Disposition", fmt.Sprintf("inline; filename=\"%s\"; filename*=UTF-8''%s", filename, escaped))
-	} else {
-		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"; filename*=UTF-8''%s", filename, escaped))
-	}
-	c.Data(http.StatusOK, paste.ContentType, content)
 }
 
 // getBaseURL returns the base URL for the application
@@ -333,14 +348,20 @@ func (h *Handler) loadPreviewContent(c *gin.Context, slug string, paste *models.
 // A failed response is deliberately not replayable.
 func (h *Handler) handleRawBurn(c *gin.Context, slug string) bool {
 	// Share the single-instance consumption boundary with browser receive and CLI.
-	paste, content, err := h.service.ConsumePaste(slug)
+	err := h.consumeLegacy(c, slug, func(paste *models.Paste, size int64) {
+		setRawHeaders(c, paste, slug, size)
+	})
 	if err != nil {
 		log.Printf("[ERROR] Raw: content not found or deleted for slug %s: %v", slug, err)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Paste not found or deleted"})
 		return false
 	}
+	return true
+}
+
+func setRawHeaders(c *gin.Context, paste *models.Paste, slug string, size int64) {
 	c.Header("Content-Type", paste.ContentType)
-	c.Header("Content-Length", fmt.Sprintf("%d", paste.Size))
+	c.Header("Content-Length", fmt.Sprintf("%d", size))
 	ext := utils.ExtensionByMime(paste.ContentType)
 	filename := slug
 	if ext != "" {
@@ -352,8 +373,6 @@ func (h *Handler) handleRawBurn(c *gin.Context, slug string) bool {
 	} else {
 		c.Header("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"; filename*=UTF-8''%s", filename, escaped))
 	}
-	_, _ = c.Writer.Write(content)
-	return true
 }
 
 // renderNotFound sends a consistent 404 response. CLI/API clients receive JSON,

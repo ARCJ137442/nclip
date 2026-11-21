@@ -1,8 +1,10 @@
 package services
 
 import (
+	"bytes"
 	"fmt"
 	"hash/fnv"
+	"io"
 	"sync"
 	"time"
 
@@ -32,6 +34,20 @@ func NewPasteService(store storage.PasteStore, config *config.Config) *PasteServ
 // CreatePasteRequest represents a request to create a paste
 type CreatePasteRequest struct {
 	Content       []byte
+	Filename      string
+	ContentType   string
+	CustomSlug    string
+	BurnAfterRead bool
+	TTL           time.Duration
+	Share         *models.ShareManifest
+	Public        bool
+}
+
+// CreatePasteStreamRequest is the bounded-memory form of CreatePasteRequest.
+type CreatePasteStreamRequest struct {
+	Content       io.Reader
+	Size          int64
+	ContentPrefix []byte
 	Filename      string
 	ContentType   string
 	CustomSlug    string
@@ -102,6 +118,28 @@ func (s *PasteService) ValidateCustomSlug(slug string) error {
 
 // CreatePaste creates a new paste
 func (s *PasteService) CreatePaste(req CreatePasteRequest) (*CreatePasteResponse, error) {
+	return s.CreatePasteStream(CreatePasteStreamRequest{
+		Content:       bytes.NewReader(req.Content),
+		Size:          int64(len(req.Content)),
+		ContentPrefix: req.Content,
+		Filename:      req.Filename,
+		ContentType:   req.ContentType,
+		CustomSlug:    req.CustomSlug,
+		BurnAfterRead: req.BurnAfterRead,
+		TTL:           req.TTL,
+		Share:         req.Share,
+		Public:        req.Public,
+	})
+}
+
+// CreatePasteStream creates a paste from a bounded-memory content stream.
+func (s *PasteService) CreatePasteStream(req CreatePasteStreamRequest) (*CreatePasteResponse, error) {
+	if req.Content == nil {
+		return nil, fmt.Errorf("content is required")
+	}
+	if req.Size < 0 {
+		return nil, fmt.Errorf("invalid content size: %d", req.Size)
+	}
 	var slug string
 	var err error
 
@@ -122,13 +160,13 @@ func (s *PasteService) CreatePaste(req CreatePasteRequest) (*CreatePasteResponse
 
 	contentType := req.ContentType
 	if contentType == "" {
-		contentType = utils.DetectContentType(req.Filename, req.Content)
+		contentType = utils.DetectContentType(req.Filename, req.ContentPrefix)
 	}
 	paste := &models.Paste{
 		ID:            slug,
 		CreatedAt:     createdAt,
 		ExpiresAt:     &expiresAt,
-		Size:          int64(len(req.Content)),
+		Size:          req.Size,
 		ContentType:   contentType,
 		BurnAfterRead: req.BurnAfterRead,
 		ReadCount:     0,
@@ -136,7 +174,7 @@ func (s *PasteService) CreatePaste(req CreatePasteRequest) (*CreatePasteResponse
 		Public:        req.Public,
 	}
 
-	if err := s.store.StoreContent(slug, req.Content); err != nil {
+	if err := s.store.StoreContentStream(slug, req.Content, req.Size); err != nil {
 		return nil, fmt.Errorf("failed to store content: %w", err)
 	}
 	if err := s.store.Store(paste); err != nil {
@@ -156,28 +194,56 @@ func (s *PasteService) CreatePaste(req CreatePasteRequest) (*CreatePasteResponse
 // ConsumePaste reads and validates a complete paste, then deletes a burn paste
 // before handing its bytes to the HTTP layer. A lost response cannot be replayed.
 func (s *PasteService) ConsumePaste(slug string) (*models.Paste, []byte, error) {
+	var paste *models.Paste
+	var content bytes.Buffer
+	err := s.ReadPasteStream(slug, true, func(current *models.Paste, source io.Reader, size int64) error {
+		paste = current
+		_, copyErr := io.CopyN(&content, source, size)
+		return copyErr
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return paste, content.Bytes(), nil
+}
+
+// ReadPasteStream lets handlers consume a validated stream without loading it
+// into memory. For burn pastes the deletion happens under the same in-process
+// lock and only after the callback succeeds.
+func (s *PasteService) ReadPasteStream(slug string, consume bool, read func(*models.Paste, io.Reader, int64) error) error {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(slug))
 	lock := &s.consumeLocks[h.Sum32()%uint32(len(s.consumeLocks))]
-	lock.Lock()
-	defer lock.Unlock()
+	if consume {
+		lock.Lock()
+		defer lock.Unlock()
+	}
 	paste, err := s.GetPaste(slug)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
-	content, err := s.GetPasteContent(slug)
+	content, size, err := s.OpenPasteContent(slug)
 	if err != nil {
-		return nil, nil, err
+		return err
 	}
-	if int64(len(content)) != paste.Size {
-		return nil, nil, fmt.Errorf("size_mismatch")
+	if size != paste.Size {
+		_ = content.Close()
+		return fmt.Errorf("size_mismatch")
+	}
+	readErr := read(paste, content, size)
+	closeErr := content.Close()
+	if readErr != nil {
+		return readErr
+	}
+	if closeErr != nil {
+		return closeErr
 	}
 	if paste.BurnAfterRead {
 		if err := s.store.Delete(slug); err != nil {
-			return nil, nil, fmt.Errorf("consume delete: %w", err)
+			return fmt.Errorf("consume delete: %w", err)
 		}
 	}
-	return paste, content, nil
+	return nil
 }
 
 // GetPaste retrieves a paste by slug
@@ -187,7 +253,7 @@ func (s *PasteService) GetPaste(slug string) (*models.Paste, error) {
 		return nil, fmt.Errorf("failed to retrieve paste: %w", err)
 	}
 	if paste == nil {
-		return nil, fmt.Errorf("paste not found")
+		return nil, storage.ErrNotFound
 	}
 	if paste.IsExpired() {
 		// Log a warning that an expired paste was requested and attempt deletion.
@@ -209,6 +275,18 @@ func (s *PasteService) GetPasteContent(slug string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to retrieve content: %w", err)
 	}
 	return content, nil
+}
+
+// OpenPasteContent returns a streaming reader and its authoritative size.
+func (s *PasteService) OpenPasteContent(slug string) (io.ReadCloser, int64, error) {
+	content, size, err := s.store.OpenContent(slug)
+	if err != nil {
+		return nil, 0, fmt.Errorf("failed to open content: %w", err)
+	}
+	if content == nil {
+		return nil, 0, fmt.Errorf("failed to open content: content not found")
+	}
+	return content, size, nil
 }
 
 // IncrementReadCount increments the read count for a paste

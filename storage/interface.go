@@ -2,6 +2,7 @@ package storage
 
 import (
 	"errors"
+	"io"
 
 	"github.com/johnwmail/nclip/models"
 )
@@ -34,8 +35,16 @@ type PasteStore interface {
 	// StoreContent saves the raw content for a paste
 	StoreContent(id string, content []byte) error
 
+	// StoreContentStream saves exactly size bytes without requiring the caller
+	// to keep the payload in memory. Implementations must not publish partial
+	// content as a successfully stored object.
+	StoreContentStream(id string, content io.Reader, size int64) error
+
 	// GetContent retrieves the raw content for a paste
 	GetContent(id string) ([]byte, error)
+
+	// OpenContent returns a streaming reader for the raw content.
+	OpenContent(id string) (io.ReadCloser, int64, error)
 
 	// GetContentPrefix retrieves up to n bytes of the raw content for a paste.
 	// Implementations should return as many bytes as are available up to n.

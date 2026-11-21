@@ -8,12 +8,14 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/johnwmail/nclip/config"
 	"github.com/johnwmail/nclip/internal/services"
+	"github.com/johnwmail/nclip/internal/spool"
 	"github.com/johnwmail/nclip/utils"
 )
 
@@ -77,8 +79,7 @@ func (h *Handler) parseTTL(c *gin.Context) (time.Time, error) {
 	return time.Now().Add(h.config.DefaultTTL), nil
 }
 
-// readUploadContent extracts content, filename, and content-type from request
-// Supports X-Base64 header for base64 encoded content
+// addLimit avoids integer overflow while accounting for framing bytes.
 func addLimit(a, b int64) int64 {
 	maxInt := int64(^uint64(0) >> 1)
 	if a > maxInt-b {
@@ -109,7 +110,10 @@ func tooLargeReadError(err error) bool {
 		return false
 	}
 	var maxBytesError *http.MaxBytesError
-	return errors.As(err, &maxBytesError) || strings.Contains(strings.ToLower(err.Error()), "request body too large") || strings.Contains(strings.ToLower(err.Error()), "message too large")
+	return errors.As(err, &maxBytesError) ||
+		errors.Is(err, spool.ErrTooLarge) ||
+		strings.Contains(strings.ToLower(err.Error()), "request body too large") ||
+		strings.Contains(strings.ToLower(err.Error()), "message too large")
 }
 
 func isMultipartContentType(contentTypeHeader string) bool {
@@ -127,6 +131,17 @@ func (h *Handler) uploadRequestLimit(c *gin.Context) (int64, bool) {
 	return limit, requestLimited
 }
 
+func (h *Handler) tempDir() string {
+	if h.config.DataDir == "" {
+		return os.TempDir()
+	}
+	if err := os.MkdirAll(h.config.DataDir, 0o755); err != nil {
+		log.Printf("[ERROR] upload temp directory: %v", err)
+		return os.TempDir()
+	}
+	return h.config.DataDir
+}
+
 // requestSizeLimit expands the content limit for encoded and multipart bodies.
 func requestSizeLimit(limit int64, multipart, base64Enabled bool) (int64, error) {
 	requestLimit := limit
@@ -142,162 +157,126 @@ func requestSizeLimit(limit int64, multipart, base64Enabled bool) (int64, error)
 	return requestLimit, nil
 }
 
-func (h *Handler) readUploadContent(c *gin.Context) ([]byte, string, string, error) {
+type uploadSource struct {
+	file        *spool.File
+	filename    string
+	contentType string
+}
+
+func (h *Handler) readUploadFile(c *gin.Context) (*uploadSource, error) {
 	contentTypeHeader := c.Request.Header.Get("Content-Type")
 	multipart := isMultipartContentType(contentTypeHeader)
 	base64Enabled := headerEnabled(c, "X-Base64")
 	limit, requestLimited := h.uploadRequestLimit(c)
 	requestLimit, err := requestSizeLimit(limit, multipart, base64Enabled)
 	if err != nil {
-		return nil, "", "", err
+		return nil, err
 	}
 	if c.Request.ContentLength > requestLimit {
-		return nil, "", "", fmt.Errorf("content too large: request exceeds limit of %d bytes", requestLimit)
+		return nil, fmt.Errorf("content too large: request exceeds limit of %d bytes", requestLimit)
 	}
-	if requestLimited {
+	if requestLimited || c.Request.ContentLength < 0 {
 		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, requestLimit)
 	}
 
-	var content []byte
 	var filename string
 	var contentType string
-
-	if multipart {
-		content, filename, contentType, err = h.readMultipartUpload(c, limit)
-	} else {
-		content, filename, contentType, err = h.readDirectUpload(c, limit)
-	}
-
-	if err != nil {
-		if tooLargeReadError(err) {
-			return nil, filename, contentType, fmt.Errorf("content too large: request exceeds limit of %d bytes", requestLimit)
-		}
-		return nil, filename, contentType, err
-	}
-
-	// Check if content is base64 encoded
-	// Semantics: header presence enables base64 unless explicitly set to 0/false/no
+	encodedLimit := limit
 	if base64Enabled {
-		return h.decodeUploadedContent(content, filename, contentType, limit)
+		encodedLimit = encodedBase64Limit(limit)
 	}
 
-	return content, filename, contentType, nil
-}
-
-// decodeUploadedContent decodes a base64 body and validates the decoded size.
-func (h *Handler) decodeUploadedContent(content []byte, filename, contentType string, limit int64) ([]byte, string, string, error) {
-	decoded, err := h.decodeBase64Content(content)
-	if err != nil {
-		return nil, filename, contentType, err
+	var encoded *spool.File
+	if multipart {
+		encoded, filename, contentType, err = h.readMultipartUpload(c, encodedLimit)
+	} else {
+		encoded, contentType, err = h.readDirectUpload(c, encodedLimit)
 	}
-
-	// Validate decoded content size
-	if int64(len(decoded)) > limit {
-		return nil, filename, contentType, fmt.Errorf("decoded content too large: %d bytes exceeds limit of %d bytes", len(decoded), limit)
-	}
-
-	// Validate decoded content is not empty
-	if len(decoded) == 0 {
-		return nil, filename, contentType, fmt.Errorf("decoded content is empty")
-	}
-
-	// Re-detect content type based on decoded content
-	contentType = utils.DetectContentType(filename, decoded)
-
-	if utils.IsDebugEnabled() {
-		log.Printf("[DEBUG] Base64 decoded: %d bytes → %d bytes", len(content), len(decoded))
-	}
-
-	return decoded, filename, contentType, nil
-}
-
-// decodeBase64Content decodes base64 encoded content
-func (h *Handler) decodeBase64Content(encoded []byte) ([]byte, error) {
-	// Try standard base64 decoding first
-	decoded, err := base64.StdEncoding.DecodeString(string(encoded))
-	if err == nil {
-		return decoded, nil
-	}
-
-	// Try URL-safe base64 as fallback
-	decoded, err = base64.URLEncoding.DecodeString(string(encoded))
-	if err == nil {
-		return decoded, nil
-	}
-
-	// Try raw standard base64 (no padding)
-	decoded, err = base64.RawStdEncoding.DecodeString(string(encoded))
-	if err == nil {
-		return decoded, nil
-	}
-
-	// Try raw URL-safe base64 (no padding)
-	decoded, err = base64.RawURLEncoding.DecodeString(string(encoded))
-	if err != nil {
-		return nil, fmt.Errorf("invalid base64 encoding: %v", err)
-	}
-
-	return decoded, nil
-}
-
-func (h *Handler) readMultipartUpload(c *gin.Context, limit int64) ([]byte, string, string, error) {
-	file, header, err := c.Request.FormFile("file")
 	if err != nil {
 		if tooLargeReadError(err) {
-			return nil, "", "", fmt.Errorf("content too large: request exceeds multipart limit")
+			return nil, fmt.Errorf("content too large: request exceeds limit of %d bytes", requestLimit)
 		}
-		return nil, "", "", fmt.Errorf("no file provided")
+		return nil, err
 	}
-	defer func() { _ = file.Close() }()
-
-	filename := header.Filename
-
-	// If content is base64 encoded, adjust limit
-	effectiveLimit := limit
-	if headerEnabled(c, "X-Base64") {
-		effectiveLimit = encodedBase64Limit(limit)
-	}
-
-	if header.Size > 0 && header.Size > effectiveLimit {
-		return nil, filename, "", fmt.Errorf("content too large: %d bytes exceeds limit of %d bytes", header.Size, effectiveLimit)
-	}
-
-	content, exceeded, err := h.readLimitedContent(file, effectiveLimit)
-	if err != nil {
-		if tooLargeReadError(err) {
-			return nil, filename, "", fmt.Errorf("content too large: multipart request exceeds limit")
+	content := encoded
+	if base64Enabled {
+		content, err = h.decodeSpool(encoded, limit)
+		_ = encoded.Remove()
+		if err != nil {
+			return nil, err
 		}
-		return nil, filename, "", fmt.Errorf("failed to read file")
 	}
-	if exceeded {
-		return nil, filename, "", fmt.Errorf("content too large: exceeds limit of %d bytes", effectiveLimit)
+	if content.Size == 0 {
+		_ = content.Remove()
+		return nil, fmt.Errorf("empty content")
 	}
-
-	contentType := utils.DetectContentType(filename, content)
-	if len(content) == 0 {
-		return nil, filename, contentType, fmt.Errorf("empty content")
+	if multipart {
+		contentType = utils.DetectContentType(filename, content.Head)
+	} else if contentType == "" {
+		contentType = utils.DetectContentType("", content.Head)
 	}
-	return content, filename, contentType, nil
+	return &uploadSource{file: content, filename: filename, contentType: contentType}, nil
 }
 
-func (h *Handler) readDirectUpload(c *gin.Context, limit int64) ([]byte, string, string, error) {
-	// Adjust limit for base64 overhead if needed
-	effectiveLimit := limit
-	if headerEnabled(c, "X-Base64") {
-		effectiveLimit = encodedBase64Limit(limit)
+// decodeSpool tries the encodings accepted by the legacy API without holding
+// the encoded or decoded payload in memory.
+func (h *Handler) decodeSpool(encoded *spool.File, limit int64) (*spool.File, error) {
+	encodings := []*base64.Encoding{
+		base64.StdEncoding,
+		base64.URLEncoding,
+		base64.RawStdEncoding,
+		base64.RawURLEncoding,
 	}
-
-	content, exceeded, err := h.readLimitedContent(c.Request.Body, effectiveLimit)
-	if err != nil {
-		if tooLargeReadError(err) {
-			return nil, "", "", fmt.Errorf("content too large: request exceeds limit")
+	var lastErr error
+	for _, encoding := range encodings {
+		if _, err := encoded.Seek(0, io.SeekStart); err != nil {
+			return nil, err
 		}
-		return nil, "", "", fmt.Errorf("failed to read content")
+		decoded, err := spool.Write(h.tempDir(), "nclip-decode-*", base64.NewDecoder(encoding, encoded), limit, 512)
+		if err == nil {
+			if utils.IsDebugEnabled() {
+				log.Printf("[DEBUG] Base64 decoded: %d bytes -> %d bytes", encoded.Size, decoded.Size)
+			}
+			return decoded, nil
+		}
+		lastErr = err
+		if errors.Is(err, spool.ErrTooLarge) {
+			return nil, fmt.Errorf("decoded content too large: exceeds limit of %d bytes", limit)
+		}
 	}
-	if exceeded {
-		return nil, "", "", fmt.Errorf("content too large: exceeds limit of %d bytes", effectiveLimit)
-	}
+	return nil, fmt.Errorf("invalid base64 encoding: %v", lastErr)
+}
 
+func (h *Handler) readMultipartUpload(c *gin.Context, limit int64) (*spool.File, string, string, error) {
+	reader, err := c.Request.MultipartReader()
+	if err != nil {
+		return nil, "", "", fmt.Errorf("invalid multipart request")
+	}
+	for {
+		part, nextErr := reader.NextPart()
+		if nextErr == io.EOF {
+			return nil, "", "", fmt.Errorf("no file provided")
+		}
+		if nextErr != nil {
+			return nil, "", "", nextErr
+		}
+		if part.FormName() != "file" {
+			_ = part.Close()
+			continue
+		}
+		filename := part.FileName()
+		contentType := part.Header.Get("Content-Type")
+		file, copyErr := spool.Write(h.tempDir(), "nclip-upload-*", part, limit, 512)
+		_ = part.Close()
+		return file, filename, mimeType(contentType), copyErr
+	}
+}
+
+func (h *Handler) readDirectUpload(c *gin.Context, limit int64) (*spool.File, string, error) {
+	file, err := spool.Write(h.tempDir(), "nclip-upload-*", c.Request.Body, limit, 512)
+	if err != nil {
+		return nil, "", err
+	}
 	contentType := ""
 	if ct := c.ContentType(); ct != "" {
 		if parsedType, _, err := mime.ParseMediaType(ct); err == nil {
@@ -306,46 +285,20 @@ func (h *Handler) readDirectUpload(c *gin.Context, limit int64) ([]byte, string,
 			contentType = ct
 		}
 	}
-	if contentType == "" {
-		contentType = utils.DetectContentType("", content)
-	}
-	if len(content) == 0 {
-		return nil, "", contentType, fmt.Errorf("empty content")
-	}
-	return content, "", contentType, nil
+	return file, contentType, nil
 }
 
-func (h *Handler) readLimitedContent(r io.Reader, limit int64) ([]byte, bool, error) {
-	if r == nil {
-		return nil, false, fmt.Errorf("nil reader")
-	}
-
-	if limit <= 0 {
-		return nil, false, fmt.Errorf("invalid buffer size configuration: %d", limit)
-	}
-
-	buf, err := io.ReadAll(io.LimitReader(r, limit))
+func mimeType(value string) string {
+	parsed, _, err := mime.ParseMediaType(value)
 	if err != nil {
-		return nil, false, err
+		return ""
 	}
-	if int64(len(buf)) < limit {
-		return buf, false, nil
-	}
-
-	var extra [1]byte
-	n, err := r.Read(extra[:])
-	if n > 0 {
-		return nil, true, nil
-	}
-	if err != nil && err != io.EOF {
-		return nil, false, err
-	}
-	return buf, false, nil
+	return parsed
 }
 
-// storePasteAndRespond stores paste and responds to client
-func (h *Handler) storePasteAndRespond(c *gin.Context, req services.CreatePasteRequest) {
-	resp, err := h.service.CreatePaste(req)
+// storePasteAndRespond stores paste and responds to client.
+func (h *Handler) storePasteAndRespond(c *gin.Context, req services.CreatePasteStreamRequest) {
+	resp, err := h.service.CreatePasteStream(req)
 	if err != nil {
 		// Check if this is a validation error (should return 400) or server error (500)
 		errMsg := err.Error()
@@ -376,6 +329,8 @@ func (h *Handler) storePasteAndRespond(c *gin.Context, req services.CreatePasteR
 		"url":             resp.URL,
 		"slug":            resp.Slug,
 		"burn_after_read": req.BurnAfterRead,
+		"size":            req.Size,
+		"expires_at":      resp.ExpiresAt,
 	})
 }
 
@@ -424,8 +379,8 @@ func tooLargeError(err error) bool {
 	return err != nil && (strings.Contains(err.Error(), "content too large") || strings.Contains(err.Error(), "decoded content too large"))
 }
 
-func (h *Handler) Upload(c *gin.Context) {
-	content, filename, contentType, err := h.readUploadContent(c)
+func (h *Handler) upload(c *gin.Context, burnAfterRead bool) {
+	source, err := h.readUploadFile(c)
 	if err != nil {
 		log.Printf("[ERROR] %v", err)
 		c.Header("Content-Type", "application/json; charset=utf-8")
@@ -436,21 +391,18 @@ func (h *Handler) Upload(c *gin.Context) {
 		c.JSON(status, gin.H{"error": err.Error()})
 		return
 	}
+	defer func() { _ = source.file.Remove() }()
 
-	// Determine if burn-after-read: check X-Burn header first, then fall back to route path
-	burnAfterRead := false
-	// Support header-presence semantics: X-Burn enables burn unless explicitly disabled
-	if headerEnabled(c, "X-Burn") {
-		burnAfterRead = true
-	} else {
-		// Fall back to route-based detection for backward compatibility
-		burnAfterRead = strings.HasSuffix(c.FullPath(), "/burn/")
+	if !burnAfterRead {
+		burnAfterRead = headerEnabled(c, "X-Burn") || strings.HasSuffix(c.FullPath(), "/burn/")
 	}
 
-	req := services.CreatePasteRequest{
-		Content:       content,
-		Filename:      filename,
-		ContentType:   contentType,
+	req := services.CreatePasteStreamRequest{
+		Content:       source.file,
+		Size:          source.file.Size,
+		ContentPrefix: source.file.Head,
+		Filename:      source.filename,
+		ContentType:   source.contentType,
 		BurnAfterRead: burnAfterRead,
 		Public:        c.GetHeader("X-Nclip-Visibility") == "public",
 	}
@@ -479,35 +431,11 @@ func (h *Handler) Upload(c *gin.Context) {
 	h.storePasteAndRespond(c, req)
 }
 
+func (h *Handler) Upload(c *gin.Context) {
+	h.upload(c, false)
+}
+
 // UploadBurn handles paste upload with burn-after-read via POST /burn/
 func (h *Handler) UploadBurn(c *gin.Context) {
-	content, filename, contentType, err := h.readUploadContent(c)
-	if err != nil {
-		log.Printf("[ERROR] %v", err)
-		c.Header("Content-Type", "application/json; charset=utf-8")
-		status := http.StatusBadRequest
-		if tooLargeError(err) {
-			status = http.StatusRequestEntityTooLarge
-		}
-		c.JSON(status, gin.H{"error": err.Error()})
-		return
-	}
-
-	req := services.CreatePasteRequest{
-		Content:       content,
-		Filename:      filename,
-		ContentType:   contentType,
-		BurnAfterRead: true,
-		Public:        c.GetHeader("X-Nclip-Visibility") == "public",
-	}
-
-	expiresAt, err := h.parseTTL(c)
-	if err != nil {
-		c.Header("Content-Type", "application/json; charset=utf-8")
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-	req.TTL = time.Until(expiresAt)
-
-	h.storePasteAndRespond(c, req)
+	h.upload(c, true)
 }

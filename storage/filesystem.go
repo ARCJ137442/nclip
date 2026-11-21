@@ -1,6 +1,7 @@
 package storage
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -188,21 +189,53 @@ func (fs *FilesystemStore) IncrementReadCount(id string) error {
 }
 
 func (fs *FilesystemStore) StoreContent(id string, content []byte) error {
+	return fs.StoreContentStream(id, bytes.NewReader(content), int64(len(content)))
+}
+
+// StoreContentStream writes to a private temporary file and renames it only
+// after the full payload and size have been verified.
+func (fs *FilesystemStore) StoreContentStream(id string, content io.Reader, size int64) error {
 	contentPath, err := safePath(fs.dataDir, id)
 	if err != nil {
 		return err
 	}
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
 	if utils.IsDebugEnabled() {
-		log.Printf("[DEBUG] StoreContent: id=%s, content_len=%d", id, len(content))
+		log.Printf("[DEBUG] StoreContentStream: id=%s, content_len=%d", id, size)
 	}
 	if err := os.MkdirAll(fs.dataDir, 0o755); err != nil {
-		log.Printf("[ERROR] FS StoreContent: failed to create data directory %s: %v", fs.dataDir, err)
+		log.Printf("[ERROR] FS StoreContentStream: failed to create data directory %s: %v", fs.dataDir, err)
 		return err
 	}
-	if err := os.WriteFile(contentPath, content, 0o644); err != nil { // #nosec G306 -- path sanitised by safePath
-		log.Printf("[ERROR] FS StoreContent: failed to write content for %s: %v", id, err)
+	tmp, err := os.CreateTemp(fs.dataDir, "."+id+".upload-*")
+	if err != nil {
+		return fmt.Errorf("create content temp file: %w", err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}
+	written, err := io.Copy(tmp, io.LimitReader(content, size+1))
+	if err != nil {
+		cleanup()
+		log.Printf("[ERROR] FS StoreContentStream: failed to write content for %s: %v", id, err)
+		return err
+	}
+	if written != size {
+		cleanup()
+		return fmt.Errorf("content size mismatch: expected %d bytes, received %d", size, written)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, contentPath); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Printf("[ERROR] FS StoreContentStream: failed to publish content for %s: %v", id, err)
 		return err
 	}
 	return nil
@@ -221,6 +254,27 @@ func (fs *FilesystemStore) GetContent(id string) ([]byte, error) {
 		return nil, err
 	}
 	return data, nil
+}
+
+// OpenContent opens stored content without copying it into memory.
+func (fs *FilesystemStore) OpenContent(id string) (io.ReadCloser, int64, error) {
+	contentPath, err := safePath(fs.dataDir, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	file, err := os.Open(contentPath) // #nosec G304 -- path sanitised by safePath
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, ErrNotFound
+		}
+		return nil, 0, err
+	}
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, 0, err
+	}
+	return file, info.Size(), nil
 }
 
 // StatContent reports whether content exists on disk and its size.
