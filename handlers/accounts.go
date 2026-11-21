@@ -131,12 +131,12 @@ func (h *AccountHandler) Home(c *gin.Context) {
 		web.Index(c)
 		return
 	}
-	if user.Permissions.Manage {
-		c.Redirect(http.StatusSeeOther, "/admin")
-		return
-	}
 	if user.Permissions.Upload {
 		web.Index(c)
+		return
+	}
+	if user.Permissions.Manage {
+		c.Redirect(http.StatusSeeOther, "/admin")
 		return
 	}
 	if user.Permissions.Download {

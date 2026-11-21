@@ -11,7 +11,7 @@ Ordinary users also have an optional `upload_limit_bytes` content cap. New ordin
 - Upload only: composer home; protected share results retain copy actions and omit the inaccessible preview action.
 - Download only: link/code entry home with explicit clipboard paste and opt-in clipboard suggestions. Direct share links return to their original path after login.
 - Upload and download: composer is primary; receiving is a secondary entry point and a clipboard-link shortcut.
-- Administrator: administration home plus upload and download capabilities; after sign-in, the home route opens administration first.
+- Administrator: administration entry plus upload and download capabilities; the home route opens the composer after sign-in, and administration remains available from the task navigation.
 - No permissions: a clear permission page and sign-out access.
 
 Existing and new shares default to authenticated users with download permission. A sender can explicitly enable **Public sharing** for an individual share; anyone with that link can read/receive it without login, including users who do not have private download permission. The only additional share field is `public: true`; there are no per-user share ACLs or ownership records. Missing/expired links return the normal not-found page, including public one-time links after consumption.

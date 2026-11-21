@@ -56,10 +56,7 @@ async function signIn(ctx, name, password, url = "/") {
     },
     { name, password },
   );
-  const destination =
-    url === "/" && name === adminName
-      ? "/admin"
-      : new URL(url, base).pathname;
+  const destination = new URL(url, base).pathname;
   await Promise.all([
     page.waitForURL((u) => u.pathname === destination),
     page.locator("#login-submit").click(),
@@ -96,7 +93,10 @@ let adminContext;
 try {
   adminContext = await context();
   const adminPage = await signIn(adminContext, adminName, adminPassword);
-  assert.equal(new URL(adminPage.url()).pathname, "/admin");
+  assert.equal(new URL(adminPage.url()).pathname, "/");
+  assert.match(await send(adminPage), new RegExp(`^${base}/[A-Z2-9]+$`));
+  console.log("PASS administrator lands on the composer and can send");
+  await adminPage.goto(base + "/admin");
   await adminPage.locator("#user-list article").waitFor();
   const admin = (await session(adminContext)).user;
   const adminRow = adminPage.locator(`[data-user-id="${admin.id}"]`);
@@ -228,8 +228,9 @@ try {
       adminName,
       adminPassword,
     );
+  assert.equal(new URL(managePage.url()).pathname, "/");
+  await managePage.goto(base + "/admin");
   await managePage.locator("#user-list article").first().waitFor();
-  assert.equal(new URL(managePage.url()).pathname, "/admin");
   assert.equal(await managePage.locator("#nav-upload").isHidden(), false);
   assert.equal(await managePage.locator("#nav-download").isHidden(), false);
   await managePage.locator("#shares-tab").click();

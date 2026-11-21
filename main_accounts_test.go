@@ -442,8 +442,8 @@ func TestReceiveEntryWorksBeforeJavaScript(t *testing.T) {
 	admin := signIn(t, router, "admin", "test-admin-password")
 	slug := accountLegacyPaste(t, admin, false)
 	home := admin.call("GET", "/", nil, false)
-	if home.Code != http.StatusSeeOther || home.Header().Get("Location") != "/admin" {
-		t.Fatalf("administrator home destination: %d %s", home.Code, home.Header().Get("Location"))
+	if home.Code != http.StatusOK || !strings.Contains(home.Body.String(), `id="composer"`) {
+		t.Fatalf("administrator home should open the composer: %d %s", home.Code, home.Body.String())
 	}
 	for _, value := range []string{slug, strings.ToLower(slug), "https://clip.test/raw/" + slug} {
 		w := admin.call("GET", "/receive?code="+url.QueryEscape(value), nil, false)
