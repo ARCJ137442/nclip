@@ -593,8 +593,8 @@ func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Content-Type", "multipart/form-data; boundary="+boundary)
 	if !shareResumeAllowed(p) {
-		// One-time bytes are already validated and deleted server-side. Do not
-		// advertise resumability until P1 adds a same-client receive token.
+		// The current one-time path has consumed its record before writing this
+		// response. P1b channel mode will guarantee single-read with an exclusive lock.
 		c.Header("Content-Length", strconv.FormatInt(prepared.Size, 10))
 		_, _ = io.CopyN(c.Writer, prepared, prepared.Size)
 		return

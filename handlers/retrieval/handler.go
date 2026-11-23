@@ -174,9 +174,9 @@ func (h *Handler) viewCLI(c *gin.Context, slug string, paste *models.Paste) {
 	}
 }
 
-// streamLegacy preserves deletion-before-delivery for one-time reads. A burn
-// payload is copied and validated locally first; only then is the server copy
-// deleted and the response body started.
+// streamLegacy currently validates and spools a one-time payload, consumes the
+// server record, then writes response bytes. P1b channel mode will guarantee
+// single-read with an exclusive lock, independent of deletion timing.
 func (h *Handler) streamLegacy(c *gin.Context, slug string, consume bool, contentType string) error {
 	if !consume {
 		return h.service.ReadPasteStream(slug, false, func(_ *models.Paste, source io.Reader, size int64) error {
@@ -344,8 +344,8 @@ func (h *Handler) loadPreviewContent(c *gin.Context, slug string, paste *models.
 	return prefix, nil
 }
 
-// handleRawBurn atomically consumes within this process before writing bytes.
-// A failed response is deliberately not replayable.
+// handleRawBurn currently consumes within this process before writing bytes.
+// P1b channel mode will guarantee single-read with an exclusive lock.
 func (h *Handler) handleRawBurn(c *gin.Context, slug string) bool {
 	// Share the single-instance consumption boundary with browser receive and CLI.
 	err := h.consumeLegacy(c, slug, func(paste *models.Paste, size int64) {

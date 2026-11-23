@@ -21,7 +21,8 @@ Browser one-time HTML views display confirmation without loading content or
 incrementing reads. Destructive legacy raw/CLI paths use
 `internal/services/paste_service.go:ConsumePaste`. That service acquires a bounded
 process-local lock, loads fresh metadata, completely reads and checks content
-length, and deletes before returning the bytes to the handler.
+length, and currently consumes the server record before returning bytes to the
+handler.
 
 Confirmed multipart receiving validates the stored manifest and full bundle
 before consuming. `handlers/shares.go` and `models/share.go` distinguish logical
@@ -30,9 +31,11 @@ rejected instead of being presented as a successful receive.
 
 Only one destructive reader can succeed in the supported single-process
 deployment. This lock does not coordinate separate Lambda instances or multiple
-filesystem processes. Deletion precedes network delivery; a truncated response
-cannot be recovered from the server. Only a completely received browser copy can
-be retried locally.
+filesystem processes. The current path consumes the server record before network
+delivery, so a truncated response cannot be recovered from the server. Channel
+mode introduced in P1b will guarantee single-read with an exclusive lock,
+independent of deletion timing. Only a completely received browser copy can be
+retried locally.
 
 ## Verification
 

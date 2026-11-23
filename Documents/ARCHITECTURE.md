@@ -64,9 +64,11 @@ data, not executable preview markup. Only UI preferences are persisted by the
 browser.
 
 One-time browser pages display confirmation without loading body/thumbnail.
-Confirmed receive and legacy raw/CLI consumption coordinate within one process,
-validate a complete read, then delete before responding. This cannot provide
-cross-instance S3 exclusion or recover a response interrupted after deletion.
+The current confirmed-receive and legacy raw/CLI paths coordinate within one
+process, validate a complete read, then consume the server record before writing
+response bytes. They do not coordinate across S3 instances. Channel mode
+introduced in P1b will guarantee single-read with an exclusive lock, independent
+of deletion timing.
 Content checks are detailed in [Content integrity](SIZE_MISMATCH_ARCHITECTURE.md).
 
 Configuration defaults are maintained once in the root [README](../README.md).
