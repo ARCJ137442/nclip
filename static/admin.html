@@ -120,6 +120,16 @@
               搜索</button
             ><span id="share-count" class="hint"></span>
           </form>
+          <label class="page-filter" for="share-filter">
+            <span data-i18n="filtersThisPage">筛选（仅本页）</span>
+            <select id="share-filter">
+              <option value="all" data-i18n="filterAll">全部</option>
+              <option value="active" data-i18n="filterActive">未过期</option>
+              <option value="expired" data-i18n="filterExpired">已过期</option>
+              <option value="burn" data-i18n="filterBurn">一次性</option>
+              <option value="public" data-i18n="filterPublic">公网</option>
+            </select>
+          </label>
           <div id="share-list" class="admin-list"></div>
           <div class="pagination">
             <button

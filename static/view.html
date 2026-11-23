@@ -53,7 +53,6 @@
               role="progressbar"
               aria-valuemin="0"
               aria-valuemax="100"
-              aria-valuenow="0"
               aria-labelledby="receive-phase"
             >
               <span id="receive-fill"></span>
@@ -74,9 +73,13 @@
             <span id="receive-outcome-facts"></span>
           </div>
           <div id="receive-gate" hidden>
-            <strong data-i18n="oneTimeTitle">这是一份一次性内容</strong>
-            <p data-i18n="oneTimeHint"></p>
-            <p class="hint" data-i18n="oneTimeNetwork"></p>
+            <strong id="receive-gate-title" data-i18n="receiveStart">开始接收</strong>
+            <p id="receive-gate-hint" class="hint"></p>
+            <div class="receive-gate-facts">
+              <strong id="receive-gate-total"></strong>
+              <span id="receive-gate-expires"></span>
+            </div>
+            <ul id="receive-gate-items" class="receive-gate-items"></ul>
             <button id="receive" class="button primary" data-icon="clipboard">
               <span data-i18n="receive">接收并销毁</span>
             </button>
@@ -150,6 +153,15 @@
       </main>
       {{template "app-footer" .}}
     </div>
+    <dialog id="receive-delete-dialog" class="editor-dialog" aria-labelledby="receive-delete-title">
+      <h2 id="receive-delete-title" data-i18n="deleteConfirm">确认删除</h2>
+      <p id="receive-delete-description" data-i18n="deleteConfirm"></p>
+      <p id="receive-delete-error" class="form-error" role="alert"></p>
+      <div class="dialog-actions">
+        <button id="receive-delete-cancel" class="button secondary" type="button" data-i18n="cancel">取消</button>
+        <button id="receive-delete-confirm" class="button danger" type="button" data-i18n="deleteAction">删除</button>
+      </div>
+    </dialog>
     <script type="module" src="/static/script.js?v={{.Version}}"></script>
   </body>
 </html>

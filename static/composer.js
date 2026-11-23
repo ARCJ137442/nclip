@@ -1,5 +1,5 @@
-import { $, status, failure, authHeaders, renderItems } from "./ui.js";
-import { preferences } from "./preferences.js";
+import { $, status, failure, authHeaders, renderItems, icon } from "./ui.js";
+import { preferences, savePreferences } from "./preferences.js";
 import { access, can } from "./access.js";
 import { t, sizeLabel } from "./i18n.js";
 import {
@@ -12,6 +12,7 @@ import {
 } from "./clipboard.js";
 import { request, uploadShare, encodeShare } from "./share-api.js";
 import { createProgress, timeParts, transferStages } from "./transfer.js";
+import { clampTTLHours, safePreview } from "./handoff.js";
 
 export async function startComposer() {
   const editor = $("message");
@@ -30,6 +31,9 @@ export async function startComposer() {
     lastCompleted = null,
     resultMessage = null,
     attempt = 0,
+    sentLedger = [],
+    configFailure = null,
+    summaryRevision = 0,
     lastCopiedURL = "";
   function draft() {
     return [
@@ -66,6 +70,15 @@ export async function startComposer() {
     $("draft-meter-fill").style.width =
       max > 0 ? `${Math.min(100, (size / max) * 100)}%` : "0%";
     $("draft-meter").dataset.over = String(max > 0 && size > max);
+    const over = max > 0 && size > max ? size - max : 0;
+    const largest = items
+      .map((item) => ({ item, size: item.parts.reduce((n, p) => n + p.blob.size, 0) }))
+      .sort((a, b) => b.size - a.size)[0];
+    $("draft-overflow").hidden = over <= 0;
+    $("draft-overflow").textContent = over > 0
+      ? t("draftOverflow", { size: sizeLabel(over), name: largest?.item.name || itemLabel(largest?.item || { kind: "clipboard", parts: [] }) })
+      : "";
+    void updateSendSummary(items, size, max);
   }
   function changed() {
     // Revision, not a transient flag: edits made before a retry still count,
@@ -284,8 +297,87 @@ export async function startComposer() {
     if (item.parts.some((part) => part.mime === "text/html")) return t("rich");
     return t("text");
   }
-  function setResultFacts(items, elapsed) {
-    lastCompleted = { items, elapsed };
+  async function itemPreview(item) {
+    const plain = item.parts.find((part) => part.mime === "text/plain");
+    if (!plain) return "";
+    try {
+      // Match the server's bounded preview source exactly (spool head = 512 bytes).
+      return safePreview(await plain.blob.slice(0, 512).text());
+    } catch {
+      return "";
+    }
+  }
+  function currentTTL() {
+    const min = Math.ceil((config?.ttl_min_seconds ?? 3600) / 3600);
+    const max = Math.floor((config?.ttl_max_seconds ?? 604800) / 3600);
+    return clampTTLHours($("ttl-hours").value, min, max);
+  }
+  async function updateSendSummary(items = draft(), size = draftBytes(items), max = config?.upload_max_bytes || 0) {
+    const previewVersion = ++summaryRevision;
+    const hours = currentTTL() ?? preferences.ttlHours ?? 24;
+    const accessText = $("public-share").checked ? t("summaryPublic") : t("summaryPrivate");
+    const facts = [
+      t(items.length === 1 ? "draftItemsOne" : "draftItemsMany", { count: items.length }),
+      sizeLabel(size),
+      t("ttlAfter", { hours }),
+      accessText,
+      ...($("burn").checked ? [t("summaryBurn")] : []),
+    ];
+    if (max > 0 && size > max) facts.push(t("draftOverBy", { size: sizeLabel(size - max) }));
+    const summary = $("send-summary");
+    if (!summary) return;
+    summary.textContent = facts.join(" · ");
+    const previews = await Promise.all(items.map(itemPreview));
+    if (previewVersion !== summaryRevision) return;
+    $("send-summary-preview").textContent = previews
+      .map((preview) => preview
+        ? `${t("receiverPreviewLabel")}: ${preview}`
+        : t("previewOmitted"))
+      .join(" · ");
+  }
+  function expiryFacts(expiresAt) {
+    const date = expiresAt ? new Date(expiresAt) : null;
+    if (!date || Number.isNaN(date.getTime())) return t("expiryUnknown");
+    const hours = Math.max(0, (date.getTime() - Date.now()) / 3600000);
+    const relative = hours >= 1
+      ? t("ttlAfter", { hours: Math.ceil(hours) })
+      : t("ttlUnderHour");
+    return `${date.toLocaleString(document.documentElement.lang)} · ${relative}`;
+  }
+  function renderSentLedger() {
+    const root = $("sent-log-list");
+    root.replaceChildren();
+    $("sent-log").hidden = sentLedger.length === 0;
+    for (const item of sentLedger) {
+      const row = document.createElement("li");
+      const copy = document.createElement("button");
+      copy.type = "button";
+      copy.className = "sent-log-code";
+      copy.dataset.icon = "copy";
+      copy.textContent = item.slug;
+      copy.prepend(icon("copy"));
+      copy.setAttribute("aria-label", t("copyCodeAria", { code: item.slug }));
+      copy.addEventListener("click", async () => {
+        try { await copyText(item.slug); status("copied", "success"); }
+        catch { status("copyFailed", "error"); }
+      });
+      const detail = document.createElement("span");
+      detail.textContent = [new Date(item.createdAt).toLocaleTimeString(document.documentElement.lang), expiryFacts(item.expiresAt), item.burn ? t("burn") : "", item.public ? t("publicAccess") : ""].filter(Boolean).join(" · ");
+      row.append(copy, detail);
+      if (!item.openHidden) {
+        const open = document.createElement("a");
+        open.href = item.url;
+        open.className = "button quiet";
+        open.dataset.icon = "download";
+        open.textContent = t("view");
+        open.prepend(icon("download"));
+        row.append(open);
+      }
+      root.append(row);
+    }
+  }
+  function setResultFacts(items, elapsed, result = {}) {
+    lastCompleted = { items, elapsed, ...result };
     const size = draftBytes(items);
     const facts = [
       t("resultFactItems", { count: items.length, size: sizeLabel(size) }),
@@ -298,9 +390,10 @@ export async function startComposer() {
         }),
       );
     facts.push(
-      $("public-share").checked ? t("resultPublic") : t("resultAuthenticated"),
+      lastCompleted.public ? t("resultPublic") : t("resultAuthenticated"),
     );
-    if ($("burn").checked) facts.push(t("resultOneTime"));
+    if (lastCompleted.burn) facts.push(t("resultOneTime"));
+    facts.push(expiryFacts(lastCompleted.expiresAt));
     const root = $("result-facts");
     root.replaceChildren(
       ...facts.map((text) => {
@@ -316,6 +409,12 @@ export async function startComposer() {
       (names.length > 4
         ? ` · ${t("resultItemMore", { count: names.length - 4 })}`
         : "");
+    const previews = lastCompleted.manifest?.items?.map((item) => item.preview || "") || [];
+    $("result-preview").textContent = previews.length
+      ? previews.map((preview) => preview
+        ? `${t("receiverPreviewLabel")}: ${preview}`
+        : t("previewOmitted")).join(" · ")
+      : t("previewOmitted");
   }
   function setResultMessage(key) {
     resultMessage = key;
@@ -329,13 +428,21 @@ export async function startComposer() {
       return;
     }
     if (!config) {
-      status("loading");
+      status("receiveConfigUnavailable", "error");
       return;
     }
     if (items.length > config.max_items) {
       status("tooMany", "error", { count: config.max_items });
       return;
     }
+    const ttlHours = currentTTL();
+    if (ttlHours == null) {
+      $("ttl-error").textContent = t("ttlInvalid");
+      $("ttl-error").hidden = false;
+      $("ttl-hours").focus();
+      return;
+    }
+    $("ttl-error").hidden = true;
     // Request framing counts toward the proxy limit too; the server remains authoritative.
     if (
       items.reduce(
@@ -389,6 +496,9 @@ export async function startComposer() {
           "X-Nclip-Visibility": $("public-share").checked
             ? "public"
             : "authenticated",
+          ...(ttlHours !== Math.ceil((config.default_ttl_seconds || 86400) / 3600)
+            ? { "X-TTL": `${ttlHours}h` }
+            : {}),
         },
         {
           signal: controller.signal,
@@ -405,17 +515,37 @@ export async function startComposer() {
         },
       );
       if (!result?.url) throw new Error("failed");
+      const resultSlug = result.slug || new URL(result.url, location.href).pathname.slice(1);
       $("share-url").value = result.url;
+      $("share-code").textContent = resultSlug;
+      $("copy-code").setAttribute("aria-label", t("copyCodeAria", { code: resultSlug }));
       $("open-share").href = result.url;
       $("open-share").hidden =
-        access.enabled && !can("download") && !result.public;
+        access.enabled && !can("download") && !(result.public ?? $("public-share").checked);
       $("native-share").hidden = !navigator.share;
       $("transfer").hidden = true;
       hideCandidate();
       setResultFacts(
         items,
         Math.max(0, (performance.now() - transferStartedAt) / 1000),
+        {
+          expiresAt: result.expires_at,
+          manifest: result.manifest,
+          burn: result.burn_after_read ?? $("burn").checked,
+          public: result.public ?? $("public-share").checked,
+        },
       );
+      sentLedger.unshift({
+        slug: resultSlug,
+        url: result.url,
+        createdAt: Date.now(),
+        expiresAt: result.expires_at,
+        burn: result.burn_after_read ?? $("burn").checked,
+        public: result.public ?? $("public-share").checked,
+        openHidden: $("open-share").hidden,
+      });
+      sentLedger = sentLedger.slice(0, 20);
+      renderSentLedger();
       $("result").hidden = false;
       if (draftRevision !== revision) {
         // The draft no longer matches the sent snapshot: keep it visible,
@@ -491,6 +621,20 @@ export async function startComposer() {
     status("");
   });
   $("copy-link").addEventListener("click", copyLink);
+  $("copy-code").addEventListener("click", async () => {
+    const code = $("share-code").textContent;
+    try {
+      await copyText(code);
+      status("codeCopied", "success");
+    } catch {
+      const range = document.createRange();
+      range.selectNodeContents($("share-code"));
+      const selection = getSelection();
+      selection.removeAllRanges();
+      selection.addRange(range);
+      status("codeCopyFailed", "error");
+    }
+  });
   $("native-share").addEventListener("click", async () => {
     try {
       await navigator.share({ url: $("share-url").value });
@@ -504,8 +648,6 @@ export async function startComposer() {
     rich = null;
     $("rich-hint").hidden = true;
     $("path-hint").hidden = true;
-    $("burn").checked = false;
-    $("public-share").checked = false;
     $("result").hidden = true;
     $("composer").hidden = false;
     attempt = 0;
@@ -516,6 +658,8 @@ export async function startComposer() {
     $("transfer-freshness").textContent = "";
     $("result-facts").replaceChildren();
     $("result-items").replaceChildren();
+    $("share-code").textContent = "";
+    $("result-preview").textContent = "";
     void renderDraft();
     updateDraftMeter();
     status("");
@@ -620,6 +764,40 @@ export async function startComposer() {
     event.returnValue = "";
   });
   window.addEventListener("focus", () => probe(true));
+  function syncOptionPreferences() {
+    const ttlHours = currentTTL();
+    if (ttlHours == null) return;
+    savePreferences({
+      burn: $("burn").checked,
+      public: access.enabled && can("upload") && !$("public-option").hidden && $("public-share").checked,
+      ttlHours,
+    });
+    updateSendSummary();
+  }
+  $("burn").checked = !!preferences.burn;
+  $("public-share").checked =
+    access.enabled && can("upload") && !$("public-option").hidden && !!preferences.public;
+  $("ttl-hours").value = clampTTLHours(preferences.ttlHours) ?? 24;
+  $("burn").addEventListener("change", syncOptionPreferences);
+  $("public-share").addEventListener("change", syncOptionPreferences);
+  $("ttl-hours").addEventListener("input", () => {
+    const ttlHours = currentTTL();
+    $("ttl-error").hidden = ttlHours != null;
+    if (ttlHours != null) syncOptionPreferences();
+    document.querySelectorAll("[data-ttl-hours]").forEach((button) => {
+      button.setAttribute("aria-pressed", String(Number(button.dataset.ttlHours) === ttlHours));
+    });
+  });
+  document.querySelectorAll("[data-ttl-hours]").forEach((button) => {
+    button.addEventListener("click", () => {
+      $("ttl-hours").value = button.dataset.ttlHours;
+      $("ttl-error").hidden = true;
+      syncOptionPreferences();
+      document.querySelectorAll("[data-ttl-hours]").forEach((preset) =>
+        preset.setAttribute("aria-pressed", String(preset === button)),
+      );
+    });
+  });
   $("suggestions").addEventListener("change", () => {
     if (preferences.suggestions) void probe(false); // Enabling is an explicit read gesture.
   });
@@ -627,11 +805,20 @@ export async function startComposer() {
     if (document.visibilityState !== "visible") invalidateRead();
   });
   window.addEventListener("preferenceschange", () => {
+    $("burn").checked = !!preferences.burn;
+    $("public-share").checked =
+      access.enabled && can("upload") && !$("public-option").hidden && !!preferences.public;
+    if (document.activeElement !== $("ttl-hours"))
+      $("ttl-hours").value = clampTTLHours(preferences.ttlHours) ?? 24;
+    document.querySelectorAll("[data-ttl-hours]").forEach((preset) =>
+      preset.setAttribute("aria-pressed", String(Number(preset.dataset.ttlHours) === currentTTL())),
+    );
     updateLimits();
     if (!$("result").hidden && lastCompleted)
-      setResultFacts(lastCompleted.items, lastCompleted.elapsed);
+      setResultFacts(lastCompleted.items, lastCompleted.elapsed, lastCompleted);
     if (!$("result").hidden && resultMessage)
       $("result-message").textContent = t(resultMessage);
+    renderSentLedger();
     if (!preferences.suggestions) hideCandidate();
     else void probe(true);
     void renderDraft();
@@ -643,11 +830,36 @@ export async function startComposer() {
         transferFailure,
       );
   });
-  try {
-    config = await (await request("/api/v1/ui-config")).json();
-    updateLimits();
-    await probe(true);
-  } catch (error) {
-    failure(error);
+  async function loadConfig() {
+    $("config-retry").disabled = true;
+    try {
+      config = await (await request("/api/v1/ui-config")).json();
+      config.ttl_min_seconds ??= 3600;
+      config.ttl_max_seconds ??= 604800;
+      config.default_ttl_seconds ??= 86400;
+      const selected = clampTTLHours(preferences.ttlHours, Math.ceil(config.ttl_min_seconds / 3600), Math.floor(config.ttl_max_seconds / 3600)) ?? 24;
+      $("ttl-hours").min = String(Math.ceil(config.ttl_min_seconds / 3600));
+      $("ttl-hours").max = String(Math.floor(config.ttl_max_seconds / 3600));
+      $("ttl-hours").value = selected;
+      document.querySelectorAll("[data-ttl-hours]").forEach((preset) =>
+        preset.setAttribute("aria-pressed", String(Number(preset.dataset.ttlHours) === selected)),
+      );
+      $("public-option").hidden = !access.enabled || !can("upload");
+      $("public-share").checked = access.enabled && can("upload") && !!preferences.public;
+      updateLimits();
+      $("send").disabled = false;
+      $("config-recovery").hidden = true;
+      await probe(true);
+    } catch (error) {
+      config = null;
+      $("send").disabled = true;
+      $("config-recovery").hidden = false;
+      $("config-error").textContent = `${t("receiveConfigUnavailable")} ${t(error.message === "network" ? "network" : "failed")}`;
+      failure(error);
+    } finally {
+      $("config-retry").disabled = false;
+    }
   }
+  $("config-retry").addEventListener("click", () => void loadConfig());
+  await loadConfig();
 }

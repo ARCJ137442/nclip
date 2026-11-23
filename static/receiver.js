@@ -1,4 +1,4 @@
-import { $, status, failure, authHeaders, renderItems } from "./ui.js";
+import { $, status, failure, authHeaders, renderItems, icon } from "./ui.js";
 import { t, sizeLabel } from "./i18n.js";
 import { copyItem } from "./clipboard.js";
 import { request, requestBytes, decodeShare } from "./share-api.js";
@@ -163,20 +163,108 @@ export async function startReceiver(slug) {
     }
     $("receive-outcome").hidden = false;
     $("receive-outcome-title").textContent = t("receiveReadyTitle");
-    $("receive-outcome-facts").textContent = [
+    const facts = [
       t("receiveOutcome", {
         size: sizeLabel(receiveStats.size),
         time: etaLabel(receiveStats.elapsed),
       }),
-      receiveStats.consumed ? t("receiveCopyRemoved") : t("receiveCopyKept"),
-    ].join(" · ");
+    ];
+    if (receiveStats.consumed) facts.push(t("receiveCopyRemoved"));
+    else {
+      facts.push(t("receiveCopyKept"));
+      facts.push(t("receiveWillRemain", {
+        date: receiveStats.expiresAt
+          ? new Date(receiveStats.expiresAt).toLocaleString(document.documentElement.lang)
+          : t("expiryUnknown"),
+      }));
+    }
+    $("receive-outcome-facts").textContent = facts.join(" · ");
+  }
+  function confirmDeleteShare() {
+    return new Promise((resolve) => {
+      const dialog = $("receive-delete-dialog");
+      $("receive-delete-title").textContent = t("confirmDelete");
+      $("receive-delete-description").textContent = t("deleteConfirm");
+      $("receive-delete-error").textContent = "";
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        dialog.removeEventListener("close", onClose);
+        $("receive-delete-cancel").removeEventListener("click", onCancel);
+        $("receive-delete-confirm").removeEventListener("click", onConfirm);
+        if (dialog.open) dialog.close();
+        resolve(value);
+      };
+      const onCancel = () => finish(false);
+      const onConfirm = () => finish(true);
+      const onClose = () => finish(false);
+      dialog.addEventListener("close", onClose);
+      $("receive-delete-cancel").addEventListener("click", onCancel);
+      $("receive-delete-confirm").addEventListener("click", onConfirm);
+      dialog.showModal();
+      $("receive-delete-cancel").focus();
+    });
+  }
+  function manifestTotals() {
+    const manifest = metadata?.manifest;
+    const size = manifest?.items?.reduce(
+      (sum, item) => sum + item.parts.reduce((partSum, part) => partSum + part.size, 0),
+      0,
+    ) || 0;
+    return { count: manifest?.items?.length || 0, size };
+  }
+  function renderReceiveGate() {
+    if (!metadata) return;
+    const total = manifestTotals();
+    const oneTime = !!metadata.burn_after_read;
+    const expiry = metadata.expires_at
+      ? new Date(metadata.expires_at).toLocaleString(document.documentElement.lang)
+      : t("expiryUnknown");
+    $("receive-gate-title").textContent = t(oneTime ? "oneTimeTitle" : "receiveStart");
+    $("receive-gate-hint").textContent = t(oneTime ? "receiveOneTimeLocked" : "receiveGateHint");
+    const actionLabel = $("receive").querySelector("[data-i18n]");
+    actionLabel.dataset.i18n = oneTime ? "receive" : "receiveStart";
+    actionLabel.textContent = t(actionLabel.dataset.i18n);
+    $("receive-gate-total").textContent = t("resultFactItems", {
+      count: total.count,
+      size: sizeLabel(total.size),
+    });
+    $("receive-gate-expires").textContent = t("receiveTtl") + ": " + expiry;
+    const list = $("receive-gate-items");
+    list.replaceChildren();
+    for (const item of metadata.manifest.items) {
+      const row = document.createElement("li");
+      row.prepend(icon(item.kind === "file" ? "file" : "clipboard"));
+      const kind = document.createElement("strong");
+      kind.textContent = item.kind === "file" ? t("file") : t("clipboardItem");
+      const name = document.createElement("span");
+      name.textContent = item.name;
+      const size = item.parts.reduce((sum, part) => sum + part.size, 0);
+      const detail = document.createElement("span");
+      detail.textContent = sizeLabel(size);
+      row.append(kind, name, detail);
+      if (item.preview) {
+        const preview = document.createElement("small");
+        preview.className = "gate-preview";
+        preview.textContent = `${t("receiverPreviewLabel")}: ${item.preview}`;
+        row.append(preview);
+      }
+      list.append(row);
+    }
   }
   function retainedSize() {
     return retained.reduce((sum, chunk) => sum + chunk.byteLength, 0);
   }
+  // Keep receive resumability policy in one place. P1 will define whether a
+  // locked one-time delivery token permits same-page continuation.
+  function canResumeCurrentShare() {
+    return !metadata?.burn_after_read;
+  }
   function updateResumeHint() {
     const size = retainedSize();
     const visible =
+      canResumeCurrentShare() &&
       receiveResumable &&
       size > 0 &&
       !["ready", "parsing"].includes(receivePhase);
@@ -214,13 +302,13 @@ export async function startReceiver(slug) {
     $("receive").setAttribute("aria-busy", "true");
     $("retry").hidden = true;
     const burn = !!metadata?.burn_after_read;
-    // A one-time transfer cannot be resumed; offering cancel would only
-    // invite data loss. Ordinary shares keep their server copy.
+    // P0 exposes cancellation only where the server copy remains available.
     $("receive-cancel").hidden = burn;
     $("receive-note").hidden = !burn;
     if (burn) $("receive-note").textContent = t("receiveOneTimeNote");
     $("receive-progress").hidden = false;
     $("receive-resume").hidden = true;
+    $("receive-gate").hidden = true;
     receiveStats = null;
     renderReceiveOutcome();
     receiveAttempt++;
@@ -254,12 +342,12 @@ export async function startReceiver(slug) {
         consume ? { method: "POST", headers: { "X-Nclip-Confirm": "1" } } : {},
         {
           signal: controller.signal,
-          start: consume ? 0 : retainedSize(),
+          start: !consume && canResumeCurrentShare() ? retainedSize() : 0,
           onReset: () => {
             retained = [];
           },
           onChunk: (chunk) => {
-            if (chunk?.byteLength) retained.push(chunk);
+            if (canResumeCurrentShare() && chunk?.byteLength) retained.push(chunk);
           },
           onProgress: ({ received, total, resumable }) => {
             receiveResumable = resumable;
@@ -320,12 +408,13 @@ export async function startReceiver(slug) {
           (performance.now() - receiveStartedAt) / 1000,
         ),
         consumed,
+        expiresAt: metadata.expires_at,
       };
       renderReceiveOutcome();
     } catch (error) {
       if (error.message === "aborted") {
         failReceiveStage("canceled");
-        if (burn) {
+        if (!canResumeCurrentShare()) {
           retained = [];
           await recheckOneTime(error);
         } else {
@@ -362,13 +451,13 @@ export async function startReceiver(slug) {
       $("receive").removeAttribute("aria-busy");
     }
   }
-  $("receive").addEventListener("click", () => load(true));
+  $("receive").addEventListener("click", () => load(!!metadata?.burn_after_read));
   $("receive-cancel").addEventListener("click", () =>
     receiveController?.abort(),
   );
   $("retry").addEventListener("click", () => load());
   $("delete-share").addEventListener("click", async () => {
-    if (!confirm(t("deleteConfirm"))) return;
+    if (!(await confirmDeleteShare())) return;
     $("delete-share").disabled = true;
     status("deleting");
     try {
@@ -393,6 +482,7 @@ export async function startReceiver(slug) {
   window.addEventListener("preferenceschange", () => {
     details();
     void render();
+    renderReceiveGate();
     renderReceiveOutcome();
     // The phase replaced the markup's i18n default; re-render it in the newly
     // selected language instead of leaving a stale translation.
@@ -402,14 +492,27 @@ export async function startReceiver(slug) {
         $("receive-note").textContent = t("receiveOneTimeNote");
     }
   });
-  window.addEventListener("pagehide", () => {
-    if (bundleURL) URL.revokeObjectURL(bundleURL);
-    items = null;
+  window.addEventListener("pagehide", (event) => {
+    if (!event.persisted) {
+      if (bundleURL) URL.revokeObjectURL(bundleURL);
+      items = null;
+    }
+  });
+  window.addEventListener("pageshow", () => {
+    if (consumed && items) void render();
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (!metadata?.burn_after_read || !busy) return;
+    event.preventDefault();
+    event.returnValue = "";
   });
   metadata = await (await request(endpoint)).json();
   $("delete-share").hidden = !can("manage");
   details();
-  if (metadata.burn_after_read) {
+  renderReceiveGate();
+  const total = manifestTotals();
+  const needsPreflight = metadata.burn_after_read || total.size > 8 * 1024 * 1024 || total.count >= 3;
+  if (needsPreflight) {
     $("receive-gate").hidden = false;
     status("");
   } else await load();

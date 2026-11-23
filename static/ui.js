@@ -67,6 +67,8 @@ export function failure(error, config = {}) {
           ? "notFound"
           : error.status === 0
             ? "network"
+            : [502, 503, 504].includes(error.status)
+              ? "serverBusy"
             : ["unsupported", "copyFailed", "permission"].includes(
                   error.message,
                 )
@@ -185,27 +187,45 @@ function refresh() {
   icons();
   document
     .querySelectorAll("[data-help]")
-    .forEach((el) => el.setAttribute("aria-label", t(el.dataset.help)));
+    .forEach((el) => {
+      const tooltip = el.parentElement?.querySelector('[role="tooltip"]');
+      if (tooltip) tooltip.textContent = t(el.dataset.help);
+      el.setAttribute("aria-label", t(el.getAttribute("aria-expanded") === "true" ? "tooltipClose" : "tooltipOpen"));
+    });
   if (currentStatus)
     status(currentStatus.key, currentStatus.tone, currentStatus.values);
 }
 export function setup() {
   refresh();
   document.querySelectorAll(".help-dot").forEach((el) => {
-    el.setAttribute("role", "button");
+    const tooltip = el.parentElement?.querySelector('[role="tooltip"]');
+    if (!tooltip) return;
+    tooltip.id ||= `help-${el.dataset.help}`;
+    tooltip.textContent = t(el.dataset.help);
+    el.setAttribute("aria-controls", tooltip.id);
+    el.setAttribute("aria-expanded", "false");
+    el.setAttribute("aria-label", t("tooltipOpen"));
     el.replaceChildren(icon("info"));
     el.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();
-      el.focus();
+      const open = el.getAttribute("aria-expanded") !== "true";
+      el.setAttribute("aria-expanded", String(open));
+      el.setAttribute("aria-label", t(open ? "tooltipClose" : "tooltipOpen"));
+      tooltip.hidden = !open;
     });
     el.addEventListener("keydown", (event) => {
       if (["Enter", " "].includes(event.key)) {
         event.preventDefault();
         event.stopPropagation();
+        el.click();
       }
-      if (event.key === "Escape")
-        el.parentElement?.querySelector("input")?.focus();
+      if (event.key === "Escape") {
+        tooltip.hidden = true;
+        el.setAttribute("aria-expanded", "false");
+        el.setAttribute("aria-label", t("tooltipOpen"));
+        el.focus();
+      }
     });
   });
   for (const name of ["language", "theme"]) {
@@ -224,6 +244,15 @@ export function setup() {
   });
   document.addEventListener("click", (e) => {
     if (!$("settings").contains(e.target)) $("settings").open = false;
+  });
+  document.addEventListener("click", (event) => {
+    document.querySelectorAll(".help-dot[aria-expanded='true']").forEach((button) => {
+      if (button.parentElement?.contains(event.target)) return;
+      const tooltip = button.parentElement?.querySelector('[role="tooltip"]');
+      if (tooltip) tooltip.hidden = true;
+      button.setAttribute("aria-expanded", "false");
+      button.setAttribute("aria-label", t("tooltipOpen"));
+    });
   });
   window.addEventListener("pagehide", () => {
     document.querySelectorAll(".items").forEach((root) => {

@@ -29,6 +29,7 @@
                 <strong id="draft-size">0 B</strong>
               </div>
               <span id="draft-count" class="draft-count">0 项</span>
+              <span id="draft-overflow" class="draft-overflow" hidden></span>
               <span class="draft-meter-track" aria-hidden="true"
                 ><span id="draft-meter-fill"></span
               ></span>
@@ -160,7 +161,9 @@
                       class="help-dot"
                       type="button"
                       data-help="burnHint"
+                      aria-label="展开说明"
                     ></button>
+                    <span class="help-tooltip" role="tooltip" hidden></span>
                   </div>
                   <div id="public-option" class="option-row" hidden>
                     <label class="check" for="public-share"
@@ -172,9 +175,28 @@
                       class="help-dot"
                       type="button"
                       data-help="publicShareHint"
+                      aria-label="展开说明"
                     ></button>
+                    <span class="help-tooltip" role="tooltip" hidden></span>
                   </div>
                 </div>
+                <fieldset class="ttl-options">
+                  <legend data-i18n="ttlLabel">有效期</legend>
+                  <div class="ttl-presets" role="group" aria-label="有效期预设">
+                    <button type="button" class="button secondary" data-ttl-hours="1">1h</button>
+                    <button type="button" class="button secondary" data-ttl-hours="6">6h</button>
+                    <button type="button" class="button secondary" data-ttl-hours="24">24h</button>
+                    <button type="button" class="button secondary" data-ttl-hours="72">72h</button>
+                    <button type="button" class="button secondary" data-ttl-hours="168">168h</button>
+                  </div>
+                  <label class="ttl-custom" for="ttl-hours">
+                    <span data-i18n="ttlCustom">自定义（小时）</span>
+                    <input id="ttl-hours" type="number" min="1" max="168" step="1" inputmode="numeric" />
+                  </label>
+                  <p id="ttl-error" class="form-error" hidden></p>
+                </fieldset>
+                <p id="send-summary" class="send-summary" aria-live="polite"></p>
+                <p id="send-summary-preview" class="send-summary-preview"></p>
                 <p id="limits" class="hint capacity-note"></p>
                 <div class="send-block">
                   <button
@@ -182,6 +204,7 @@
                     type="button"
                     class="button primary send-button"
                     data-icon="send"
+                    disabled
                   >
                     <span data-i18n="send">生成链接</span>
                   </button>
@@ -216,6 +239,14 @@
               <p id="result-message"></p>
             </div>
           </div>
+          <div class="handoff-code">
+            <span class="sr-only" data-i18n="shareCodeLabel">分享码</span>
+            <code id="share-code"></code>
+            <button id="copy-code" class="button primary" type="button" data-icon="copy" aria-label="复制分享码">
+              <span data-i18n="copyCode">复制分享码</span>
+            </button>
+          </div>
+          <p id="result-preview" class="result-preview"></p>
           <ol id="result-stages" class="stage-rail result-stages" aria-label="上传阶段">
             <li data-stage="preparing" data-state="done">
               <span class="stage-dot" aria-hidden="true"></span
@@ -247,12 +278,13 @@
             </button>
           </div>
           <div class="result-actions">
-            <a id="open-share" class="button secondary" data-i18n="view"
+            <a id="open-share" class="button secondary" data-i18n="view" data-icon="download"
               >打开接收页</a
             ><button
               id="native-share"
               class="button secondary"
               data-i18n="share"
+              data-icon="send"
               hidden
             >
               分享</button
@@ -260,10 +292,18 @@
               id="new-share"
               class="button secondary"
               data-i18n="newShare"
+              data-icon="add"
             >
               再传一份
             </button>
           </div>
+        </section>
+        <section id="sent-log" class="sent-log" hidden aria-labelledby="sent-log-title">
+          <div class="sent-log-heading">
+            <h2 id="sent-log-title" data-i18n="sentLogTitle">本次会话已发送</h2>
+            <span data-i18n="sessionOnly">仅保留在本页</span>
+          </div>
+          <ol id="sent-log-list"></ol>
         </section>
         <div
           id="status"
@@ -272,6 +312,10 @@
           aria-live="polite"
           aria-atomic="true"
         ></div>
+        <div id="config-recovery" class="config-recovery" hidden>
+          <span id="config-error" role="alert"></span>
+          <button id="config-retry" class="button secondary" type="button" data-i18n="retryConfig">重试加载设置</button>
+        </div>
         <details id="secondary-receive" class="secondary-receive" hidden>
           <summary data-i18n="receiveExisting">接收已有分享</summary>
           {{template "receive-entry" .}}

@@ -1,7 +1,8 @@
-import { $, button, status, failure } from "./ui.js";
+import { $, button, status, failure, icon } from "./ui.js";
 import { access, can } from "./access.js";
 import { request } from "./share-api.js";
 import { t, sizeLabel } from "./i18n.js";
+import { copyText } from "./clipboard.js";
 import { accountMessage } from "./account-messages.js";
 
 export async function startAdmin() {
@@ -14,6 +15,7 @@ export async function startAdmin() {
     sharePages = 1,
     shareResult = null,
     shareRequest = 0,
+    shareFilter = "all",
     confirmAction = null,
     saving = false,
     activityToken = 0,
@@ -262,7 +264,20 @@ export async function startAdmin() {
       count: shareResult.total,
       size: sizeLabel(shareResult.total_bytes),
     });
-    for (const share of shareResult.items) {
+    const now = Date.now();
+    const filtered = shareResult.items.filter((share) => {
+      const expired = !!share.expires_at && Date.parse(share.expires_at) <= now;
+      if (shareFilter === "active") return !expired;
+      if (shareFilter === "expired") return expired;
+      if (shareFilter === "burn") return share.burn_after_read;
+      if (shareFilter === "public") return share.public;
+      return true;
+    });
+    $("share-count").textContent = `${t("shareCount", {
+      count: shareResult.total,
+      size: sizeLabel(shareResult.total_bytes),
+    })} · ${t("adminPageFilterCount", { shown: filtered.length })}`;
+    for (const share of filtered) {
       const names =
         share.share?.items.map((item) => item.name).join(" · ") ||
         share.content_type;
@@ -278,26 +293,63 @@ export async function startAdmin() {
         ),
       );
       if (share.burn_after_read) meta.append(badge(t("burn")));
+      const created = document.createElement("span");
+      created.className = "hint";
+      created.textContent = t("createdAt", {
+        date: new Date(share.created_at).toLocaleString(document.documentElement.lang),
+      });
+      meta.append(created);
       const expiry = document.createElement("span");
       expiry.className = "hint";
-      expiry.textContent =
-        t("expires") +
-        " " +
-        (share.expires_at
-          ? new Date(share.expires_at).toLocaleString(
-              document.documentElement.lang,
-            )
-          : "—");
+      const expiryDate = share.expires_at ? new Date(share.expires_at) : null;
+      if (!expiryDate || Number.isNaN(expiryDate.getTime())) {
+        expiry.textContent = `${t("expires")}: ${t("expiryUnknown")}`;
+      } else if (expiryDate.getTime() <= now) {
+        expiry.textContent = t("expiredAt", {
+          date: expiryDate.toLocaleString(document.documentElement.lang),
+        });
+        meta.append(badge(t("filterExpired"), "expired-badge"));
+      } else {
+        const remainingHours = Math.max(1, Math.ceil((expiryDate.getTime() - now) / 3600000));
+        expiry.textContent = t("expiresIn", {
+          time: t("ttlAfter", { hours: remainingHours }),
+        });
+        expiry.title = expiryDate.toLocaleString(document.documentElement.lang);
+      }
       meta.append(expiry);
       content.append(meta);
+      const preview = share.share?.items?.map((item) => item.preview).find(Boolean);
+      if (preview) {
+        const hint = document.createElement("p");
+        hint.className = "share-preview-hint";
+        hint.textContent = `${t("receiverPreviewLabel")}: ${preview}`;
+        content.append(hint);
+      }
       const actions = document.createElement("div");
       actions.className = "row-actions";
+      const copyLink = button("copyShareLink", async () => {
+        try {
+          await copyText(new URL("/" + share.id, location.origin).href);
+          status("copied", "success");
+        } catch {
+          status("copyFailed", "error");
+        }
+      });
+      copyLink.setAttribute("aria-label", t("copyShareLinkAria", { code: share.id }));
+      copyLink.prepend(icon("copy"));
+      actions.append(copyLink);
       if (can("download") || share.public) {
         const link = document.createElement("a");
         link.className = "button secondary";
         link.href = "/" + share.id;
         link.textContent = t("view");
+        link.prepend(icon("download"));
         actions.append(link);
+      } else {
+        const blocked = document.createElement("span");
+        blocked.className = "hint share-link-blocked";
+        blocked.textContent = t("linkNotOpenable");
+        actions.append(blocked);
       }
       actions.append(
         button(
@@ -336,7 +388,7 @@ export async function startAdmin() {
       el.append(actions);
       list.append(el);
     }
-    if (!shareResult.items.length) list.textContent = t("noShares");
+    if (!filtered.length) list.textContent = t("noShares");
     $("page-number").textContent = t("pageCount", {
       page: shareResult.page,
       pages: shareResult.pages,
@@ -682,6 +734,10 @@ export async function startAdmin() {
     event.preventDefault();
     sharePage = 1;
     void loadShares();
+  });
+  $("share-filter").addEventListener("change", () => {
+    shareFilter = $("share-filter").value;
+    renderShares();
   });
   $("previous-page").addEventListener("click", () => {
     if (sharePage > 1) {

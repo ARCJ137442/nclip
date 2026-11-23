@@ -12,6 +12,8 @@ import {
   requestBytes,
   RequestError,
 } from "../static/share-api.js";
+import { clampTTLHours, safePreview } from "../static/handoff.js";
+import { normalizePreferences } from "../static/preferences.js";
 
 test("percentOf needs a total and clamps the range", () => {
   assert.equal(percentOf(0, 0), null);
@@ -27,6 +29,41 @@ test("timeParts chooses seconds below a minute", () => {
   assert.deepEqual(timeParts(61), { unit: "minutes", count: 2 });
   assert.equal(timeParts(-1), null);
   assert.equal(timeParts(Number.NaN), null);
+});
+
+test("TTL selection accepts only integer hours and clamps to server bounds", () => {
+  assert.equal(clampTTLHours(24), 24);
+  assert.equal(clampTTLHours("168", 1, 168), 168);
+  assert.equal(clampTTLHours(0), 1);
+  assert.equal(clampTTLHours(200), 168);
+  assert.equal(clampTTLHours(1.5), null);
+  assert.equal(clampTTLHours("bad"), null);
+});
+
+test("preferences validate sticky share settings without persisting content", () => {
+  assert.deepEqual(
+    normalizePreferences({ burn: true, public: true, ttlHours: 72 }),
+    { language: "system", theme: "system", suggestions: false, burn: true, public: true, ttlHours: 72 },
+  );
+  assert.deepEqual(
+    normalizePreferences({ burn: "true", public: 1, ttlHours: 2.5, message: "secret" }),
+    { language: "system", theme: "system", suggestions: false, burn: false, public: false, ttlHours: 24 },
+  );
+});
+
+test("sender preview normalizes lines, truncates by rune, and suppresses secrets", () => {
+  const preview = safePreview("第一行\r\n第二行\t还有内容和尾部");
+  assert.equal(preview, "第一行 第二行 还有内容和尾部");
+  assert.ok(Array.from(preview).length <= 24);
+  assert.equal(Array.from(safePreview("界".repeat(30))).length, 24);
+  for (const secret of [
+    "s" + "k-live-secret",
+    "ghp" + "_1234567890",
+    "github_pat" + "_1234567890",
+    "A" + "KIA1234567890123456",
+    "-----BEGIN " + "PRIVATE KEY-----",
+    "AbCdEf0123456789AbCdEf0123456789",
+  ]) assert.equal(safePreview(secret), "");
 });
 
 test("createProgress samples the rate and estimates the remainder", () => {
