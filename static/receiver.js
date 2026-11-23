@@ -336,6 +336,7 @@ export async function startReceiver(slug) {
     const controller = new AbortController();
     receiveController = controller;
     let downloaded = false;
+    const responseChunks = [];
     try {
       const meta = await requestBytes(
         endpoint + (consume ? "/receive" : "/content"),
@@ -345,9 +346,12 @@ export async function startReceiver(slug) {
           start: !consume && canResumeCurrentShare() ? retainedSize() : 0,
           onReset: () => {
             retained = [];
+            responseChunks.length = 0;
           },
           onChunk: (chunk) => {
-            if (canResumeCurrentShare() && chunk?.byteLength) retained.push(chunk);
+            // Every attempt needs its own response bytes to parse. Only a
+            // failed, resumable ordinary attempt moves these into `retained`.
+            if (chunk?.byteLength) responseChunks.push(chunk);
           },
           onProgress: ({ received, total, resumable }) => {
             receiveResumable = resumable;
@@ -363,13 +367,16 @@ export async function startReceiver(slug) {
       setReceivePhase("parsing");
       // Let the phase change paint before the multipart parser takes over.
       await new Promise((resolve) => requestAnimationFrame(resolve));
-      const body = new Blob(retained, { type: meta.contentType });
+      const body = new Blob([...retained, ...responseChunks], {
+        type: meta.contentType,
+      });
       const decoded = await decodeShare(
         new Response(body, {
           headers: { "Content-Type": meta.contentType },
         }),
       );
       retained = [];
+      responseChunks.length = 0;
       items = decoded.items;
       consumed = consume && metadata.burn_after_read;
       $("receive-progress").hidden = true;
@@ -416,8 +423,10 @@ export async function startReceiver(slug) {
         failReceiveStage("canceled");
         if (!canResumeCurrentShare()) {
           retained = [];
+          responseChunks.length = 0;
           await recheckOneTime(error);
         } else {
+          retained.push(...responseChunks);
           status("receiveCanceled", "error");
           $("retry").hidden = false;
           updateResumeHint();
@@ -427,7 +436,10 @@ export async function startReceiver(slug) {
         failure(error);
         if (!consume) {
           $("retry").hidden = false;
-          if (downloaded) retained = [];
+          if (downloaded) {
+            retained = [];
+            responseChunks.length = 0;
+          } else retained.push(...responseChunks);
           updateResumeHint();
           if (receiveResumable && retained.length) {
             status("receiveWillResume", "error", {
@@ -437,8 +449,11 @@ export async function startReceiver(slug) {
         }
         else if (error.status === 0 || !error.status) {
           retained = [];
+          responseChunks.length = 0;
           await recheckOneTime(error);
         } else if (error.status === 404) {
+          retained = [];
+          responseChunks.length = 0;
           dead = true;
           $("receive-gate").hidden = true;
           status("oneTimeGone", "error");
