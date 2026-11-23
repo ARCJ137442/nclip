@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"archive/zip"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -388,11 +389,14 @@ func writeShareFileHeader(mw *multipart.Writer, key, contentType string) (io.Wri
 	return mw.CreatePart(header)
 }
 
-// shareBoundary returns one boundary for both the sizing and writing passes.
-// Stable framing lets the response declare Content-Length, so browsers can
-// show determinate download progress instead of an unknown stream.
-func shareBoundary() string {
-	return multipart.NewWriter(io.Discard).Boundary()
+// shareBoundary derives stable framing from the immutable share response.
+// Stable bytes make HTTP range requests safe across interrupted attempts.
+func shareBoundary(p *models.Paste, manifest []byte) string {
+	hash := sha256.New()
+	_, _ = hash.Write([]byte(p.ID))
+	_, _ = hash.Write([]byte{0})
+	_, _ = hash.Write(manifest)
+	return fmt.Sprintf("nclip-%x", hash.Sum(nil)[:16])
 }
 
 func writeShareMultipart(w io.Writer, boundary string, p *models.Paste, manifest []byte, m models.ShareManifest, stored *storedShare) error {
@@ -417,13 +421,6 @@ func writeShareMultipart(w io.Writer, boundary string, p *models.Paste, manifest
 		}
 	}
 	return mw.Close()
-}
-
-type byteCounter int64
-
-func (c *byteCounter) Write(data []byte) (int, error) {
-	*c += byteCounter(len(data))
-	return len(data), nil
 }
 
 type storedShare struct {
@@ -506,35 +503,34 @@ func writeStoredSharePart(mw *multipart.Writer, stored *storedShare, part models
 	return nil
 }
 
-// shareResponseSize measures framing plus known payload sizes without reading
-// the payload a second time.
-func shareResponseSize(boundary string, p *models.Paste, manifest []byte, m models.ShareManifest) (int64, error) {
-	var size byteCounter
-	mw := multipart.NewWriter(&size)
-	if err := mw.SetBoundary(boundary); err != nil {
-		return 0, err
+// prepareShareResponse writes the complete multipart framing to a temporary
+// file. Range serving and one-time delivery can then both use exact bytes
+// without holding the payload in memory.
+func prepareShareResponse(dir, boundary string, p *models.Paste, manifest []byte, m models.ShareManifest, stored *storedShare) (*spool.File, error) {
+	file, err := os.CreateTemp(dir, "nclip-share-response-*")
+	if err != nil {
+		return nil, err
 	}
-	if err := mw.WriteField("manifest", string(manifest)); err != nil {
-		return 0, err
-	}
-	for _, item := range m.Items {
-		for _, part := range item.Parts {
-			if _, err := writeShareFileHeader(mw, part.Key, part.MIME); err != nil {
-				return 0, err
-			}
-			size += byteCounter(part.Size)
+	path := file.Name()
+	published := false
+	defer func() {
+		if !published {
+			_ = file.Close()
+			_ = os.Remove(path)
 		}
+	}()
+	if err := writeShareMultipart(file, boundary, p, manifest, m, stored); err != nil {
+		return nil, err
 	}
-	if p.BurnAfterRead && m.Encoding == "zip-v1" {
-		if _, err := writeShareFileHeader(mw, "archive", "application/zip"); err != nil {
-			return 0, err
-		}
-		size += byteCounter(p.Size)
+	info, err := file.Stat()
+	if err != nil {
+		return nil, err
 	}
-	if err := mw.Close(); err != nil {
-		return 0, err
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
 	}
-	return int64(size), nil
+	published = true
+	return &spool.File{File: file, Path: path, Size: info.Size()}, nil
 }
 
 func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
@@ -555,6 +551,8 @@ func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 	m := manifestFor(p)
 	var file *spool.File
 	var stored *storedShare
+	var prepared *spool.File
+	var boundary string
 	err = h.service.ReadPasteStream(p.ID, p.BurnAfterRead, func(_ *models.Paste, source io.Reader, size int64) error {
 		var writeErr error
 		file, writeErr = spool.Write(dir, "nclip-receive-*", source, size, 0)
@@ -565,6 +563,15 @@ func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 			return fmt.Errorf("size_mismatch")
 		}
 		stored, writeErr = openStoredShare(&m, file)
+		if writeErr != nil {
+			return writeErr
+		}
+		manifest, marshalErr := json.Marshal(m)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		boundary = shareBoundary(p, manifest)
+		prepared, writeErr = prepareShareResponse(dir, boundary, p, manifest, m, stored)
 		return writeErr
 	})
 	if err != nil {
@@ -576,20 +583,17 @@ func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 		return
 	}
 	defer func() { _ = file.Remove() }()
-	manifest, err := json.Marshal(m)
-	if err != nil {
-		shareError(c, 500, "invalid_archive_or_size")
-		return
-	}
-	boundary := shareBoundary()
-	size, sizeErr := shareResponseSize(boundary, p, manifest, m)
+	defer func() { _ = prepared.Remove() }()
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Content-Type", "multipart/form-data; boundary="+boundary)
-	if sizeErr == nil {
-		c.Header("Content-Length", strconv.FormatInt(size, 10))
+	if p.BurnAfterRead {
+		// One-time bytes are already validated and deleted server-side. Do not
+		// advertise a second range request that cannot be satisfied.
+		c.Header("Content-Length", strconv.FormatInt(prepared.Size, 10))
+		_, _ = io.CopyN(c.Writer, prepared, prepared.Size)
+		return
 	}
-	if err := writeShareMultipart(c.Writer, boundary, p, manifest, m, stored); err != nil {
-		// The response may be partial, so do not append JSON or replay consumption.
-		_ = c.Error(err)
-	}
+	// Ordinary shares keep their stored copy, so resume is safe.
+	c.Header("Accept-Ranges", "bytes")
+	http.ServeContent(c.Writer, c.Request, p.ID, time.Time{}, prepared)
 }

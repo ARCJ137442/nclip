@@ -355,6 +355,23 @@ const messages = {
     "已取消接收。服务端内容仍在，可重试。",
     "Transfer canceled. The server copy is still available; you can retry.",
   ],
+  receiveWillResume: [
+    "已保留 {size}；点击“重试加载”会从断点继续。",
+    "{size} is retained; retry will resume from that point.",
+  ],
+  receiveResumeReady: [
+    "断点续传已启用 · 已保留 {size}",
+    "Resume is available · {size} retained",
+  ],
+  receiveResuming: ["正在从断点继续…", "Resuming from the saved point…"],
+  oneTimeRetryAvailable: [
+    "服务端核实副本仍在，可重新接收。",
+    "The server still has the one-time copy. You can retry the receive.",
+  ],
+  oneTimeGone: [
+    "服务端已没有这份一次性副本，无法重新接收。",
+    "The one-time server copy is no longer available.",
+  ],
   receiveOneTimeNote: [
     "一次性内容已开始传输；中断后可能无法恢复。",
     "This one-time transfer cannot be recovered if interrupted.",

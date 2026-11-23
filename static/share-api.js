@@ -151,6 +151,128 @@ export async function requestStream(url, options = {}, { onProgress, signal } = 
     headers: passthrough,
   });
 }
+
+function contentRange(value) {
+  const match = /^bytes (\d+)-(\d+)\/(\d+)$/i.exec(value || "");
+  if (!match) return null;
+  const start = Number(match[1]);
+  const end = Number(match[2]);
+  const total = Number(match[3]);
+  if (![start, end, total].every(Number.isSafeInteger) || end < start)
+    return null;
+  return { start, end, total };
+}
+
+// Downloads are retained by the caller so an interrupted ordinary share can
+// resume from the exact byte offset. The response bytes are stable, including
+// multipart framing, because the server derives its boundary deterministically.
+export async function requestBytes(
+  url,
+  options = {},
+  {
+    onProgress,
+    onChunk,
+    onReset,
+    onMeta,
+    start = 0,
+    signal,
+  } = {},
+) {
+  const method = (options.method || "GET").toUpperCase();
+  const headers = new Headers(options.headers || {});
+  if (!["GET", "HEAD", "OPTIONS"].includes(method))
+    for (const [key, value] of Object.entries(csrfHeaders()))
+      headers.set(key, value);
+  if (start > 0) headers.set("Range", `bytes=${start}-`);
+  let response;
+  try {
+    response = await fetch(url, {
+      credentials: "same-origin",
+      cache: "no-store",
+      ...options,
+      headers,
+      signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new RequestError(0, "aborted");
+    throw new RequestError(0, "network");
+  }
+  if (!response.ok) {
+    let code = "failed";
+    try {
+      const error = await response.json();
+      code = error.error || code;
+    } catch {
+      /* Proxy errors can be HTML. */
+    }
+    throw new RequestError(response.status, code);
+  }
+  if (!response.body) throw new RequestError(0, "no_body");
+
+  const encoding = response.headers.get("Content-Encoding");
+  const encoded = !!encoding && encoding !== "identity";
+  const range = contentRange(response.headers.get("Content-Range"));
+  let offset = 0;
+  let total = 0;
+  if (start > 0 && response.status === 200) {
+    // A proxy or older server ignored Range. Discard prior retained bytes.
+    onReset?.();
+    offset = 0;
+  } else if (start > 0) {
+    if (response.status !== 206 || encoded || !range || range.start !== start)
+      throw new RequestError(0, "range_mismatch");
+    const partialLength = Number(response.headers.get("Content-Length")) || 0;
+    if (
+      range.end >= range.total ||
+      (partialLength > 0 && range.end - range.start + 1 !== partialLength)
+    )
+      throw new RequestError(0, "range_mismatch");
+    offset = start;
+    total = range.total;
+  }
+  if (total === 0 && !encoded)
+    total = Number(response.headers.get("Content-Length")) || 0;
+  const resumable =
+    !encoded &&
+    (response.headers.get("Accept-Ranges") || "").toLowerCase() === "bytes";
+  onMeta?.({ resumable, total });
+
+  const reader = response.body.getReader();
+  let received = offset,
+    painted = 0;
+  if (total > 0 && received > total)
+    throw new RequestError(0, "range_mismatch");
+  const report = (force) => {
+    const at = performance.now();
+    if (!force && at - painted < 100) return;
+    painted = at;
+    onProgress?.({ received, total, resumable });
+  };
+  report(true);
+  try {
+    while (true) {
+      const step = await reader.read();
+      if (step.done) break;
+      const chunk = step.value;
+      received += chunk?.byteLength || 0;
+      onChunk?.(chunk);
+      report(false);
+    }
+  } catch (error) {
+    if (error?.name === "AbortError") throw new RequestError(0, "aborted");
+    throw new RequestError(0, "network");
+  }
+  report(true);
+  if (total > 0 && received !== total)
+    throw new RequestError(0, "incomplete");
+  return {
+    received,
+    total,
+    resumable,
+    contentType: response.headers.get("Content-Type") || "",
+  };
+}
+
 export function encodeShare(items) {
   const form = new FormData();
   let index = 0;

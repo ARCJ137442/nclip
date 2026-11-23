@@ -7,7 +7,11 @@ import {
   createProgress,
   transferStages,
 } from "../static/transfer.js";
-import { requestStream, RequestError } from "../static/share-api.js";
+import {
+  requestStream,
+  requestBytes,
+  RequestError,
+} from "../static/share-api.js";
 
 test("percentOf needs a total and clamps the range", () => {
   assert.equal(percentOf(0, 0), null);
@@ -195,6 +199,110 @@ test("requestStream maps an abort and an HTTP error to RequestError", async () =
           error instanceof RequestError &&
           error.status === 404 &&
           error.message === "not_found",
+      );
+    },
+  );
+});
+
+test("requestBytes resumes from retained bytes with a Range request", async () => {
+  const seen = [];
+  const chunks = [];
+  let requestHeaders;
+  await withFetch(
+    async (_url, options) => {
+      requestHeaders = new Headers(options.headers);
+      return bodyResponse(
+        [new Uint8Array([3, 4, 5]), new Uint8Array([6])],
+        {
+          "Content-Length": "4",
+          "Content-Range": "bytes 2-5/6",
+          "Accept-Ranges": "bytes",
+          "Content-Type": "application/octet-stream",
+        },
+        206,
+      );
+    },
+    async () => {
+      const result = await requestBytes(
+        "/x",
+        {},
+        {
+          start: 2,
+          onChunk: (chunk) => chunks.push(chunk),
+          onProgress: (p) => seen.push(p),
+          onReset: () => assert.fail("server unexpectedly reset"),
+        },
+      );
+      assert.deepEqual(result, {
+        received: 6,
+        total: 6,
+        resumable: true,
+        contentType: "application/octet-stream",
+      });
+    },
+  );
+  assert.equal(requestHeaders.get("Range"), "bytes=2-");
+  assert.equal(seen[0].received, 2);
+  assert.equal(seen.at(-1).received, 6);
+  assert.deepEqual(
+    chunks.flatMap((chunk) => [...chunk]),
+    [3, 4, 5, 6],
+  );
+});
+
+test("requestBytes discards retained bytes when Range is ignored", async () => {
+  let reset = 0;
+  const chunks = [];
+  await withFetch(
+    async () =>
+      bodyResponse([new Uint8Array([1, 2, 3, 4])], {
+        "Accept-Ranges": "bytes",
+        "Content-Length": "4",
+      }),
+    async () => {
+      const result = await requestBytes(
+        "/x",
+        {},
+        {
+          start: 2,
+          onChunk: (chunk) => chunks.push(chunk),
+          onReset: () => reset++,
+        },
+      );
+      assert.equal(result.received, 4);
+    },
+  );
+  assert.equal(reset, 1);
+  assert.deepEqual(
+    chunks.flatMap((chunk) => [...chunk]),
+    [1, 2, 3, 4],
+  );
+});
+
+test("requestBytes rejects mismatched ranges and truncated bodies", async () => {
+  await withFetch(
+    async () =>
+      bodyResponse([new Uint8Array([1])], {
+        "Content-Range": "bytes 0-0/4",
+        "Accept-Ranges": "bytes",
+      }, 206),
+    async () => {
+      await assert.rejects(
+        requestBytes("/x", {}, { start: 2 }),
+        (error) => error instanceof RequestError && error.message === "range_mismatch",
+      );
+    },
+  );
+  await withFetch(
+    async () =>
+      bodyResponse([new Uint8Array([1])], {
+        "Accept-Ranges": "bytes",
+        "Content-Length": "4",
+      }),
+    async () => {
+      await assert.rejects(
+        requestBytes("/x", {}, {}),
+        (error) => error instanceof RequestError && error.message === "incomplete",
       );
     },
   );

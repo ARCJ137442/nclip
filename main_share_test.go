@@ -4,6 +4,7 @@ import (
 	"archive/zip"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
@@ -160,6 +161,11 @@ func TestShareTextRoundTripAndOldRaw(t *testing.T) {
 	if info.ExpiresAt.Sub(info.CreatedAt) != 72*time.Hour {
 		t.Fatalf("TTL = %s", info.ExpiresAt.Sub(info.CreatedAt))
 	}
+	a := shareRequest(router, "GET", "/api/v1/shares/"+slug+"/content", nil, nil)
+	b := shareRequest(router, "GET", "/api/v1/shares/"+slug+"/content", nil, nil)
+	if a.Code != 200 || b.Code != 200 || !bytes.Equal(a.Body.Bytes(), b.Body.Bytes()) {
+		t.Fatal("ordinary share responses must be byte-stable for range resume")
+	}
 }
 
 func TestShareRichBatchAndBurnArchive(t *testing.T) {
@@ -275,4 +281,49 @@ func TestShareAuthLimitsAndInvalidParts(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestShareRangeResumeUsesStableBytes(t *testing.T) {
+	router := shareTestRouter(t, 1<<20, false)
+	slug := createTestShare(t, router, textShareItem(), map[string]string{"text": strings.Repeat("resumeable\n", 1000)}, false)
+	path := "/api/v1/shares/" + slug + "/content"
+
+	first := shareRequest(router, "GET", path, nil, nil)
+	if first.Code != 200 {
+		t.Fatalf("full download %d: %s", first.Code, first.Body.String())
+	}
+	if first.Header().Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("Accept-Ranges = %q", first.Header().Get("Accept-Ranges"))
+	}
+	full := append([]byte(nil), first.Body.Bytes()...)
+	split := len(full) / 3
+
+	head := shareRequest(router, "GET", path, nil, map[string]string{"Range": fmt.Sprintf("bytes=0-%d", split-1)})
+	if head.Code != http.StatusPartialContent {
+		t.Fatalf("first range %d: %s", head.Code, head.Body.String())
+	}
+	tail := shareRequest(router, "GET", path, nil, map[string]string{"Range": fmt.Sprintf("bytes=%d-", split)})
+	if tail.Code != http.StatusPartialContent {
+		t.Fatalf("resume range %d: %s", tail.Code, tail.Body.String())
+	}
+	joined := append(append([]byte(nil), head.Body.Bytes()...), tail.Body.Bytes()...)
+	if !bytes.Equal(joined, full) {
+		t.Fatalf("resumed bytes differ: head=%d tail=%d full=%d", head.Body.Len(), tail.Body.Len(), len(full))
+	}
+	if got := tail.Header().Get("Content-Range"); got != fmt.Sprintf("bytes %d-%d/%d", split, len(full)-1, len(full)) {
+		t.Fatalf("Content-Range = %q", got)
+	}
+}
+
+func TestShareOneTimeReceiveDoesNotAdvertiseResume(t *testing.T) {
+	router := shareTestRouter(t, 1<<20, false)
+	slug := createTestShare(t, router, textShareItem(), map[string]string{"text": "single attempt"}, true)
+	w := shareRequest(router, "POST", "/api/v1/shares/"+slug+"/receive", nil, map[string]string{"X-Nclip-Confirm": "1"})
+	if w.Code != 200 {
+		t.Fatalf("receive %d: %s", w.Code, w.Body.String())
+	}
+	if w.Header().Get("Accept-Ranges") != "" {
+		t.Fatalf("one-time response advertised ranges: %q", w.Header().Get("Accept-Ranges"))
+	}
+	assertDeclaredLength(t, w)
 }
