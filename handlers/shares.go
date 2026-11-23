@@ -25,6 +25,11 @@ import (
 	"github.com/johnwmail/nclip/utils"
 )
 
+const (
+	minShareTTL = time.Hour
+	maxShareTTL = 168 * time.Hour
+)
+
 // SharesHandler adapts multipart clipboard messages to the existing paste store.
 type SharesHandler struct {
 	service     *services.PasteService
@@ -40,7 +45,7 @@ func NewSharesHandler(service *services.PasteService, cfg *config.Config) *Share
 // UIConfig contains only public, authoritative settings used by the composer.
 func (h *SharesHandler) UIConfig(c *gin.Context) {
 	c.Header("Cache-Control", "no-store")
-	c.JSON(200, gin.H{"upload_max_bytes": h.effectiveUploadLimit(c), "default_ttl_seconds": int64(h.config.DefaultTTL.Seconds()), "max_items": maxShareItems, "upload_auth": h.config.UploadAuth, "clipboard_formats": []string{"text/plain", "text/html", "image/png"}})
+	c.JSON(200, gin.H{"upload_max_bytes": h.effectiveUploadLimit(c), "default_ttl_seconds": int64(h.config.DefaultTTL.Seconds()), "ttl_min_seconds": int64(minShareTTL.Seconds()), "ttl_max_seconds": int64(maxShareTTL.Seconds()), "max_items": maxShareItems, "upload_auth": h.config.UploadAuth, "clipboard_formats": []string{"text/plain", "text/html", "image/png"}})
 }
 
 func (h *SharesHandler) effectiveUploadLimit(c *gin.Context) int64 {
@@ -177,7 +182,7 @@ func shareTTL(c *gin.Context, defaultTTL time.Duration) (time.Duration, error) {
 		return defaultTTL, nil
 	}
 	ttl, err := time.ParseDuration(v)
-	if err != nil || ttl < time.Hour || ttl > 7*24*time.Hour {
+	if err != nil || ttl < minShareTTL || ttl > maxShareTTL {
 		return 0, fmt.Errorf("invalid_ttl")
 	}
 	return ttl, nil
@@ -313,6 +318,7 @@ func (h *SharesHandler) Create(c *gin.Context) {
 		shareError(c, 400, err.Error())
 		return
 	}
+	buildSharePreviews(&u.manifest, u.parts)
 	ttl, err := shareTTL(c, h.config.DefaultTTL)
 	if err != nil {
 		shareError(c, 400, err.Error())
@@ -343,7 +349,7 @@ func (h *SharesHandler) Create(c *gin.Context) {
 		shareError(c, 500, "store_failed")
 		return
 	}
-	c.JSON(http.StatusCreated, gin.H{"slug": resp.Slug, "url": h.shareURL(c, resp.Slug), "burn_after_read": burn, "expires_at": resp.ExpiresAt, "public": visibility == "public"})
+	c.JSON(http.StatusCreated, gin.H{"slug": resp.Slug, "url": h.shareURL(c, resp.Slug), "burn_after_read": burn, "expires_at": resp.ExpiresAt, "public": visibility == "public", "manifest": u.manifest})
 }
 
 func (h *SharesHandler) get(c *gin.Context) (*models.Paste, bool) {
@@ -586,9 +592,9 @@ func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 	defer func() { _ = prepared.Remove() }()
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Content-Type", "multipart/form-data; boundary="+boundary)
-	if p.BurnAfterRead {
+	if !shareResumeAllowed(p) {
 		// One-time bytes are already validated and deleted server-side. Do not
-		// advertise a second range request that cannot be satisfied.
+		// advertise resumability until P1 adds a same-client receive token.
 		c.Header("Content-Length", strconv.FormatInt(prepared.Size, 10))
 		_, _ = io.CopyN(c.Writer, prepared, prepared.Size)
 		return
@@ -596,4 +602,10 @@ func (h *SharesHandler) sendContent(c *gin.Context, consume bool) {
 	// Ordinary shares keep their stored copy, so resume is safe.
 	c.Header("Accept-Ranges", "bytes")
 	http.ServeContent(c.Writer, c.Request, p.ID, time.Time{}, prepared)
+}
+
+// shareResumeAllowed is the single server policy point for resumability.
+// P1 may allow a locked one-time receive with its scoped delivery token.
+func shareResumeAllowed(p *models.Paste) bool {
+	return p != nil && !p.BurnAfterRead
 }

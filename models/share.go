@@ -10,9 +10,10 @@ type ShareManifest struct {
 
 // ShareItem is one clipboard object or uploaded file, not one MIME representation.
 type ShareItem struct {
-	Kind  string      `json:"kind"`
-	Name  string      `json:"name"`
-	Parts []SharePart `json:"parts"`
+	Kind    string      `json:"kind"`
+	Name    string      `json:"name"`
+	Preview string      `json:"preview,omitempty"`
+	Parts   []SharePart `json:"parts"`
 }
 
 // SharePart identifies a multipart field and its bytes inside the stored archive.

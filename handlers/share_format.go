@@ -6,7 +6,9 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"regexp"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/johnwmail/nclip/internal/spool"
@@ -16,6 +18,12 @@ import (
 
 const maxShareItems = 32
 const maxManifestBytes = 64 * 1024
+const maxPreviewRunes = 24
+
+var (
+	secretMarkerPattern = regexp.MustCompile(`(?i)(sk-|ghp_|github_pat_|AKIA|-----BEGIN)`)
+	longBase64Pattern   = regexp.MustCompile(`[A-Za-z0-9+/=_-]{24,}`)
+)
 
 func validPartKey(key string) bool {
 	if len(key) == 0 || len(key) > 40 {
@@ -125,6 +133,60 @@ func validateShareFiles(m *models.ShareManifest, parts map[string]*spool.File) e
 		return fmt.Errorf("unexpected_part")
 	}
 	return nil
+}
+
+// buildSharePreviews adds a short server-derived hint from plain clipboard text.
+// It deliberately omits likely credentials because metadata is visible to anyone
+// holding a share link. Only the bounded spool prefix is inspected.
+func buildSharePreviews(m *models.ShareManifest, parts map[string]*spool.File) {
+	for i := range m.Items {
+		item := &m.Items[i]
+		item.Preview = ""
+		if item.Kind != "clipboard" {
+			continue
+		}
+		for _, part := range item.Parts {
+			if part.MIME != "text/plain" {
+				continue
+			}
+			if file := parts[part.Key]; file != nil {
+				item.Preview = safePreview(file.Head)
+			}
+			break
+		}
+	}
+}
+
+func safePreview(prefix []byte) string {
+	text := strings.ToValidUTF8(string(prefix), "")
+	if secretMarkerPattern.MatchString(text) || hasLongBase64Token(text) {
+		return ""
+	}
+	text = strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || unicode.IsSpace(r) {
+			return ' '
+		}
+		return r
+	}, text)
+	runes := []rune(strings.Join(strings.Fields(text), " "))
+	if len(runes) > maxPreviewRunes {
+		runes = runes[:maxPreviewRunes]
+	}
+	return string(runes)
+}
+
+func hasLongBase64Token(text string) bool {
+	for _, token := range longBase64Pattern.FindAllString(text, -1) {
+		letters, digits := false, false
+		for _, r := range token {
+			letters = letters || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z'
+			digits = digits || r >= '0' && r <= '9'
+		}
+		if letters && digits {
+			return true
+		}
+	}
+	return false
 }
 
 func validClipboardFile(part models.SharePart, file *spool.File) bool {

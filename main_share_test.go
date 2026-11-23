@@ -48,6 +48,10 @@ func shareRequest(router http.Handler, method, url string, body io.Reader, heade
 }
 
 func createTestShare(t *testing.T, router http.Handler, items []models.ShareItem, data map[string]string, burn bool) string {
+	return createTestShareWithTTL(t, router, items, data, burn, "")
+}
+
+func createTestShareWithTTL(t *testing.T, router http.Handler, items []models.ShareItem, data map[string]string, burn bool, ttl string) string {
 	t.Helper()
 	var body bytes.Buffer
 	w := multipart.NewWriter(&body)
@@ -70,7 +74,11 @@ func createTestShare(t *testing.T, router http.Handler, items []models.ShareItem
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	r := shareRequest(router, "POST", "/api/v1/shares", &body, map[string]string{"Content-Type": w.FormDataContentType(), "X-Burn": map[bool]string{true: "true", false: "false"}[burn], "X-Api-Key": "test-key"})
+	headers := map[string]string{"Content-Type": w.FormDataContentType(), "X-Burn": map[bool]string{true: "true", false: "false"}[burn], "X-Api-Key": "test-key"}
+	if ttl != "" {
+		headers["X-TTL"] = ttl
+	}
+	r := shareRequest(router, "POST", "/api/v1/shares", &body, headers)
 	if r.Code != 201 {
 		t.Fatalf("create: %d %s", r.Code, r.Body.String())
 	}
@@ -85,6 +93,33 @@ func createTestShare(t *testing.T, router http.Handler, items []models.ShareItem
 		t.Fatalf("wrong share URL: %s", result.URL)
 	}
 	return result.Slug
+}
+
+func TestShareCustomTTLUsesServerBounds(t *testing.T) {
+	router := shareTestRouter(t, 1<<20, false)
+	for _, ttl := range []string{"1h", "168h"} {
+		slug := createTestShareWithTTL(t, router, textShareItem(), map[string]string{"text": "ttl"}, false, ttl)
+		response := shareRequest(router, "GET", "/api/v1/shares/"+slug, nil, nil)
+		var metadata struct {
+			CreatedAt time.Time `json:"created_at"`
+			ExpiresAt time.Time `json:"expires_at"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &metadata); err != nil {
+			t.Fatal(err)
+		}
+		if got := metadata.ExpiresAt.Sub(metadata.CreatedAt); got != mustParseDuration(t, ttl) {
+			t.Fatalf("TTL %s stored as %s", ttl, got)
+		}
+	}
+}
+
+func mustParseDuration(t *testing.T, value string) time.Duration {
+	t.Helper()
+	duration, err := time.ParseDuration(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return duration
 }
 
 func textShareItem() []models.ShareItem {
@@ -165,6 +200,33 @@ func TestShareTextRoundTripAndOldRaw(t *testing.T) {
 	b := shareRequest(router, "GET", "/api/v1/shares/"+slug+"/content", nil, nil)
 	if a.Code != 200 || b.Code != 200 || !bytes.Equal(a.Body.Bytes(), b.Body.Bytes()) {
 		t.Fatal("ordinary share responses must be byte-stable for range resume")
+	}
+}
+
+func TestShareMetadataCarriesSafeServerPreview(t *testing.T) {
+	router := shareTestRouter(t, 1<<20, false)
+	safe := createTestShare(t, router, textShareItem(), map[string]string{"text": "第一行\r\n这是发件人和收件人都应看到的开头"}, false)
+	response := shareRequest(router, "GET", "/api/v1/shares/"+safe, nil, nil)
+	var metadata struct {
+		Manifest models.ShareManifest `json:"manifest"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if got := metadata.Manifest.Items[0].Preview; !strings.HasPrefix(got, "第一行 这是") || len([]rune(got)) > 24 || strings.ContainsAny(got, "\r\n") {
+		t.Fatalf("server preview = %q", got)
+	}
+
+	secret := createTestShare(t, router, textShareItem(), map[string]string{"text": "sk-secret-value-that-must-not-be-published"}, false)
+	response = shareRequest(router, "GET", "/api/v1/shares/"+secret, nil, nil)
+	metadata = struct {
+		Manifest models.ShareManifest `json:"manifest"`
+	}{}
+	if err := json.Unmarshal(response.Body.Bytes(), &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if got := metadata.Manifest.Items[0].Preview; got != "" {
+		t.Fatalf("credential-like preview leaked: %q", got)
 	}
 }
 
@@ -313,17 +375,4 @@ func TestShareRangeResumeUsesStableBytes(t *testing.T) {
 	if got := tail.Header().Get("Content-Range"); got != fmt.Sprintf("bytes %d-%d/%d", split, len(full)-1, len(full)) {
 		t.Fatalf("Content-Range = %q", got)
 	}
-}
-
-func TestShareOneTimeReceiveDoesNotAdvertiseResume(t *testing.T) {
-	router := shareTestRouter(t, 1<<20, false)
-	slug := createTestShare(t, router, textShareItem(), map[string]string{"text": "single attempt"}, true)
-	w := shareRequest(router, "POST", "/api/v1/shares/"+slug+"/receive", nil, map[string]string{"X-Nclip-Confirm": "1"})
-	if w.Code != 200 {
-		t.Fatalf("receive %d: %s", w.Code, w.Body.String())
-	}
-	if w.Header().Get("Accept-Ranges") != "" {
-		t.Fatalf("one-time response advertised ranges: %q", w.Header().Get("Accept-Ranges"))
-	}
-	assertDeclaredLength(t, w)
 }

@@ -117,11 +117,13 @@ func TestUploadLimitUIConfigUsesRuntimeValue(t *testing.T) {
 	handler.UIConfig(context)
 	var payload struct {
 		UploadMaxBytes int64 `json:"upload_max_bytes"`
+		TTLMinSeconds  int64 `json:"ttl_min_seconds"`
+		TTLMaxSeconds  int64 `json:"ttl_max_seconds"`
 	}
 	if err := json.Unmarshal(response.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if response.Code != http.StatusOK || payload.UploadMaxBytes != 12*config.MiB || strings.Contains(response.Body.String(), "revision") {
+	if response.Code != http.StatusOK || payload.UploadMaxBytes != 12*config.MiB || payload.TTLMinSeconds != 3600 || payload.TTLMaxSeconds != 604800 || strings.Contains(response.Body.String(), "revision") {
 		t.Fatalf("unexpected UI config response %d: %s", response.Code, response.Body.String())
 	}
 }
@@ -144,5 +146,17 @@ func TestShareUIConfigAppliesGlobalAndServerLimitsToAnonymousRequests(t *testing
 	}
 	if payload.UploadMaxBytes != 2*config.MiB {
 		t.Fatalf("anonymous share limit = %d, want server limit 2 MiB", payload.UploadMaxBytes)
+	}
+}
+
+func TestShareTTLRejectsValuesOutsideServerBounds(t *testing.T) {
+	for _, ttl := range []string{"0h", "169h", "30m"} {
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/shares", nil)
+		request.Header.Set("X-TTL", ttl)
+		context, _ := gin.CreateTestContext(httptest.NewRecorder())
+		context.Request = request
+		if _, err := shareTTL(context, 24*time.Hour); err == nil {
+			t.Errorf("TTL %s was accepted outside the server bounds", ttl)
+		}
 	}
 }
