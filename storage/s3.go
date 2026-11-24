@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net/url"
 	"os"
 	"strings"
@@ -227,31 +228,39 @@ func (s *S3Store) ListEphemeralPastes() ([]models.Paste, error) {
 func (s *S3Store) Exists(id string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	metaKey := applyS3Prefix(s.prefix, id+".json")
-	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
-		Bucket: aws.String(s.bucket),
-		Key:    aws.String(metaKey),
-	})
-	if err != nil {
-		// Check for AWS API errors
-		var apiErr smithy.APIError
-		if errors.As(err, &apiErr) {
-			errorCode := apiErr.ErrorCode()
-			// Object doesn't exist - this is what we want for available slugs
-			if errorCode == "NoSuchKey" || errorCode == "NotFound" || errorCode == "404" {
-				return false, nil
-			}
+	for _, key := range []string{id + ".json", ChannelContentTempPrefix + id + ".pending", ChannelContentTempPrefix + id + ChannelContentReservationSuffix} {
+		exists, err := s.objectExists(ctx, applyS3Prefix(s.prefix, key))
+		if err != nil {
+			log.Printf("[WARN] S3 Exists: failed to check %s: %v", key, err)
+			return false, err
 		}
-		// Also check for HTTP 404 in error message
-		if strings.Contains(err.Error(), "StatusCode: 404") || strings.Contains(err.Error(), "NotFound") {
-			return false, nil
+		if exists {
+			return true, nil
 		}
-		// For any other error, log it but don't fail - treat as not exists to be safe
-		// This handles cases where there might be temporary permission issues
-		log.Printf("[WARN] S3 Exists: error checking %s, treating as not exists: %v", id, err)
+	}
+	return false, nil
+}
+
+func (s *S3Store) objectExists(ctx context.Context, key string) (bool, error) {
+	_, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	if err == nil {
+		return true, nil
+	}
+	if isS3NotFound(err) {
 		return false, nil
 	}
-	return true, nil
+	return false, err
+}
+
+func isS3NotFound(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		code := apiErr.ErrorCode()
+		if code == "NoSuchKey" || code == "NotFound" || code == "404" {
+			return true
+		}
+	}
+	return strings.Contains(err.Error(), "StatusCode: 404") || strings.Contains(err.Error(), "NotFound")
 }
 
 func (s *S3Store) Delete(id string) error {
@@ -277,6 +286,12 @@ func (s *S3Store) Delete(id string) error {
 	}); err != nil {
 		return fmt.Errorf("failed to delete pending channel content for %s: %w", id, err)
 	}
+	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(applyS3Prefix(s.prefix, ChannelContentTempPrefix+id+ChannelContentReservationSuffix)),
+	}); err != nil {
+		return fmt.Errorf("failed to delete channel slug reservation for %s: %w", id, err)
+	}
 	return nil
 }
 
@@ -293,15 +308,34 @@ func (s *S3Store) StoreContent(id string, content []byte) error {
 	return s.StoreContentStream(id, bytes.NewReader(content), int64(len(content)))
 }
 
-// StoreContentStream lets the AWS SDK stream a request body into S3 without
-// materialising another copy in the application.
+// StoreContentStream sends seekable streams directly to S3 and stages other
+// readers in a bounded temporary file so the SDK can safely replay them.
 func (s *S3Store) StoreContentStream(id string, content io.Reader, size int64) error {
+	reserved, err := s.channelSlugReserved(id)
+	if err != nil {
+		return err
+	}
+	if reserved {
+		return ErrSlugReserved
+	}
+	body, cleanup, err := s.channelUploadBody(content, size)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+	reserved, err = s.channelSlugReservedWithContext(ctx, id)
+	if err != nil {
+		return err
+	}
+	if reserved {
+		return ErrSlugReserved
+	}
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(applyS3Prefix(s.prefix, id)),
-		Body:          io.LimitReader(content, size),
+		Body:          body,
 		ContentLength: aws.Int64(size),
 	})
 	if err != nil {
@@ -322,28 +356,94 @@ func (s *S3Store) StoreContentStream(id string, content io.Reader, size int64) e
 	return err
 }
 
+func (s *S3Store) channelSlugReserved(id string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.channelSlugReservedWithContext(ctx, id)
+}
+
+func (s *S3Store) channelSlugReservedWithContext(ctx context.Context, id string) (bool, error) {
+	for _, key := range []string{
+		ChannelContentTempPrefix + id + ".pending",
+		ChannelContentTempPrefix + id + ChannelContentReservationSuffix,
+	} {
+		exists, err := s.objectExists(ctx, applyS3Prefix(s.prefix, key))
+		if err != nil {
+			return false, err
+		}
+		if exists {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 func (s *S3Store) StoreChannelContentStream(id string, content io.Reader, size int64) error {
 	if !utils.IsValidSlug(id) {
 		return fmt.Errorf("invalid channel content id")
 	}
+	exists, err := s.Exists(id)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return ErrSlugReserved
+	}
+	contentExists, err := s.objectExistsWithTimeout(applyS3Prefix(s.prefix, id))
+	if err != nil {
+		return err
+	}
+	if contentExists {
+		return ErrSlugReserved
+	}
+	reservationKey := applyS3Prefix(s.prefix, ChannelContentTempPrefix+id+ChannelContentReservationSuffix)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(reservationKey),
+		Body:          strings.NewReader(id),
+		ContentLength: aws.Int64(int64(len(id))),
+		IfNoneMatch:   aws.String("*"),
+	})
+	if err != nil {
+		return fmt.Errorf("reserve S3 channel slug: %w", err)
+	}
+	reservationPending := true
+	defer func() {
+		if reservationPending {
+			_ = s.deleteObject(reservationKey)
+		}
+	}()
 	body, cleanup, err := s.channelUploadBody(content, size)
 	if err != nil {
 		return err
 	}
 	defer cleanup()
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(applyS3Prefix(s.prefix, ChannelContentTempPrefix+id+".pending")),
 		Body:          body,
 		ContentLength: aws.Int64(size),
 	})
-	return err
+	if err != nil {
+		return err
+	}
+	if err := s.deleteObject(reservationKey); err != nil {
+		return fmt.Errorf("release S3 channel slug reservation: %w", err)
+	}
+	reservationPending = false
+	return nil
+}
+
+func (s *S3Store) objectExistsWithTimeout(key string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return s.objectExists(ctx, key)
 }
 
 func (s *S3Store) channelUploadBody(content io.Reader, size int64) (io.Reader, func(), error) {
-	if size < 0 {
+	if size < 0 || size == math.MaxInt64 {
 		return nil, func() {}, fmt.Errorf("invalid channel content size")
 	}
 	if readerAt, ok := content.(io.ReaderAt); ok {
@@ -414,23 +514,41 @@ func (s *S3Store) SweepPendingChannelContent() error {
 				continue
 			}
 			name := strings.TrimPrefix(key, ChannelContentTempPrefix)
+			if strings.HasSuffix(name, ChannelContentReservationSuffix) {
+				if err := s.deleteObject(*object.Key); err != nil {
+					return fmt.Errorf("remove abandoned channel slug reservation from S3: %w", err)
+				}
+				continue
+			}
 			if !strings.HasSuffix(name, ".pending") {
-				if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: object.Key}); err != nil {
+				if err := s.deleteObject(*object.Key); err != nil {
 					return fmt.Errorf("remove orphan channel staging object from S3: %w", err)
 				}
 				continue
 			}
 			id := strings.TrimSuffix(name, ".pending")
 			if !utils.IsValidSlug(id) {
-				if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: object.Key}); err != nil {
+				if err := s.deleteObject(*object.Key); err != nil {
 					return err
 				}
 				continue
 			}
-			if err := s.Delete(id); err != nil {
-				return fmt.Errorf("remove orphan channel content %s from S3: %w", id, err)
+			paste, getErr := s.Get(id)
+			switch {
+			case getErr == nil && paste.IsEphemeral():
+				if err := s.Delete(id); err != nil {
+					return fmt.Errorf("remove orphan ephemeral channel content %s from S3: %w", id, err)
+				}
+			case getErr == nil:
+				// A normal share owns this slug. Remove only the pending
+				// channel object and preserve its final content and metadata.
+			case errors.Is(getErr, ErrNotFound):
+				// Without matching metadata the final slug may belong to an
+				// ordinary upload between content and metadata writes.
+			default:
+				return fmt.Errorf("inspect pending channel content %s in S3: %w", id, getErr)
 			}
-			if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: object.Key}); err != nil {
+			if err := s.deleteObject(*object.Key); err != nil {
 				return fmt.Errorf("remove channel content marker from S3: %w", err)
 			}
 		}
@@ -440,6 +558,13 @@ func (s *S3Store) SweepPendingChannelContent() error {
 		token = page.NextContinuationToken
 	}
 	return nil
+}
+
+func (s *S3Store) deleteObject(key string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	return err
 }
 
 func (s *S3Store) AcquireChannelWriter() error {
@@ -467,6 +592,21 @@ func (s *S3Store) AcquireChannelWriter() error {
 	s.writerHeld = true
 	s.writerETag = response.ETag
 	return nil
+}
+
+func (s *S3Store) OwnsChannelWriter() bool {
+	s.writerMu.Lock()
+	defer s.writerMu.Unlock()
+	if !s.writerHeld || s.writerETag == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(applyS3Prefix(s.prefix, ChannelWriterLockKey)),
+	})
+	return err == nil && result.ETag != nil && *result.ETag == *s.writerETag
 }
 
 func (s *S3Store) GetContent(id string) ([]byte, error) {

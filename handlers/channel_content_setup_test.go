@@ -3,6 +3,8 @@ package handlers
 import (
 	"crypto/sha256"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +13,22 @@ import (
 	"github.com/johnwmail/nclip/models"
 	"github.com/johnwmail/nclip/storage"
 )
+
+type blockingJanitorFilesystemStore struct {
+	*storage.FilesystemStore
+	block   atomic.Bool
+	entered chan struct{}
+	proceed chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingJanitorFilesystemStore) ListEphemeralPastes() ([]models.Paste, error) {
+	if s.block.Load() {
+		s.once.Do(func() { close(s.entered) })
+		<-s.proceed
+	}
+	return s.FilesystemStore.ListEphemeralPastes()
+}
 
 func TestEphemeralJanitorKeepsHeldContentAndDeletesExpiredOrphan(t *testing.T) {
 	dataDir := t.TempDir()
@@ -68,6 +86,11 @@ func TestEphemeralJanitorKeepsHeldContentAndDeletesExpiredOrphan(t *testing.T) {
 		t.Fatalf("expired ephemeral fixture: rows=%+v err=%v", rows, err)
 	}
 	handler := NewChannelHandler(manager, &config.Config{DataDir: dataDir}, nil)
+	if err := store.AcquireChannelWriter(); err != nil {
+		t.Fatal(err)
+	}
+	handler.channelWriter = store
+	handler.contentInitialized = true
 	handler.store = store
 	firstSweep := time.Now()
 	handler.cleanupExpiredEphemeral(firstSweep)
@@ -88,5 +111,108 @@ func TestEphemeralJanitorKeepsHeldContentAndDeletesExpiredOrphan(t *testing.T) {
 	_, _, _, held, reserved := manager.ContentSlotCapacity()
 	if held != 0 || reserved != 0 {
 		t.Fatalf("orphan cleanup did not release physical accounting: held=%d reserved=%d", held, reserved)
+	}
+}
+
+func TestSecondHandlerWithoutWriterLockCannotRunJanitor(t *testing.T) {
+	dataDir := t.TempDir()
+	first, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	if err := first.AcquireChannelWriter(); err != nil {
+		t.Fatal(err)
+	}
+	expired := time.Now().Add(-time.Hour)
+	paste := &models.Paste{ID: "OLD52", CreatedAt: time.Now().Add(-9 * 24 * time.Hour), ExpiresAt: &expired, Size: 3, ContentType: "text/plain", EphemeralChannelID: "active-channel"}
+	if err := first.StoreContent(paste.ID, []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Store(paste); err != nil {
+		t.Fatal(err)
+	}
+
+	second, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	handler := NewChannelHandler(channels.NewManager(), &config.Config{DataDir: dataDir}, nil)
+	if err := handler.InitializeContent(second); err == nil {
+		t.Fatal("second handler initialized without the shared writer lock")
+	}
+	handler.janitorInterval = time.Millisecond
+	stop := handler.StartEphemeralJanitor()
+	stop()
+	handler.cleanupExpiredEphemeral(time.Now().Add(2 * channelOrphanSweepInterval))
+	if _, err := second.Get(paste.ID); err != nil {
+		t.Fatalf("handler without the writer lock deleted active content: %v", err)
+	}
+}
+
+func TestStopJanitorWaitsForSweepBeforeWriterLockRelease(t *testing.T) {
+	dataDir := t.TempDir()
+	base, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &blockingJanitorFilesystemStore{
+		FilesystemStore: base,
+		entered:         make(chan struct{}),
+		proceed:         make(chan struct{}),
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	handler := NewChannelHandler(channels.NewManager(), &config.Config{DataDir: dataDir}, nil)
+	if err := handler.InitializeContent(store); err != nil {
+		t.Fatal(err)
+	}
+	handler.janitorInterval = time.Millisecond
+	handler.cleanupMu.Lock()
+	handler.nextCleanup = time.Time{}
+	handler.cleanupMu.Unlock()
+	store.block.Store(true)
+	stop := handler.StartEphemeralJanitor()
+	select {
+	case <-store.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("janitor did not enter its blocked sweep")
+	}
+
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		if err := handler.ReleaseContentWriter(); err != nil {
+			t.Errorf("release writer after janitor stop: %v", err)
+		}
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		close(store.proceed)
+		t.Fatal("janitor stop returned while a sweep was still running")
+	case <-time.After(20 * time.Millisecond):
+	}
+	second, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		close(store.proceed)
+		t.Fatal(err)
+	}
+	if err := second.AcquireChannelWriter(); err == nil {
+		_ = second.Close()
+		close(store.proceed)
+		t.Fatal("second writer acquired the lock during the blocked sweep")
+	}
+	close(store.proceed)
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("janitor did not stop after the sweep completed")
+	}
+	if err := second.AcquireChannelWriter(); err != nil {
+		t.Fatalf("writer lock was not released after janitor completion: %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

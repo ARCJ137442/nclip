@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/md5"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -42,6 +43,9 @@ func TestS3PendingFinalizeIsSweptAndWriterLockIsExclusive(t *testing.T) {
 	if err := first.AcquireChannelWriter(); err != nil {
 		t.Fatalf("first writer lock: %v", err)
 	}
+	if !first.OwnsChannelWriter() {
+		t.Fatal("S3 writer did not confirm ownership of its lock")
+	}
 	if err := second.AcquireChannelWriter(); err == nil {
 		t.Fatal("second S3 store acquired an already-held writer lock")
 	}
@@ -66,8 +70,42 @@ func TestS3PendingFinalizeIsSweptAndWriterLockIsExclusive(t *testing.T) {
 	if err := first.Delete("CMT32"); err != nil {
 		t.Fatalf("clean S3 commit fixture: %v", err)
 	}
+	if err := first.StoreChannelContentStream("CLD52", bytes.NewReader([]byte("channel pending")), int64(len("channel pending"))); err != nil {
+		t.Fatalf("store pending slug collision: %v", err)
+	}
+	if exists, err := first.Exists("CLD52"); err != nil || !exists {
+		t.Fatalf("S3 pending slug not considered occupied: exists=%t err=%v", exists, err)
+	}
+	if err := first.StoreContentStream("CLD52", bytes.NewReader([]byte("ordinary-share")), int64(len("ordinary-share"))); !errors.Is(err, ErrSlugReserved) {
+		t.Fatalf("ordinary S3 upload reused a pending slug: %v", err)
+	}
+	if err := first.Delete("CLD52"); err != nil {
+		t.Fatalf("clear pending slug fixture: %v", err)
+	}
+	if err := first.StoreContentStream("CLD52", bytes.NewReader([]byte("ordinary-share")), int64(len("ordinary-share"))); err != nil {
+		t.Fatalf("store ordinary S3 collision content: %v", err)
+	}
+	if err := first.Store(&models.Paste{ID: "CLD52", CreatedAt: time.Now(), ExpiresAt: &expires, Size: int64(len("ordinary-share")), ContentType: "text/plain"}); err != nil {
+		t.Fatalf("store ordinary S3 collision metadata: %v", err)
+	}
+	// Model a stale/in-flight channel marker whose slug was chosen before the
+	// ordinary share committed its metadata.
+	objects.mu.Lock()
+	objects.objects["channels/"+ChannelContentTempPrefix+"CLD52.pending"] = []byte("pending")
+	objects.mu.Unlock()
 	if err := first.SweepPendingChannelContent(); err != nil {
 		t.Fatalf("sweep pending finalize content: %v", err)
+	}
+	ordinaryBytes, err := first.GetContent("CLD52")
+	if err != nil || string(ordinaryBytes) != "ordinary-share" {
+		t.Fatalf("pending sweep deleted ordinary S3 content: %q err=%v", ordinaryBytes, err)
+	}
+	ordinaryMetadata, err := first.Get("CLD52")
+	if err != nil || ordinaryMetadata.IsEphemeral() {
+		t.Fatalf("pending sweep deleted ordinary S3 metadata: paste=%+v err=%v", ordinaryMetadata, err)
+	}
+	if err := first.Delete("CLD52"); err != nil {
+		t.Fatalf("clean S3 collision fixture: %v", err)
 	}
 	objects.mu.Lock()
 	remaining := len(objects.objects)
@@ -77,6 +115,9 @@ func TestS3PendingFinalizeIsSweptAndWriterLockIsExclusive(t *testing.T) {
 	}
 	if err := first.Close(); err != nil {
 		t.Fatalf("release S3 writer lock: %v", err)
+	}
+	if first.OwnsChannelWriter() {
+		t.Fatal("S3 store still reports lock ownership after release")
 	}
 	objects.mu.Lock()
 	remaining = len(objects.objects)
@@ -137,6 +178,16 @@ func (f *fakeS3Objects) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(body)
+	case http.MethodHead:
+		body, exists := f.objects[key]
+		if !exists {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, `<Error><Code>NoSuchKey</Code></Error>`)
+			return
+		}
+		w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+		w.Header().Set("ETag", fmt.Sprintf(`"%x"`, md5.Sum(body)))
+		w.WriteHeader(http.StatusOK)
 	case http.MethodDelete:
 		if match := r.Header.Get("If-Match"); match != "" {
 			body, exists := f.objects[key]
@@ -163,7 +214,7 @@ func (f *fakeS3Objects) list(w http.ResponseWriter, prefix string) {
 	f.mu.Unlock()
 	sort.Strings(keys)
 	var body strings.Builder
-	body.WriteString(`<ListBucketResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Name>nclip-test</Name><Prefix>`)
+	body.WriteString(`<ListBucketResult><Name>nclip-test</Name><Prefix>`)
 	_ = xml.EscapeText(&body, []byte(prefix))
 	body.WriteString(`</Prefix><KeyCount>`)
 	body.WriteString(fmt.Sprint(len(keys)))

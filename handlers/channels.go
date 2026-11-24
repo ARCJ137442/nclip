@@ -40,9 +40,11 @@ type ChannelHandler struct {
 	shares             *SharesHandler
 	store              storage.PasteStore
 	channelWriter      storage.ChannelWriterStore
+	contentInitialized bool
 	disabledReason     string
 	cleanupMu          sync.Mutex
 	nextCleanup        time.Time
+	janitorInterval    time.Duration
 	createMu           sync.Mutex
 	createWindows      map[string]createWindowState
 	joinMu             sync.Mutex
@@ -66,8 +68,13 @@ func (h *ChannelHandler) ReleaseContentWriter() error {
 	err := h.channelWriter.ReleaseChannelWriter()
 	if err == nil {
 		h.channelWriter = nil
+		h.contentInitialized = false
 	}
 	return err
+}
+
+func (h *ChannelHandler) ContentJanitorReady() bool {
+	return h.contentInitialized && h.channelWriter != nil && h.channelWriter.OwnsChannelWriter()
 }
 
 func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *AccountHandler) *ChannelHandler {
@@ -79,6 +86,7 @@ func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *
 		joinIPWindows:      make(map[string]createWindowState),
 		joinChannelWindows: make(map[string]createWindowState),
 		contentChunkSlots:  make(chan struct{}, maxConcurrentChannelChunks),
+		janitorInterval:    channelOrphanSweepInterval,
 	}
 }
 

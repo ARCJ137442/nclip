@@ -11,9 +11,11 @@ import (
 // All PasteStore implementations must return this (or a wrapped version of it)
 // so callers can use errors.Is(err, ErrNotFound) regardless of backend.
 var ErrNotFound = errors.New("paste not found")
+var ErrSlugReserved = errors.New("paste slug is reserved for channel content")
 
 const ChannelContentTempPrefix = ".nclip-channel-content-"
 const ChannelWriterLockKey = ".nclip-channel-writer.lock"
+const ChannelContentReservationSuffix = ".uploading"
 
 // PasteStore defines the interface for paste storage backends
 type PasteStore interface {
@@ -79,4 +81,5 @@ type ChannelContentStore interface {
 type ChannelWriterStore interface {
 	AcquireChannelWriter() error
 	ReleaseChannelWriter() error
+	OwnsChannelWriter() bool
 }

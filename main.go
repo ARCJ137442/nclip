@@ -582,9 +582,8 @@ func runHTTPServer(router *gin.Engine, cfg *config.Config, store storage.PasteSt
 			log.Printf("Error closing storage: %v", err)
 		}
 	}()
-	janitorContext, stopJanitor := context.WithCancel(context.Background())
+	stopJanitor := channelHandler.StartEphemeralJanitor()
 	defer stopJanitor()
-	go channelHandler.RunEphemeralJanitor(janitorContext)
 
 	// Create HTTP server
 	server := &http.Server{

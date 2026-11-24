@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/johnwmail/nclip/storage"
@@ -16,6 +17,7 @@ const channelUploadTempPrefix = ".nclip-channel-upload-"
 
 func (h *ChannelHandler) InitializeContent(store storage.PasteStore) error {
 	h.store = store
+	h.contentInitialized = false
 	writer, ok := store.(storage.ChannelWriterStore)
 	if !ok {
 		return fmt.Errorf("storage backend cannot prove exclusive channel ownership")
@@ -30,6 +32,9 @@ func (h *ChannelHandler) InitializeContent(store storage.PasteStore) error {
 			_ = h.ReleaseContentWriter()
 		}
 	}()
+	if !writer.OwnsChannelWriter() {
+		return fmt.Errorf("exclusive channel writer ownership could not be confirmed")
+	}
 	channelStore, ok := store.(storage.ChannelContentStore)
 	if !ok {
 		return fmt.Errorf("storage backend cannot sweep pending channel finalizations")
@@ -63,6 +68,7 @@ func (h *ChannelHandler) InitializeContent(store storage.PasteStore) error {
 	h.cleanupMu.Lock()
 	h.nextCleanup = time.Now().Add(channelOrphanSweepInterval)
 	h.cleanupMu.Unlock()
+	h.contentInitialized = true
 	initialized = true
 	return nil
 }
@@ -75,7 +81,7 @@ func removeChannelUploadTemps(dataDir string) error {
 		return err
 	}
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), channelUploadTempPrefix) {
+		if !strings.HasPrefix(entry.Name(), channelUploadTempPrefix) && !strings.HasPrefix(entry.Name(), storage.ChannelContentTempPrefix+"s3-upload-") {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dataDir, entry.Name())); err != nil {
@@ -86,6 +92,9 @@ func removeChannelUploadTemps(dataDir string) error {
 }
 
 func (h *ChannelHandler) cleanupExpiredEphemeral(now time.Time) {
+	if !h.ContentJanitorReady() {
+		return
+	}
 	h.cleanupMu.Lock()
 	if now.Before(h.nextCleanup) {
 		h.cleanupMu.Unlock()
@@ -123,7 +132,11 @@ func (h *ChannelHandler) cleanupExpiredEphemeral(now time.Time) {
 }
 
 func (h *ChannelHandler) RunEphemeralJanitor(ctx context.Context) {
-	ticker := time.NewTicker(channelOrphanSweepInterval)
+	interval := h.janitorInterval
+	if interval <= 0 {
+		interval = channelOrphanSweepInterval
+	}
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -132,5 +145,27 @@ func (h *ChannelHandler) RunEphemeralJanitor(ctx context.Context) {
 		case now := <-ticker.C:
 			h.cleanupExpiredEphemeral(now)
 		}
+	}
+}
+
+// StartEphemeralJanitor starts cleanup only while this handler has a live
+// initialized writer lock. The returned stop function waits for an in-progress
+// sweep to finish so callers can release the lock afterward safely.
+func (h *ChannelHandler) StartEphemeralJanitor() func() {
+	if !h.ContentJanitorReady() {
+		return func() {}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.RunEphemeralJanitor(ctx)
+	}()
+	var stopOnce sync.Once
+	return func() {
+		stopOnce.Do(func() {
+			cancel()
+			<-done
+		})
 	}
 }

@@ -130,14 +130,26 @@ func (fs *FilesystemStore) Exists(id string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	pendingPath, err := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
+	if err != nil {
+		return false, err
+	}
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	_, err = os.Stat(metaPath)
+	if err == nil {
+		return true, nil
+	}
+	if !os.IsNotExist(err) {
+		log.Printf("[ERROR] FS Exists: failed to stat metadata for %s: %v", id, err)
+		return false, err
+	}
+	_, err = os.Stat(pendingPath)
 	if os.IsNotExist(err) {
 		return false, nil
 	}
 	if err != nil {
-		log.Printf("[ERROR] FS Exists: failed to stat metadata for %s: %v", id, err)
+		log.Printf("[ERROR] FS Exists: failed to stat pending channel content for %s: %v", id, err)
 		return false, err
 	}
 	return true, nil
@@ -213,8 +225,61 @@ func (fs *FilesystemStore) StoreChannelContentStream(id string, content io.Reade
 	if !utils.IsValidSlug(id) {
 		return errUnsafeID
 	}
-	stageID := ChannelContentTempPrefix + id + ".pending"
-	return fs.storeContentStream(stageID, content, size, ChannelContentTempPrefix+id+".tmp-*")
+	stagePath, err := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
+	if err != nil {
+		return err
+	}
+	contentPath, err := safePath(fs.dataDir, id)
+	if err != nil {
+		return err
+	}
+	metaPath, err := safePath(fs.dataDir, id+".json")
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(fs.dataDir, 0o755); err != nil {
+		return err
+	}
+	fs.mu.Lock()
+	for _, path := range []string{contentPath, metaPath} {
+		if _, err := os.Stat(path); err == nil {
+			fs.mu.Unlock()
+			return ErrSlugReserved
+		} else if !os.IsNotExist(err) {
+			fs.mu.Unlock()
+			return err
+		}
+	}
+	file, err := os.OpenFile(stagePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	fs.mu.Unlock()
+	if err != nil {
+		if os.IsExist(err) {
+			return ErrSlugReserved
+		}
+		return fmt.Errorf("reserve pending channel slug: %w", err)
+	}
+	cleanup := func() {
+		_ = file.Close()
+		_ = os.Remove(stagePath)
+	}
+	written, err := io.Copy(file, io.LimitReader(content, size+1))
+	if err != nil {
+		cleanup()
+		return err
+	}
+	if written != size {
+		cleanup()
+		return fmt.Errorf("content size mismatch: expected %d bytes, received %d", size, written)
+	}
+	if err := file.Sync(); err != nil {
+		cleanup()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(stagePath)
+		return err
+	}
+	return nil
 }
 
 func (fs *FilesystemStore) CommitChannelContent(id string) error {
@@ -261,8 +326,20 @@ func (fs *FilesystemStore) SweepPendingChannelContent() error {
 			}
 			continue
 		}
-		if err := fs.Delete(id); err != nil {
-			return fmt.Errorf("remove orphan channel content %s: %w", id, err)
+		paste, err := fs.Get(id)
+		switch {
+		case err == nil && paste.IsEphemeral():
+			if err := fs.Delete(id); err != nil {
+				return fmt.Errorf("remove orphan ephemeral channel content %s: %w", id, err)
+			}
+		case err == nil:
+			// A normal share won a slug collision. Remove only the pending
+			// channel object; the ordinary paste owns the final slug paths.
+		case errors.Is(err, ErrNotFound):
+			// Without matching metadata the final slug may belong to an
+			// ordinary upload between its content and metadata writes.
+		default:
+			return fmt.Errorf("inspect pending channel content %s: %w", id, err)
 		}
 		if err := os.Remove(filepath.Join(fs.dataDir, name)); err != nil && !os.IsNotExist(err) {
 			return fmt.Errorf("remove orphan channel content marker: %w", err)
@@ -309,6 +386,22 @@ func (fs *FilesystemStore) storeContentStream(id string, content io.Reader, size
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if !strings.HasPrefix(id, ChannelContentTempPrefix) {
+		pendingPath, pathErr := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
+		if pathErr != nil {
+			_ = os.Remove(tmpPath)
+			return pathErr
+		}
+		if _, statErr := os.Stat(pendingPath); statErr == nil {
+			_ = os.Remove(tmpPath)
+			return ErrSlugReserved
+		} else if !os.IsNotExist(statErr) {
+			_ = os.Remove(tmpPath)
+			return statErr
+		}
 	}
 	if err := os.Rename(tmpPath, contentPath); err != nil {
 		_ = os.Remove(tmpPath)
@@ -470,6 +563,16 @@ func (fs *FilesystemStore) AcquireChannelWriter() error {
 	}
 	fs.writerToken = token
 	return nil
+}
+
+func (fs *FilesystemStore) OwnsChannelWriter() bool {
+	fs.writerMu.Lock()
+	defer fs.writerMu.Unlock()
+	if fs.writerToken == "" {
+		return false
+	}
+	contents, err := os.ReadFile(filepath.Join(fs.dataDir, ChannelWriterLockKey))
+	return err == nil && string(contents) == fs.writerToken
 }
 
 // ListPastes lists active metadata, excluding private account subdirectories.

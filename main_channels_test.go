@@ -1394,13 +1394,70 @@ func TestStartupRemovesFinalizationContentWrittenBeforeMetadata(t *testing.T) {
 	if _, err := os.Stat(pending); err != nil {
 		t.Fatalf("failed to create pre-metadata finalization object: %v", err)
 	}
+	finalPath := filepath.Join(dataDir, id)
+	if err := os.WriteFile(finalPath, []byte("unowned-final"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 
 	cfg := &config.Config{DataDir: dataDir, URL: "https://clip.test", BufferSize: 4 << 20, DefaultTTL: 24 * time.Hour, MaxRenderSize: 1024}
 	_ = setupRouter(store, cfg)
-	if exists, _, err := store.StatContent(id); err != nil || exists {
-		t.Fatalf("startup kept orphan final content: exists=%t err=%v", exists, err)
+	if exists, _, err := store.StatContent(id); err != nil || !exists {
+		t.Fatalf("startup deleted final content without matching metadata: exists=%t err=%v", exists, err)
+	}
+	content, err := store.GetContent(id)
+	if err != nil || string(content) != "unowned-final" {
+		t.Fatalf("startup changed unowned final content: %q err=%v", content, err)
 	}
 	if _, err := os.Stat(pending); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("startup kept pending finalization object: %v", err)
+	}
+}
+
+func TestPendingChannelSlugCannotBeReusedAndSweepPreservesOrdinaryShare(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	const id = "CLD52"
+	if err := store.StoreChannelContentStream(id, strings.NewReader("channel-staging"), int64(len("channel-staging"))); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := store.Exists(id); err != nil || !exists {
+		t.Fatalf("pending channel slug not considered occupied: exists=%t err=%v", exists, err)
+	}
+	if err := store.StoreContentStream(id, strings.NewReader("ordinary-share"), int64(len("ordinary-share"))); !errors.Is(err, storage.ErrSlugReserved) {
+		t.Fatalf("ordinary upload reused a reserved pending slug: %v", err)
+	}
+	if err := store.Delete(id); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StoreContentStream(id, strings.NewReader("ordinary-share"), int64(len("ordinary-share"))); err != nil {
+		t.Fatal(err)
+	}
+	expires := time.Now().Add(time.Hour)
+	ordinary := &models.Paste{ID: id, CreatedAt: time.Now(), ExpiresAt: &expires, Size: int64(len("ordinary-share")), ContentType: "text/plain"}
+	if err := store.Store(ordinary); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a pending marker left by a channel request that selected this
+	// slug before the ordinary upload committed its metadata.
+	if err := os.WriteFile(filepath.Join(dataDir, storage.ChannelContentTempPrefix+id+".pending"), []byte("pending"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{DataDir: dataDir, URL: "https://clip.test", BufferSize: 4 << 20, DefaultTTL: 24 * time.Hour, MaxRenderSize: 1024}
+	_ = setupRouter(store, cfg)
+	paste, err := store.Get(id)
+	if err != nil || paste.IsEphemeral() {
+		t.Fatalf("startup sweep deleted or changed ordinary share metadata: paste=%+v err=%v", paste, err)
+	}
+	content, err := store.GetContent(id)
+	if err != nil || string(content) != "ordinary-share" {
+		t.Fatalf("startup sweep deleted ordinary share bytes: %q err=%v", content, err)
+	}
+	if exists, err := store.Exists(id); err != nil || !exists {
+		t.Fatalf("ordinary share disappeared after pending cleanup: exists=%t err=%v", exists, err)
 	}
 }
