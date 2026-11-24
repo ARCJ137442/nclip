@@ -74,6 +74,7 @@ func (h *ChannelHandler) InitializeContent(store storage.PasteStore) error {
 }
 
 const channelOrphanSweepInterval = time.Hour
+const channelLivenessSweepInterval = 5 * time.Second
 
 func removeChannelUploadTemps(dataDir string) error {
 	entries, err := os.ReadDir(dataDir)
@@ -111,14 +112,6 @@ func (h *ChannelHandler) cleanupExpiredEphemeralOwned(now time.Time) {
 	}
 	h.nextCleanup = now.Add(channelOrphanSweepInterval)
 	h.cleanupMu.Unlock()
-	if h.shares != nil {
-		for _, release := range h.manager.PendingContentReleases() {
-			if err := h.deleteReleasedContent(release); err != nil {
-				log.Printf("[WARN] channel pending-content cleanup retry failed: %v", err)
-			}
-		}
-	}
-
 	lister, ok := h.store.(storage.EphemeralPasteLister)
 	if !ok {
 		return
@@ -158,8 +151,39 @@ func (h *ChannelHandler) RunEphemeralJanitor(ctx context.Context) {
 			if !h.ContentJanitorReady() {
 				return
 			}
+			h.maintainChannelLiveness(now)
 			h.cleanupExpiredEphemeral(now)
 		}
+	}
+}
+
+func (h *ChannelHandler) maintainChannelLiveness(now time.Time) {
+	if !h.ContentJanitorReady() {
+		return
+	}
+	processed := make(map[string]struct{})
+	err := h.channelWriter.WithChannelWriter(func() error {
+		for _, release := range h.manager.SweepReceiverLiveness(now) {
+			processed[release.ChannelID] = struct{}{}
+			h.manager.CleanupContentRelease(release)
+			if err := h.deleteReleasedContent(release); err != nil {
+				log.Printf("[WARN] channel released-content cleanup failed: %v", err)
+			}
+		}
+		if h.shares != nil {
+			for _, release := range h.manager.PendingContentReleases() {
+				if _, handled := processed[release.ChannelID]; handled {
+					continue
+				}
+				if err := h.deleteReleasedContent(release); err != nil {
+					log.Printf("[WARN] channel pending-content cleanup retry failed: %v", err)
+				}
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("[WARN] channel liveness sweep lost writer ownership: %v", err)
 	}
 }
 

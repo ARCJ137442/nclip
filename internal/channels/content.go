@@ -485,6 +485,7 @@ func (m *Manager) CompleteContentFinalize(channelID, senderKey string, session *
 	record.ContentState = ContentHeld
 	record.contentSlug = slug
 	record.contentHeld = heldBytes
+	record.contentBytes = session.TotalBytes
 	m.channels[channelID] = record
 	return nil
 }
@@ -628,6 +629,7 @@ func (m *Manager) detachContentLocked(record *Record) ContentRelease {
 	record.contentUpload = nil
 	record.contentSlug = ""
 	record.contentHeld = 0
+	record.contentBytes = 0
 	return release
 }
 

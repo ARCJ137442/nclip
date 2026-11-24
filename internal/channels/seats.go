@@ -10,26 +10,31 @@ import (
 )
 
 const (
-	SenderHeartbeatTimeout = 30 * time.Second
-	PendingAdmissionWindow = 2 * time.Minute
-	JoinReplayRetention    = 2 * time.Minute
-	MaxJoinRecords         = 122880
+	SenderHeartbeatTimeout   = 30 * time.Second
+	ReceiverHeartbeatTimeout = 90 * time.Second
+	ChannelReleaseWindow     = 2 * time.Minute
+	PendingAdmissionWindow   = 2 * time.Minute
+	JoinReplayRetention      = 2 * time.Minute
+	MaxJoinRecords           = 122880
 )
 
 var ErrChannelNotFound = errors.New("channel_not_found")
 
 type seatState struct {
-	id         string
-	channelID  string
-	scope      string
-	requestID  string
-	joinKey    string
-	seatHash   [sha256.Size]byte
-	claimHash  [sha256.Size]byte
-	info       SeatInfo
-	lastSeen   time.Time
-	decisionID string
-	decision   string
+	id               string
+	channelID        string
+	scope            string
+	requestID        string
+	joinKey          string
+	seatHash         [sha256.Size]byte
+	claimHash        [sha256.Size]byte
+	info             SeatInfo
+	lastSeen         time.Time
+	releaseUntil     time.Time
+	deliveredThrough int64
+	delivery         *DeliveryLease
+	decisionID       string
+	decision         string
 }
 
 type seatClosure struct {
@@ -54,6 +59,13 @@ type decisionResult struct {
 
 type leaveResult struct {
 	seatHash  [sha256.Size]byte
+	release   ContentRelease
+	expiresAt time.Time
+}
+
+type kickResult struct {
+	seatID    string
+	decision  string
 	release   ContentRelease
 	expiresAt time.Time
 }
@@ -87,6 +99,10 @@ func decisionKey(channelID, seatID, requestID string) string {
 
 func leaveKey(channelID, requestID string) string {
 	return channelID + "|" + requestID
+}
+
+func kickKey(channelID, seatID, requestID string) string {
+	return channelID + "|" + seatID + "|" + requestID
 }
 
 func (m *Manager) HasJoinReplay(channelID, scope, requestID string, now time.Time) bool {
@@ -246,12 +262,21 @@ func (m *Manager) ReceiverStatus(id, seatToken string, now time.Time) (Record, e
 	if !matchHash(record.seat.seatHash, seatToken) {
 		return Record{}, ErrUnauthorized
 	}
+	if record.seat.info.State == "released" {
+		if !record.seat.releaseUntil.After(now) {
+			return Record{}, ErrJoinClosed
+		}
+		record.seat.info.State = "paired"
+		record.seat.releaseUntil = time.Time{}
+		record.Seat = copySeatInfo(&record.seat.info)
+	}
 	if record.seat.info.State == "pending_admit" && !record.seat.info.PendingUntil.After(now) {
 		m.releaseSeatLocked(&record, "pending_expired", now)
 		m.channels[id] = record
 		return Record{}, ErrPendingExpired
 	}
 	record.seat.lastSeen = now
+	record.Seat = copySeatInfo(&record.seat.info)
 	m.channels[id] = record
 	return cloneRecord(record), nil
 }
@@ -322,6 +347,48 @@ func (m *Manager) LeaveWithContent(id, requestID, seatToken string, now time.Tim
 		m.pendingContentReleases[id] = release
 	}
 	m.leaves[key] = leaveResult{seatHash: tokenHash, release: release, expiresAt: now.Add(JoinReplayRetention)}
+	m.mu.Unlock()
+	return release, nil
+}
+
+func (m *Manager) KickWithContent(id, senderKey, seatID, requestID string, now time.Time) (ContentRelease, error) {
+	if !ValidRequestID(requestID) {
+		return ContentRelease{}, ErrInvalidRequestID
+	}
+	if !ValidSeatID(seatID) {
+		return ContentRelease{}, ErrInvalidSeatID
+	}
+	key := kickKey(id, seatID, requestID)
+	m.mu.Lock()
+	m.pruneSeatRecordsLocked(now)
+	record, ok := m.channels[id]
+	if !ok {
+		m.mu.Unlock()
+		return ContentRelease{}, ErrChannelNotFound
+	}
+	if !matchHash(record.senderHash, senderKey) {
+		m.mu.Unlock()
+		return ContentRelease{}, ErrUnauthorized
+	}
+	if prior, exists := m.kicks[key]; exists {
+		m.mu.Unlock()
+		return prior.release, nil
+	}
+	if len(m.kicks) >= MaxJoinRecords {
+		m.mu.Unlock()
+		return ContentRelease{}, ErrCapacity
+	}
+	if record.seat == nil || record.seat.id != seatID {
+		m.mu.Unlock()
+		return ContentRelease{}, ErrDecisionConflict
+	}
+	release := m.detachContentLocked(&record)
+	m.releaseSeatLocked(&record, "sender_kicked", now)
+	m.channels[id] = record
+	if release.Slug != "" {
+		m.pendingContentReleases[id] = release
+	}
+	m.kicks[key] = kickResult{seatID: seatID, decision: "kick", release: release, expiresAt: now.Add(JoinReplayRetention)}
 	m.mu.Unlock()
 	return release, nil
 }
@@ -419,6 +486,10 @@ func (m *Manager) releaseSeatLocked(record *Record, reason string, now time.Time
 		return
 	}
 	seat := record.seat
+	if seat.delivery != nil {
+		seat.delivery.Cancel()
+		seat.delivery = nil
+	}
 	m.closedJoins[seat.joinKey] = now.Add(JoinReplayRetention)
 	closure := seatClosure{
 		reason:    reason,
@@ -443,6 +514,12 @@ func (m *Manager) closedSeatErrorLocked(seatToken string, now time.Time) error {
 	if closure.reason == "pending_expired" {
 		return ErrPendingExpired
 	}
+	if closure.reason == "delivered" {
+		return ErrDeliveryComplete
+	}
+	if closure.reason == "sender_kicked" {
+		return ErrSeatKicked
+	}
 	return ErrJoinClosed
 }
 
@@ -465,6 +542,11 @@ func (m *Manager) pruneSeatRecordsLocked(now time.Time) {
 	for key, result := range m.leaves {
 		if !result.expiresAt.After(now) {
 			delete(m.leaves, key)
+		}
+	}
+	for key, result := range m.kicks {
+		if !result.expiresAt.After(now) {
+			delete(m.kicks, key)
 		}
 	}
 	for key, closure := range m.closedSeats {

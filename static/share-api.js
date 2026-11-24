@@ -235,7 +235,7 @@ export async function requestBytes(
   const resumable =
     !encoded &&
     (response.headers.get("Accept-Ranges") || "").toLowerCase() === "bytes";
-  onMeta?.({ resumable, total });
+  onMeta?.({ resumable, total, etag: response.headers.get("ETag") || "" });
 
   const reader = response.body.getReader();
   let received = offset,

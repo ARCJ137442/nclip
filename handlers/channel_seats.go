@@ -140,6 +140,34 @@ func (h *ChannelHandler) Admit(c *gin.Context) {
 	})
 }
 
+func (h *ChannelHandler) Kick(c *gin.Context) {
+	requestID := c.GetHeader("Idempotency-Key")
+	if !channels.ValidRequestID(requestID) {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": channels.ErrInvalidRequestID.Error()})
+		return
+	}
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2048)
+	var input struct {
+		SeatID string `json:"seat_id"`
+	}
+	if c.ShouldBindJSON(&input) != nil || !channels.ValidSeatID(input.SeatID) {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": channels.ErrInvalidSeatID.Error()})
+		return
+	}
+	senderKey, _ := c.Cookie(senderCookieName)
+	release, err := h.manager.KickWithContent(c.Param("id"), senderKey, input.SeatID, requestID, time.Now())
+	if err != nil {
+		h.channelError(c, err)
+		return
+	}
+	h.manager.CleanupContentRelease(release)
+	if err := h.deleteReleasedContent(release); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "channel_kick_cleanup_failed"})
+		return
+	}
+	c.Status(http.StatusNoContent)
+}
+
 func (h *ChannelHandler) Heartbeat(c *gin.Context) {
 	senderKey, _ := c.Cookie(senderCookieName)
 	if err := h.manager.SenderHeartbeat(c.Param("id"), senderKey, time.Now()); err != nil {
@@ -187,7 +215,9 @@ func (h *ChannelHandler) channelError(c *gin.Context, err error) {
 		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": err.Error()})
 	case errors.Is(err, channels.ErrSenderOffline),
 		errors.Is(err, channels.ErrPendingExpired),
-		errors.Is(err, channels.ErrJoinClosed):
+		errors.Is(err, channels.ErrJoinClosed),
+		errors.Is(err, channels.ErrDeliveryComplete),
+		errors.Is(err, channels.ErrSeatKicked):
 		c.AbortWithStatusJSON(http.StatusGone, gin.H{"error": err.Error()})
 	case errors.Is(err, channels.ErrUnauthorized):
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": err.Error()})

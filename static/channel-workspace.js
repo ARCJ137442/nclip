@@ -24,6 +24,7 @@ if (mode) {
   const decisionInFlightSeatIDs = new Set();
   let closeRequestId = "";
   let polling = false;
+  let refreshDelay = 3000;
 
   function requestId() {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -93,10 +94,12 @@ if (mode) {
       });
       if (!response.ok) throw new Error("HTTP " + response.status);
       const state = await response.json();
+      refreshDelay = 3000;
       renderSeat(state.seat);
       errorLine.hidden = true;
     } catch {
       showError(t("channelError"));
+      refreshDelay = Math.min(15000, Math.max(3000, refreshDelay * 2));
     } finally {
       polling = false;
     }
@@ -106,7 +109,7 @@ if (mode) {
     window.setTimeout(async () => {
       await refresh();
       if (channelId) scheduleRefresh();
-    }, 3000);
+    }, refreshDelay);
   }
 
   async function decide(decision) {

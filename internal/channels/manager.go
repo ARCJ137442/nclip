@@ -65,6 +65,7 @@ type Record struct {
 	contentUpload  *ContentUpload
 	contentSlug    string
 	contentHeld    int64
+	contentBytes   int64
 }
 
 type createResult struct {
@@ -85,6 +86,7 @@ type Manager struct {
 	closedSeatIDs          map[string]seatClosure
 	decisions              map[string]decisionResult
 	leaves                 map[string]leaveResult
+	kicks                  map[string]kickResult
 	content                contentCapacity
 	contentUploads         map[string]*ContentUpload
 	contentInits           map[string]contentInitReplay
@@ -104,6 +106,7 @@ func NewManager() *Manager {
 		closedSeatIDs:          make(map[string]seatClosure),
 		decisions:              make(map[string]decisionResult),
 		leaves:                 make(map[string]leaveResult),
+		kicks:                  make(map[string]kickResult),
 		contentUploads:         make(map[string]*ContentUpload),
 		contentInits:           make(map[string]contentInitReplay),
 		pendingContentReleases: make(map[string]ContentRelease),

@@ -15,6 +15,36 @@
         <h1 data-i18n="channelReceiverTitle">加入临时信道</h1>
         <p class="hint" data-i18n="channelJoinDisclosure">加入后，你的登录身份或“匿名接收端”状态会实时显示给发送者，仅在信道存续期间可见；信道不留长期取件回执。</p>
         <div id="receiver-status" class="channel-state" role="status" aria-live="polite" data-i18n="channelStatusLoading">正在连接信道…</div>
+        <ol id="channel-receive-stages" class="stage-rail" aria-label="接收阶段" hidden>
+          <li data-stage="connecting" data-state="pending"><span class="stage-dot" aria-hidden="true"></span><span data-i18n="channelStageConnecting">连接</span></li>
+          <li data-stage="downloading" data-state="pending"><span class="stage-dot" aria-hidden="true"></span><span data-i18n="channelStageReceiving">接收</span></li>
+          <li data-stage="verifying" data-state="pending"><span class="stage-dot" aria-hidden="true"></span><span data-i18n="channelStageVerifying">校验</span></li>
+          <li data-stage="ready" data-state="pending"><span class="stage-dot" aria-hidden="true"></span><span data-i18n="channelStageReady">可用</span></li>
+        </ol>
+        <section id="channel-receive-progress" class="transfer" hidden>
+          <div class="transfer-head">
+            <span id="channel-receive-phase" class="transfer-phase"></span>
+            <strong id="channel-receive-percent" class="transfer-percent"></strong>
+            <button id="channel-receive-retry" class="button quiet" type="button" hidden data-i18n="channelRetryReceive">继续接收</button>
+          </div>
+          <div id="channel-receive-track" class="transfer-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-labelledby="channel-receive-phase">
+            <span id="channel-receive-fill"></span>
+          </div>
+          <div class="transfer-meta">
+            <span id="channel-receive-bytes"></span>
+            <span id="channel-receive-rate"></span>
+          </div>
+          <div class="transfer-context">
+            <span id="channel-receive-attempt"></span>
+            <span id="channel-receive-freshness"></span>
+          </div>
+          <p id="channel-receive-note" class="hint" hidden></p>
+        </section>
+        <section id="channel-received" class="receive-panel" hidden>
+          <h2 data-i18n="channelReceivedTitle">已收到</h2>
+          <div id="channel-download-archive" class="transfer-controls" hidden></div>
+          <div id="channel-received-items" class="items"></div>
+        </section>
         <div class="channel-actions">
           <button id="channel-join" class="button primary" type="button" data-i18n="channelJoin">加入并等待</button>
           <button id="channel-leave" class="button danger" type="button" hidden data-i18n="channelLeave">离开信道</button>
@@ -25,6 +55,6 @@
     {{template "app-footer" .}}
   </div>
   <script type="module" src="/static/script.js"></script>
-  <script type="module" src="/static/channel-receiver.js"></script>
+  <script type="module" src="/static/channel-receiver.js?v={{.Version}}"></script>
 </body>
 </html>
