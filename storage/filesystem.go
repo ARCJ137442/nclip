@@ -126,11 +126,19 @@ func (fs *FilesystemStore) Get(id string) (*models.Paste, error) {
 }
 
 func (fs *FilesystemStore) Exists(id string) (bool, error) {
+	contentPath, err := safePath(fs.dataDir, id)
+	if err != nil {
+		return false, err
+	}
 	metaPath, err := safePath(fs.dataDir, id+".json")
 	if err != nil {
 		return false, err
 	}
 	pendingPath, err := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
+	if err != nil {
+		return false, err
+	}
+	slugReservationPath, err := safePath(fs.dataDir, PasteSlugReservationPrefix+id+".lock")
 	if err != nil {
 		return false, err
 	}
@@ -144,15 +152,15 @@ func (fs *FilesystemStore) Exists(id string) (bool, error) {
 		log.Printf("[ERROR] FS Exists: failed to stat metadata for %s: %v", id, err)
 		return false, err
 	}
-	_, err = os.Stat(pendingPath)
-	if os.IsNotExist(err) {
-		return false, nil
+	for _, path := range []string{contentPath, pendingPath, slugReservationPath} {
+		if _, err := os.Stat(path); err == nil {
+			return true, nil
+		} else if !os.IsNotExist(err) {
+			log.Printf("[ERROR] FS Exists: failed to stat slug reservation for %s: %v", id, err)
+			return false, err
+		}
 	}
-	if err != nil {
-		log.Printf("[ERROR] FS Exists: failed to stat pending channel content for %s: %v", id, err)
-		return false, err
-	}
-	return true, nil
+	return false, nil
 }
 
 func (fs *FilesystemStore) Delete(id string) error {
@@ -573,6 +581,102 @@ func (fs *FilesystemStore) OwnsChannelWriter() bool {
 	}
 	contents, err := os.ReadFile(filepath.Join(fs.dataDir, ChannelWriterLockKey))
 	return err == nil && string(contents) == fs.writerToken
+}
+
+func (fs *FilesystemStore) WithChannelWriter(run func() error) error {
+	fs.writerMu.Lock()
+	defer fs.writerMu.Unlock()
+	if fs.writerToken == "" {
+		return ErrChannelWriterNotOwned
+	}
+	contents, err := os.ReadFile(filepath.Join(fs.dataDir, ChannelWriterLockKey))
+	if err != nil || string(contents) != fs.writerToken {
+		return ErrChannelWriterNotOwned
+	}
+	return run()
+}
+
+func (fs *FilesystemStore) ReservePasteSlug(id string) (func() error, error) {
+	if !utils.IsValidSlug(id) {
+		return nil, errUnsafeID
+	}
+	contentPath, err := safePath(fs.dataDir, id)
+	if err != nil {
+		return nil, err
+	}
+	metaPath, err := safePath(fs.dataDir, id+".json")
+	if err != nil {
+		return nil, err
+	}
+	pendingPath, err := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
+	if err != nil {
+		return nil, err
+	}
+	reservationPath, err := safePath(fs.dataDir, PasteSlugReservationPrefix+id+".lock")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(fs.dataDir, 0o755); err != nil {
+		return nil, err
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, fmt.Errorf("create paste slug reservation token: %w", err)
+	}
+	token := hex.EncodeToString(tokenBytes)
+	fs.mu.Lock()
+	for _, path := range []string{contentPath, metaPath, pendingPath} {
+		if _, err := os.Stat(path); err == nil {
+			fs.mu.Unlock()
+			return nil, ErrSlugReserved
+		} else if !os.IsNotExist(err) {
+			fs.mu.Unlock()
+			return nil, err
+		}
+	}
+	file, err := os.OpenFile(reservationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err == nil {
+		_, err = file.WriteString(token)
+	}
+	if err == nil {
+		err = file.Sync()
+	}
+	if file != nil {
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	fs.mu.Unlock()
+	if err != nil {
+		_ = os.Remove(reservationPath)
+		if os.IsExist(err) {
+			return nil, ErrSlugReserved
+		}
+		return nil, fmt.Errorf("reserve paste slug: %w", err)
+	}
+	var once sync.Once
+	var releaseErr error
+	release := func() error {
+		once.Do(func() {
+			fs.mu.Lock()
+			defer fs.mu.Unlock()
+			contents, err := os.ReadFile(reservationPath)
+			if os.IsNotExist(err) {
+				return
+			}
+			if err != nil {
+				releaseErr = err
+				return
+			}
+			if string(contents) != token {
+				releaseErr = fmt.Errorf("paste slug reservation ownership changed")
+				return
+			}
+			releaseErr = os.Remove(reservationPath)
+		})
+		return releaseErr
+	}
+	return release, nil
 }
 
 // ListPastes lists active metadata, excluding private account subdirectories.

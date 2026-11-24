@@ -12,10 +12,12 @@ import (
 // so callers can use errors.Is(err, ErrNotFound) regardless of backend.
 var ErrNotFound = errors.New("paste not found")
 var ErrSlugReserved = errors.New("paste slug is reserved for channel content")
+var ErrChannelWriterNotOwned = errors.New("channel writer lock is not owned")
 
 const ChannelContentTempPrefix = ".nclip-channel-content-"
 const ChannelWriterLockKey = ".nclip-channel-writer.lock"
 const ChannelContentReservationSuffix = ".uploading"
+const PasteSlugReservationPrefix = ".nclip-paste-slug-"
 
 // PasteStore defines the interface for paste storage backends
 type PasteStore interface {
@@ -82,4 +84,10 @@ type ChannelWriterStore interface {
 	AcquireChannelWriter() error
 	ReleaseChannelWriter() error
 	OwnsChannelWriter() bool
+	WithChannelWriter(func() error) error
+}
+
+// PasteSlugReserver atomically holds a slug across a content+metadata create.
+type PasteSlugReserver interface {
+	ReservePasteSlug(id string) (func() error, error)
 }

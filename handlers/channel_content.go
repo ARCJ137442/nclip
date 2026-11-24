@@ -306,6 +306,8 @@ func (h *ChannelHandler) ContentFinalize(c *gin.Context) {
 			release, _ := h.manager.AbortContentUpload(c.Param("id"), channelSenderKey(c), session.ID)
 			_ = h.deleteReleasedContent(release)
 			channelContentError(c, http.StatusServiceUnavailable, channels.ErrContentNotReady)
+		} else if errors.Is(err, storage.ErrSlugReserved) {
+			channelContentOperationError(c, channels.ErrContentConflict)
 		} else if errors.Is(err, channels.ErrContentClosed) {
 			channelContentOperationError(c, err)
 		} else if errors.Is(err, errShareArchive) {

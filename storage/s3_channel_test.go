@@ -49,6 +49,22 @@ func TestS3PendingFinalizeIsSweptAndWriterLockIsExclusive(t *testing.T) {
 	if err := second.AcquireChannelWriter(); err == nil {
 		t.Fatal("second S3 store acquired an already-held writer lock")
 	}
+	releaseSlug, err := first.ReservePasteSlug("RSV52")
+	if err != nil {
+		t.Fatalf("reserve S3 paste slug: %v", err)
+	}
+	if exists, err := second.Exists("RSV52"); err != nil || !exists {
+		t.Fatalf("S3 slug reservation not visible to peer: exists=%t err=%v", exists, err)
+	}
+	if _, err := second.ReservePasteSlug("RSV52"); !errors.Is(err, ErrSlugReserved) {
+		t.Fatalf("second S3 store acquired reserved slug: %v", err)
+	}
+	if err := releaseSlug(); err != nil {
+		t.Fatalf("release S3 paste slug: %v", err)
+	}
+	if exists, err := second.Exists("RSV52"); err != nil || exists {
+		t.Fatalf("released S3 slug remains occupied: exists=%t err=%v", exists, err)
+	}
 
 	if err := first.StoreChannelContentStream("ARPH5", bytes.NewReader([]byte("orphan")), int64(len("orphan"))); err != nil {
 		t.Fatalf("store pending finalize content: %v", err)
@@ -79,20 +95,14 @@ func TestS3PendingFinalizeIsSweptAndWriterLockIsExclusive(t *testing.T) {
 	if err := first.StoreContentStream("CLD52", bytes.NewReader([]byte("ordinary-share")), int64(len("ordinary-share"))); !errors.Is(err, ErrSlugReserved) {
 		t.Fatalf("ordinary S3 upload reused a pending slug: %v", err)
 	}
-	if err := first.Delete("CLD52"); err != nil {
-		t.Fatalf("clear pending slug fixture: %v", err)
-	}
-	if err := first.StoreContentStream("CLD52", bytes.NewReader([]byte("ordinary-share")), int64(len("ordinary-share"))); err != nil {
-		t.Fatalf("store ordinary S3 collision content: %v", err)
-	}
+	// Model an older/independent writer that passed the previous existence
+	// check before the channel pending object appeared.
+	objects.mu.Lock()
+	objects.objects["channels/CLD52"] = []byte("ordinary-share")
+	objects.mu.Unlock()
 	if err := first.Store(&models.Paste{ID: "CLD52", CreatedAt: time.Now(), ExpiresAt: &expires, Size: int64(len("ordinary-share")), ContentType: "text/plain"}); err != nil {
 		t.Fatalf("store ordinary S3 collision metadata: %v", err)
 	}
-	// Model a stale/in-flight channel marker whose slug was chosen before the
-	// ordinary share committed its metadata.
-	objects.mu.Lock()
-	objects.objects["channels/"+ChannelContentTempPrefix+"CLD52.pending"] = []byte("pending")
-	objects.mu.Unlock()
 	if err := first.SweepPendingChannelContent(); err != nil {
 		t.Fatalf("sweep pending finalize content: %v", err)
 	}

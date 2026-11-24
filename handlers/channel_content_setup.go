@@ -95,6 +95,15 @@ func (h *ChannelHandler) cleanupExpiredEphemeral(now time.Time) {
 	if !h.ContentJanitorReady() {
 		return
 	}
+	if err := h.channelWriter.WithChannelWriter(func() error {
+		h.cleanupExpiredEphemeralOwned(now)
+		return nil
+	}); err != nil {
+		log.Printf("[WARN] channel janitor could not confirm writer lock: %v", err)
+	}
+}
+
+func (h *ChannelHandler) cleanupExpiredEphemeralOwned(now time.Time) {
 	h.cleanupMu.Lock()
 	if now.Before(h.nextCleanup) {
 		h.cleanupMu.Unlock()

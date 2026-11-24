@@ -80,6 +80,7 @@
 - 临时 paste 标记为 ephemeral/channel，内部保留 168 小时孤儿兜底时间；它不进入 `expires_at` 用户响应，也不是产品 TTL。存储读取不得仅因兜底时刻删除活跃信道内容；周期清扫只有在 channel manager 确认内容不活跃后才删。进程启动先取得共享存储范围内的原子单写者锁，再清理可识别的未完成 finalize、信道 staging 与 ephemeral paste，最后采集 `F0`。finalize 在内容和 metadata 提交期间保留可识别的 pending 对象；清扫顺序必须能覆盖“内容已写、metadata 尚未写”崩溃状态。pending slug 计入普通 slug 占用；清扫仅在 metadata 确认其为 ephemeral channel paste 时删除最终 slug 内容，没有 metadata 或为普通 paste 时只清理 pending 对象。
 - 信道 manager、内容席位和全局磁盘 reservation 是进程内单写者状态；P1a 信道仅支持单进程服务。文件系统使用共享 DataDir 独占锁，S3 使用共享 prefix 条件写锁。后台 janitor 仅在锁持有并完成初始化时启动，每轮清扫前再确认锁所有权；关停需等待在途清扫结束后才能释放锁。无法取得或不支持锁时，所有信道路由 fail closed，且不得运行全局启动清扫或后台 janitor。进程崩溃遗留的锁也 fail closed；仅在确认无信道写入进程后才可人工移除。Lambda/serverless 与多实例共享存储部署不得绕过此门禁。
 - Leave/close 后如存储删除失败，按 channel 保留 pending release 并阻止该信道重新装填内容；后续 leave/close 和后台清理可重试删除，不得覆盖旧 slug 或提前释放 held 预算。
+- Paste 创建在写入 content 与 metadata 的整个区间持有共享存储范围内的 per-slug 原子 reservation；普通创建与 channel finalize 使用同一 reservation，解决 Exists 检查后的并发写入。进程崩溃遗留的 reservation 会让该 slug 保持不可用；只有确认没有该 slug 的活跃创建后才可人工移除。
 - 普通分享 metadata/content/receive、legacy slug、raw/json、meta 路径对 ephemeral 记录统一 404；管理台账不列临时内容；普通 publicShare 与 Gate 不放行临时记录。
 - 同一内容版本的 multipart boundary 稳定；响应提供 ETag、Accept-Ranges，支持 If-Range/Content-Range；Range 按完整 multipart 响应字节寻址。
 - 内容只有在 receiver seat 与有效 claim 绑定时可读。发送者撤回、kick、close 必须取消在途写出。成功写完后销毁；leave/关闭/掉线释放流程销毁临时内容。单读由独占 claim/seat 锁保证，不把“删除先于交付”写成永久不变量。

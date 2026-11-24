@@ -228,7 +228,7 @@ func (s *S3Store) ListEphemeralPastes() ([]models.Paste, error) {
 func (s *S3Store) Exists(id string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	for _, key := range []string{id + ".json", ChannelContentTempPrefix + id + ".pending", ChannelContentTempPrefix + id + ChannelContentReservationSuffix} {
+	for _, key := range []string{id, id + ".json", ChannelContentTempPrefix + id + ".pending", ChannelContentTempPrefix + id + ChannelContentReservationSuffix, PasteSlugReservationPrefix + id + ".lock"} {
 		exists, err := s.objectExists(ctx, applyS3Prefix(s.prefix, key))
 		if err != nil {
 			log.Printf("[WARN] S3 Exists: failed to check %s: %v", key, err)
@@ -239,6 +239,58 @@ func (s *S3Store) Exists(id string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (s *S3Store) ReservePasteSlug(id string) (func() error, error) {
+	if !utils.IsValidSlug(id) {
+		return nil, fmt.Errorf("invalid paste slug")
+	}
+	exists, err := s.Exists(id)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		return nil, ErrSlugReserved
+	}
+	token := make([]byte, 32)
+	if _, err := rand.Read(token); err != nil {
+		return nil, fmt.Errorf("create S3 paste slug reservation token: %w", err)
+	}
+	key := applyS3Prefix(s.prefix, PasteSlugReservationPrefix+id+".lock")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(key),
+		Body:          bytes.NewReader(token),
+		ContentLength: aws.Int64(int64(len(token))),
+		IfNoneMatch:   aws.String("*"),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "PreconditionFailed" || apiErr.ErrorCode() == "ConditionalRequestConflict") {
+			return nil, ErrSlugReserved
+		}
+		return nil, fmt.Errorf("reserve S3 paste slug: %w", err)
+	}
+	var once sync.Once
+	var releaseErr error
+	release := func() error {
+		once.Do(func() {
+			releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer releaseCancel()
+			_, releaseErr = s.client.DeleteObject(releaseCtx, &s3.DeleteObjectInput{
+				Bucket:  aws.String(s.bucket),
+				Key:     aws.String(key),
+				IfMatch: result.ETag,
+			})
+			if releaseErr != nil {
+				releaseErr = fmt.Errorf("release S3 paste slug reservation: %w", releaseErr)
+			}
+		})
+		return releaseErr
+	}
+	return release, nil
 }
 
 func (s *S3Store) objectExists(ctx context.Context, key string) (bool, error) {
@@ -382,12 +434,18 @@ func (s *S3Store) StoreChannelContentStream(id string, content io.Reader, size i
 	if !utils.IsValidSlug(id) {
 		return fmt.Errorf("invalid channel content id")
 	}
-	exists, err := s.Exists(id)
-	if err != nil {
-		return err
-	}
-	if exists {
-		return ErrSlugReserved
+	// PasteService owns the per-slug reservation for the full create transaction;
+	// check only finalization state here so the owning reservation is not rejected.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	for _, key := range []string{id + ".json", ChannelContentTempPrefix + id + ".pending", ChannelContentTempPrefix + id + ChannelContentReservationSuffix} {
+		exists, err := s.objectExists(ctx, applyS3Prefix(s.prefix, key))
+		if err != nil {
+			return err
+		}
+		if exists {
+			return ErrSlugReserved
+		}
 	}
 	contentExists, err := s.objectExistsWithTimeout(applyS3Prefix(s.prefix, id))
 	if err != nil {
@@ -397,8 +455,6 @@ func (s *S3Store) StoreChannelContentStream(id string, content io.Reader, size i
 		return ErrSlugReserved
 	}
 	reservationKey := applyS3Prefix(s.prefix, ChannelContentTempPrefix+id+ChannelContentReservationSuffix)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(reservationKey),
@@ -607,6 +663,24 @@ func (s *S3Store) OwnsChannelWriter() bool {
 		Key:    aws.String(applyS3Prefix(s.prefix, ChannelWriterLockKey)),
 	})
 	return err == nil && result.ETag != nil && *result.ETag == *s.writerETag
+}
+
+func (s *S3Store) WithChannelWriter(run func() error) error {
+	s.writerMu.Lock()
+	defer s.writerMu.Unlock()
+	if !s.writerHeld || s.writerETag == nil {
+		return ErrChannelWriterNotOwned
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	result, err := s.client.HeadObject(ctx, &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(applyS3Prefix(s.prefix, ChannelWriterLockKey)),
+	})
+	cancel()
+	if err != nil || result.ETag == nil || *result.ETag != *s.writerETag {
+		return ErrChannelWriterNotOwned
+	}
+	return run()
 }
 
 func (s *S3Store) GetContent(id string) ([]byte, error) {

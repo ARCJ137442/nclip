@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log"
 	"sync"
 	"time"
 
@@ -172,6 +173,17 @@ func (s *PasteService) CreatePasteStream(req CreatePasteStreamRequest) (*CreateP
 		if err != nil {
 			return nil, fmt.Errorf("failed to generate slug: %w", err)
 		}
+	}
+	if reserver, ok := s.store.(storage.PasteSlugReserver); ok {
+		release, err := reserver.ReservePasteSlug(slug)
+		if err != nil {
+			return nil, fmt.Errorf("failed to reserve paste slug: %w", err)
+		}
+		defer func() {
+			if err := release(); err != nil {
+				log.Printf("[WARN] failed to release paste slug reservation: %v", err)
+			}
+		}()
 	}
 
 	createdAt := time.Now()

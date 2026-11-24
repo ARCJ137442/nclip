@@ -336,6 +336,10 @@ func (h *SharesHandler) Create(c *gin.Context) {
 	}
 	resp, err := h.createStoredShare(u, ttl, burn, visibility == "public", "")
 	if err != nil {
+		if errors.Is(err, storage.ErrSlugReserved) {
+			shareError(c, http.StatusConflict, "slug_unavailable")
+			return
+		}
 		if errors.Is(err, errShareArchive) {
 			shareError(c, 500, "archive_failed")
 			return

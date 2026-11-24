@@ -1430,10 +1430,9 @@ func TestPendingChannelSlugCannotBeReusedAndSweepPreservesOrdinaryShare(t *testi
 	if err := store.StoreContentStream(id, strings.NewReader("ordinary-share"), int64(len("ordinary-share"))); !errors.Is(err, storage.ErrSlugReserved) {
 		t.Fatalf("ordinary upload reused a reserved pending slug: %v", err)
 	}
-	if err := store.Delete(id); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.StoreContentStream(id, strings.NewReader("ordinary-share"), int64(len("ordinary-share"))); err != nil {
+	// Simulate an older/independent writer that had passed the pre-reservation
+	// existence check before the channel pending object appeared.
+	if err := os.WriteFile(filepath.Join(dataDir, id), []byte("ordinary-share"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	expires := time.Now().Add(time.Hour)
@@ -1441,12 +1440,6 @@ func TestPendingChannelSlugCannotBeReusedAndSweepPreservesOrdinaryShare(t *testi
 	if err := store.Store(ordinary); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate a pending marker left by a channel request that selected this
-	// slug before the ordinary upload committed its metadata.
-	if err := os.WriteFile(filepath.Join(dataDir, storage.ChannelContentTempPrefix+id+".pending"), []byte("pending"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
 	cfg := &config.Config{DataDir: dataDir, URL: "https://clip.test", BufferSize: 4 << 20, DefaultTTL: 24 * time.Hour, MaxRenderSize: 1024}
 	_ = setupRouter(store, cfg)
 	paste, err := store.Get(id)

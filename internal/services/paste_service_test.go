@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -13,6 +14,66 @@ import (
 	"github.com/johnwmail/nclip/models"
 	"github.com/johnwmail/nclip/storage"
 )
+
+type blockedPasteReader struct {
+	entered chan struct{}
+	proceed chan struct{}
+	data    []byte
+	once    sync.Once
+}
+
+func (r *blockedPasteReader) Read(p []byte) (int, error) {
+	r.once.Do(func() {
+		close(r.entered)
+		<-r.proceed
+	})
+	if len(r.data) == 0 {
+		return 0, io.EOF
+	}
+	n := copy(p, r.data)
+	r.data = r.data[n:]
+	return n, nil
+}
+
+func TestCreatePasteHoldsSlugReservationThroughMetadataCommit(t *testing.T) {
+	fs, err := storage.NewFilesystemStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewPasteService(fs, &config.Config{})
+	reader := &blockedPasteReader{entered: make(chan struct{}), proceed: make(chan struct{}), data: []byte("first")}
+	firstDone := make(chan error, 1)
+	go func() {
+		_, err := service.CreatePasteStream(CreatePasteStreamRequest{
+			Content: reader, Size: 5, Filename: "first.txt", CustomSlug: "RSV52", TTL: time.Hour,
+		})
+		firstDone <- err
+	}()
+	select {
+	case <-reader.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first create did not enter its content write")
+	}
+	if err := service.ValidateCustomSlug("RSV52"); err == nil {
+		t.Fatal("second create accepted a slug reserved by an in-flight first create")
+	}
+	if _, err := fs.ReservePasteSlug("RSV52"); !errors.Is(err, storage.ErrSlugReserved) {
+		t.Fatalf("competing reservation did not lose the slug race: %v", err)
+	}
+	close(reader.proceed)
+	select {
+	case err := <-firstDone:
+		if err != nil {
+			t.Fatalf("first create failed: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("first create did not complete after content was released")
+	}
+	content, err := fs.GetContent("RSV52")
+	if err != nil || string(content) != "first" {
+		t.Fatalf("committed first paste = %q err=%v", content, err)
+	}
+}
 
 func TestReadPasteStreamDoesNotConsumeOnCallbackFailure(t *testing.T) {
 	fs, err := storage.NewFilesystemStore(t.TempDir())

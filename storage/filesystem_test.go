@@ -45,6 +45,35 @@ func TestNewFilesystemStore_CreatesDataDir(t *testing.T) {
 	}
 }
 
+func TestPasteSlugReservationIsAtomicAcrossFilesystemStores(t *testing.T) {
+	dir := t.TempDir()
+	first, err := NewFilesystemStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := NewFilesystemStore(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close(); _ = second.Close() }()
+	release, err := first.ReservePasteSlug("RSV52")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := second.Exists("RSV52"); err != nil || !exists {
+		t.Fatalf("active slug reservation not visible to peer: exists=%t err=%v", exists, err)
+	}
+	if _, err := second.ReservePasteSlug("RSV52"); err != ErrSlugReserved {
+		t.Fatalf("second store acquired reserved slug: %v", err)
+	}
+	if err := release(); err != nil {
+		t.Fatal(err)
+	}
+	if exists, err := second.Exists("RSV52"); err != nil || exists {
+		t.Fatalf("released slug remains occupied: exists=%t err=%v", exists, err)
+	}
+}
+
 func TestFilesystemStore_StoreAndGet_LocalFS(t *testing.T) {
 	// Ensure testdata directory exists
 	if err := os.MkdirAll("./testdata", 0o755); err != nil {
