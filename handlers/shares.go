@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"archive/zip"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
@@ -499,6 +500,10 @@ type storedShare struct {
 }
 
 func openStoredShare(m *models.ShareManifest, file *spool.File) (*storedShare, error) {
+	return openStoredShareContext(context.Background(), m, file)
+}
+
+func openStoredShareContext(ctx context.Context, m *models.ShareManifest, file *spool.File) (*storedShare, error) {
 	stored := &storedShare{file: file}
 	if m.Encoding == "raw" {
 		if len(m.Items) != 1 || len(m.Items[0].Parts) != 1 || m.Items[0].Parts[0].Size != file.Size {
@@ -528,7 +533,7 @@ func openStoredShare(m *models.ShareManifest, file *spool.File) (*storedShare, e
 			if err != nil {
 				return nil, err
 			}
-			_, copyErr := io.Copy(io.Discard, reader)
+			_, copyErr := io.Copy(io.Discard, contextReader{ctx: ctx, source: reader})
 			closeErr := reader.Close()
 			if copyErr != nil || closeErr != nil {
 				return nil, fmt.Errorf("invalid_archive")
@@ -576,6 +581,10 @@ func writeStoredSharePart(mw *multipart.Writer, stored *storedShare, part models
 // file. Range serving and one-time delivery can then both use exact bytes
 // without holding the payload in memory.
 func prepareShareResponse(dir, boundary string, p *models.Paste, manifest []byte, m models.ShareManifest, stored *storedShare) (*spool.File, error) {
+	return prepareShareResponseContext(context.Background(), dir, boundary, p, manifest, m, stored)
+}
+
+func prepareShareResponseContext(ctx context.Context, dir, boundary string, p *models.Paste, manifest []byte, m models.ShareManifest, stored *storedShare) (*spool.File, error) {
 	file, err := os.CreateTemp(dir, "nclip-share-response-*")
 	if err != nil {
 		return nil, err
@@ -588,7 +597,7 @@ func prepareShareResponse(dir, boundary string, p *models.Paste, manifest []byte
 			_ = os.Remove(path)
 		}
 	}()
-	if err := writeShareMultipart(file, boundary, p, manifest, m, stored); err != nil {
+	if err := writeShareMultipart(contextWriter{ctx: ctx, destination: file}, boundary, p, manifest, m, stored); err != nil {
 		return nil, err
 	}
 	info, err := file.Stat()

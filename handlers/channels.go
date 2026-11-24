@@ -18,6 +18,7 @@ import (
 
 const senderCookieName = "nclip_sender_key"
 const seatTokenHeader = "X-Nclip-Seat-Token"
+const claimTokenHeader = "X-Nclip-Claim-Token"
 
 var errChannelCreateThrottled = errors.New("channel_create_throttled")
 
@@ -86,7 +87,7 @@ func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *
 		joinIPWindows:      make(map[string]createWindowState),
 		joinChannelWindows: make(map[string]createWindowState),
 		contentChunkSlots:  make(chan struct{}, maxConcurrentChannelChunks),
-		janitorInterval:    channelOrphanSweepInterval,
+		janitorInterval:    channelLivenessSweepInterval,
 	}
 }
 
@@ -146,7 +147,7 @@ func (h *ChannelHandler) Gate() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		if path == "/api/v1/channels/:id/admit" || path == "/api/v1/channels/:id/heartbeat" {
+		if path == "/api/v1/channels/:id/admit" || path == "/api/v1/channels/:id/heartbeat" || path == "/api/v1/channels/:id/kick" {
 			if c.Request.Method != http.MethodPost {
 				c.AbortWithStatus(http.StatusMethodNotAllowed)
 				return
@@ -235,6 +236,9 @@ func channelContentPath(path string) bool {
 }
 
 func (h *ChannelHandler) authorizeContent(c *gin.Context, path string) bool {
+	if path == "/api/v1/channels/:id/content" && c.Request.Method == http.MethodGet {
+		return h.authorizeContentRead(c)
+	}
 	method := http.MethodPost
 	if path == "/api/v1/channels/:id/content/:uploadID/parts/:partKey" {
 		method = http.MethodPut
@@ -275,6 +279,42 @@ func (h *ChannelHandler) authorizeContent(c *gin.Context, path string) bool {
 	}
 	if !h.accounts.csrf(c, session) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "csrf_failed"})
+		return false
+	}
+	return true
+}
+
+func (h *ChannelHandler) authorizeContentRead(c *gin.Context) bool {
+	if !h.sameOrigin(c) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "cross_origin_denied"})
+		return false
+	}
+	record, ok := h.manager.Get(c.Param("id"))
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": channels.ErrChannelNotFound.Error()})
+		return false
+	}
+	if h.accounts != nil {
+		user, _, authenticated := h.accounts.requestUser(c)
+		if c.IsAborted() {
+			return false
+		}
+		if authenticated {
+			c.Set(accountContext, user)
+		}
+		if record.Visibility != channels.VisibilityPublic {
+			if !authenticated {
+				h.accounts.loginRequired(c)
+				return false
+			}
+			if !user.Permissions.Download {
+				h.accounts.forbidden(c)
+				return false
+			}
+		}
+	}
+	if c.GetHeader(seatTokenHeader) == "" || c.GetHeader(claimTokenHeader) == "" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": channels.ErrUnauthorized.Error()})
 		return false
 	}
 	return true
@@ -605,6 +645,7 @@ func (h *ChannelHandler) Status(c *gin.Context) {
 			"state":         record.State,
 			"seat_state":    record.Seat.State,
 			"pending_until": record.Seat.PendingUntil,
+			"content_state": record.ContentState,
 		})
 		return
 	}
@@ -617,6 +658,7 @@ func (h *ChannelHandler) Status(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
 			"state":         record.State,
 			"sender_online": record.SenderOnline,
+			"content_state": record.ContentState,
 			"seat":          record.Seat,
 		})
 		return

@@ -290,9 +290,11 @@ func setupRouterWithChannels(store storage.PasteStore, cfg *config.Config) (*gin
 	router.DELETE("/api/v1/channels/:id", channelHandler.Close)
 	router.POST("/api/v1/channels/:id/join", channelHandler.Join)
 	router.POST("/api/v1/channels/:id/admit", channelHandler.Admit)
+	router.POST("/api/v1/channels/:id/kick", channelHandler.Kick)
 	router.POST("/api/v1/channels/:id/heartbeat", channelHandler.Heartbeat)
 	router.POST("/api/v1/channels/:id/seat/heartbeat", channelHandler.SeatHeartbeat)
 	router.POST("/api/v1/channels/:id/leave", channelHandler.Leave)
+	router.GET("/api/v1/channels/:id/content", channelHandler.ContentDownload)
 	if cfg.UploadAuth && !cfg.AccountsEnabled {
 		auth := apiKeyAuth(cfg)
 		router.POST("/api/v1/channels/:id/content", auth, channelHandler.ContentInit)
@@ -464,6 +466,9 @@ func canonicalErrors() gin.HandlerFunc {
 }
 
 func streamsResponse(method, path string) bool {
+	if method == http.MethodGet && strings.HasPrefix(path, "/api/v1/channels/") && strings.HasSuffix(path, "/content") {
+		return true
+	}
 	if strings.HasPrefix(path, "/api/v1/shares/") &&
 		(strings.HasSuffix(path, "/content") || strings.HasSuffix(path, "/receive")) {
 		return true

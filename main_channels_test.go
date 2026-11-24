@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -523,6 +524,43 @@ func channelRequestWithCookies(router http.Handler, method, path string, body []
 	response := httptest.NewRecorder()
 	router.ServeHTTP(response, request)
 	return response
+}
+
+type kickInterruptWriter struct {
+	header     http.Header
+	started    chan struct{}
+	unblocked  chan struct{}
+	startedOne sync.Once
+	stopOne    sync.Once
+	status     int
+}
+
+func newKickInterruptWriter() *kickInterruptWriter {
+	return &kickInterruptWriter{header: make(http.Header), started: make(chan struct{}), unblocked: make(chan struct{})}
+}
+
+func (w *kickInterruptWriter) Header() http.Header    { return w.header }
+func (w *kickInterruptWriter) WriteHeader(status int) { w.status = status }
+func (w *kickInterruptWriter) Flush()                 {}
+func (w *kickInterruptWriter) SetWriteDeadline(deadline time.Time) error {
+	if !deadline.IsZero() {
+		w.stopOne.Do(func() { close(w.unblocked) })
+	}
+	return nil
+}
+func (w *kickInterruptWriter) Write([]byte) (int, error) {
+	w.startedOne.Do(func() { close(w.started) })
+	<-w.unblocked
+	return 0, errors.New("response interrupted by sender")
+}
+
+func (w *kickInterruptWriter) interrupted() bool {
+	select {
+	case <-w.unblocked:
+		return true
+	default:
+		return false
+	}
 }
 
 func TestAnonymousJoinAdmitStatusAndLeave(t *testing.T) {
@@ -1246,6 +1284,223 @@ func TestChannelContentAbortAndSenderCloseRemoveIncompleteStaging(t *testing.T) 
 	}
 	if leftovers, err := filepath.Glob(filepath.Join(dataDir, ".nclip-channel-upload-*")); err != nil || len(leftovers) != 0 {
 		t.Fatalf("sender close left staging data: %v %v", leftovers, err)
+	}
+}
+
+func TestChannelDeliveryRequiresClaimAndResumesMultipartRange(t *testing.T) {
+	router, store, _ := shareTestRouterWithStore(t, 8<<20, false)
+	createID, _ := channels.NewRequestID()
+	created := channelCreateRequest(router, createID, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create channel: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	senderCookie := created.Result().Cookies()[0]
+	joinID, _ := channels.NewRequestID()
+	joined := channelJoinRequest(router, channel.ID, joinID, "", nil)
+	var joinBody struct {
+		SeatToken  string `json:"seat_token"`
+		ClaimToken string `json:"claim_token"`
+	}
+	if joined.Code != http.StatusCreated || json.Unmarshal(joined.Body.Bytes(), &joinBody) != nil {
+		t.Fatalf("join: %d %s", joined.Code, joined.Body.String())
+	}
+	senderStatus := channelRequestWithCookie(router, http.MethodGet, "/api/v1/channels/"+channel.ID, nil, senderCookie, nil)
+	var senderState struct {
+		Seat *channels.SeatInfo `json:"seat"`
+	}
+	if senderStatus.Code != http.StatusOK || json.Unmarshal(senderStatus.Body.Bytes(), &senderState) != nil || senderState.Seat == nil {
+		t.Fatalf("sender status: %d %s", senderStatus.Code, senderStatus.Body.String())
+	}
+	decisionID, _ := channels.NewRequestID()
+	decisionBody, _ := json.Marshal(map[string]string{"seat_id": senderState.Seat.SeatID, "decision": "admit"})
+	decision := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", decisionBody, senderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": decisionID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	if decision.Code != http.StatusOK {
+		t.Fatalf("admit: %d %s", decision.Code, decision.Body.String())
+	}
+
+	payload := []byte("range-bound-payload")
+	manifest := models.ShareManifest{Version: 1, Items: []models.ShareItem{{
+		Kind: "file", Name: "payload.txt", Parts: []models.SharePart{{Key: "part1", MIME: "text/plain", Size: int64(len(payload))}},
+	}}}
+	manifestBody, _ := json.Marshal(gin.H{"manifest": manifest})
+	initID, _ := channels.NewRequestID()
+	contentPath := "/api/v1/channels/" + channel.ID + "/content"
+	init := channelRequestWithCookie(router, http.MethodPost, contentPath, manifestBody, senderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": initID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	var initBody struct {
+		UploadID string `json:"upload_id"`
+	}
+	if init.Code != http.StatusCreated || json.Unmarshal(init.Body.Bytes(), &initBody) != nil {
+		t.Fatalf("content init: %d %s", init.Code, init.Body.String())
+	}
+	chunkHash := sha256.Sum256(payload)
+	chunkPath := contentPath + "/" + initBody.UploadID + "/parts/part1"
+	chunk := channelRequestWithCookie(router, http.MethodPut, chunkPath, payload, senderCookie, map[string]string{
+		"Upload-Offset": "0", "X-Chunk-SHA256": hex.EncodeToString(chunkHash[:]), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	if chunk.Code != http.StatusNoContent {
+		t.Fatalf("content chunk: %d %s", chunk.Code, chunk.Body.String())
+	}
+	finalizeID, _ := channels.NewRequestID()
+	finalize := channelRequestWithCookie(router, http.MethodPost, contentPath+"/"+initBody.UploadID+"/finalize", nil, senderCookie, map[string]string{
+		"Idempotency-Key": finalizeID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	if finalize.Code != http.StatusCreated {
+		t.Fatalf("finalize: %d %s", finalize.Code, finalize.Body.String())
+	}
+
+	download := func(rangeHeader, ifRange, claimToken string) *httptest.ResponseRecorder {
+		headers := map[string]string{
+			"X-Nclip-Seat-Token":  joinBody.SeatToken,
+			"X-Nclip-Claim-Token": claimToken,
+			"Origin":              "https://clip.test",
+			"Sec-Fetch-Site":      "same-origin",
+		}
+		if rangeHeader != "" {
+			headers["Range"] = rangeHeader
+		}
+		if ifRange != "" {
+			headers["If-Range"] = ifRange
+		}
+		return channelRequestWithCookies(router, http.MethodGet, contentPath, nil, nil, headers)
+	}
+	if response := download("", "", "wrong-claim"); response.Code != http.StatusForbidden {
+		t.Fatalf("wrong claim token read = %d %s", response.Code, response.Body.String())
+	}
+	if response := download("bytes=8-", "", joinBody.ClaimToken); response.Code != http.StatusConflict {
+		t.Fatalf("range skipped bytes not yet delivered = %d %s", response.Code, response.Body.String())
+	}
+	first := download("bytes=0-63", "", joinBody.ClaimToken)
+	if first.Code != http.StatusPartialContent {
+		t.Fatalf("first range: %d %s", first.Code, first.Body.String())
+	}
+	etag := first.Header().Get("ETag")
+	contentRange := first.Header().Get("Content-Range")
+	var start, end, total int
+	if _, err := fmt.Sscanf(contentRange, "bytes %d-%d/%d", &start, &end, &total); err != nil || start != 0 || end != 63 || total <= end || etag == "" || first.Header().Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("invalid first range response: range=%q etag=%q headers=%v err=%v", contentRange, etag, first.Header(), err)
+	}
+	second := download("bytes=64-", etag, joinBody.ClaimToken)
+	if second.Code != http.StatusPartialContent || int64(len(first.Body.Bytes())+len(second.Body.Bytes())) != int64(total) {
+		t.Fatalf("resumed range: status=%d bytes=%d+%d total=%d body=%s", second.Code, first.Body.Len(), second.Body.Len(), total, second.Body.String())
+	}
+	fullBody := append(append([]byte(nil), first.Body.Bytes()...), second.Body.Bytes()...)
+	if !bytes.Contains(fullBody, payload) {
+		t.Fatal("multipart range round trip lost the original payload")
+	}
+	if remaining, err := store.ListEphemeralPastes(); err != nil || len(remaining) != 0 {
+		t.Fatalf("completed delivery retained ephemeral content: remaining=%d err=%v", len(remaining), err)
+	}
+}
+
+func TestChannelKickInterruptsActiveContentResponse(t *testing.T) {
+	router, store, _ := shareTestRouterWithStore(t, 8<<20, false)
+	createID, _ := channels.NewRequestID()
+	created := channelCreateRequest(router, createID, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create channel: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	senderCookie := created.Result().Cookies()[0]
+	joinID, _ := channels.NewRequestID()
+	joined := channelJoinRequest(router, channel.ID, joinID, "", nil)
+	var joinBody struct {
+		SeatToken  string `json:"seat_token"`
+		ClaimToken string `json:"claim_token"`
+	}
+	if joined.Code != http.StatusCreated || json.Unmarshal(joined.Body.Bytes(), &joinBody) != nil {
+		t.Fatalf("join: %d %s", joined.Code, joined.Body.String())
+	}
+	senderStatus := channelRequestWithCookie(router, http.MethodGet, "/api/v1/channels/"+channel.ID, nil, senderCookie, nil)
+	var senderState struct {
+		Seat *channels.SeatInfo `json:"seat"`
+	}
+	if senderStatus.Code != http.StatusOK || json.Unmarshal(senderStatus.Body.Bytes(), &senderState) != nil || senderState.Seat == nil {
+		t.Fatalf("sender status: %d %s", senderStatus.Code, senderStatus.Body.String())
+	}
+	decisionID, _ := channels.NewRequestID()
+	decisionBody, _ := json.Marshal(map[string]string{"seat_id": senderState.Seat.SeatID, "decision": "admit"})
+	decision := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", decisionBody, senderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": decisionID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	if decision.Code != http.StatusOK {
+		t.Fatalf("admit: %d %s", decision.Code, decision.Body.String())
+	}
+
+	payload := bytes.Repeat([]byte("kick-me"), 2048)
+	manifest := models.ShareManifest{Version: 1, Items: []models.ShareItem{{
+		Kind: "file", Name: "payload.txt", Parts: []models.SharePart{{Key: "part1", MIME: "text/plain", Size: int64(len(payload))}},
+	}}}
+	contentPath := "/api/v1/channels/" + channel.ID + "/content"
+	manifestBody, _ := json.Marshal(gin.H{"manifest": manifest})
+	initID, _ := channels.NewRequestID()
+	init := channelRequestWithCookie(router, http.MethodPost, contentPath, manifestBody, senderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": initID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	var initBody struct {
+		UploadID string `json:"upload_id"`
+	}
+	if init.Code != http.StatusCreated || json.Unmarshal(init.Body.Bytes(), &initBody) != nil {
+		t.Fatalf("init: %d %s", init.Code, init.Body.String())
+	}
+	hash := sha256.Sum256(payload)
+	chunk := channelRequestWithCookie(router, http.MethodPut, contentPath+"/"+initBody.UploadID+"/parts/part1", payload, senderCookie, map[string]string{
+		"Upload-Offset": "0", "X-Chunk-SHA256": hex.EncodeToString(hash[:]), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	if chunk.Code != http.StatusNoContent {
+		t.Fatalf("chunk: %d %s", chunk.Code, chunk.Body.String())
+	}
+	finalizeID, _ := channels.NewRequestID()
+	finalize := channelRequestWithCookie(router, http.MethodPost, contentPath+"/"+initBody.UploadID+"/finalize", nil, senderCookie, map[string]string{
+		"Idempotency-Key": finalizeID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	if finalize.Code != http.StatusCreated {
+		t.Fatalf("finalize: %d %s", finalize.Code, finalize.Body.String())
+	}
+
+	writer := newKickInterruptWriter()
+	get := httptest.NewRequest(http.MethodGet, contentPath, nil)
+	get.Header.Set("X-Nclip-Seat-Token", joinBody.SeatToken)
+	get.Header.Set("X-Nclip-Claim-Token", joinBody.ClaimToken)
+	get.Header.Set("Origin", "https://clip.test")
+	get.Header.Set("Sec-Fetch-Site", "same-origin")
+	getDone := make(chan struct{})
+	go func() {
+		router.ServeHTTP(writer, get)
+		close(getDone)
+	}()
+	select {
+	case <-writer.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("content response did not begin writing")
+	}
+	select {
+	case <-getDone:
+		t.Fatal("content response finished before the sender action")
+	default:
+	}
+	if get.Context().Err() != nil || writer.interrupted() {
+		t.Fatalf("response stopped before sender kick: request context=%v writer interrupted=%t", get.Context().Err(), writer.interrupted())
+	}
+	kickID, _ := channels.NewRequestID()
+	kickBody, _ := json.Marshal(map[string]string{"seat_id": senderState.Seat.SeatID})
+	kick := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/kick", kickBody, senderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": kickID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	if kick.Code != http.StatusNoContent {
+		t.Fatalf("kick: %d %s", kick.Code, kick.Body.String())
+	}
+	select {
+	case <-getDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("sender kick did not interrupt the active response")
+	}
+	if remaining, err := store.ListEphemeralPastes(); err != nil || len(remaining) != 0 {
+		t.Fatalf("kick left temporary content: remaining=%d err=%v", len(remaining), err)
 	}
 }
 
