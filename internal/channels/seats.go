@@ -54,6 +54,7 @@ type decisionResult struct {
 
 type leaveResult struct {
 	seatHash  [sha256.Size]byte
+	release   ContentRelease
 	expiresAt time.Time
 }
 
@@ -271,37 +272,53 @@ func (m *Manager) SeatAuthorized(id, seatToken string) bool {
 }
 
 func (m *Manager) Leave(id, requestID, seatToken string, now time.Time) error {
+	release, err := m.LeaveWithContent(id, requestID, seatToken, now)
+	m.CleanupContentRelease(release)
+	return err
+}
+
+func (m *Manager) LeaveWithContent(id, requestID, seatToken string, now time.Time) (ContentRelease, error) {
 	if !ValidRequestID(requestID) {
-		return ErrInvalidRequestID
+		return ContentRelease{}, ErrInvalidRequestID
 	}
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.pruneSeatRecordsLocked(now)
 	key := leaveKey(id, requestID)
 	tokenHash := sha256.Sum256([]byte(seatToken))
 	if prior, ok := m.leaves[key]; ok {
 		if subtle.ConstantTimeCompare(prior.seatHash[:], tokenHash[:]) != 1 {
-			return ErrIdempotencyConflict
+			m.mu.Unlock()
+			return ContentRelease{}, ErrIdempotencyConflict
 		}
-		return nil
+		m.mu.Unlock()
+		return prior.release, nil
 	}
 	record, ok := m.channels[id]
 	if !ok {
-		return nil
+		m.mu.Unlock()
+		return ContentRelease{}, nil
 	}
 	if record.seat == nil {
-		return nil
+		m.mu.Unlock()
+		return ContentRelease{}, nil
 	}
 	if !matchHash(record.seat.seatHash, seatToken) {
-		return ErrUnauthorized
+		m.mu.Unlock()
+		return ContentRelease{}, ErrUnauthorized
 	}
 	if len(m.leaves) >= MaxJoinRecords {
-		return ErrCapacity
+		m.mu.Unlock()
+		return ContentRelease{}, ErrCapacity
 	}
-	m.leaves[key] = leaveResult{seatHash: tokenHash, expiresAt: now.Add(JoinReplayRetention)}
+	release := m.detachContentLocked(&record)
 	m.releaseSeatLocked(&record, "left", now)
 	m.channels[id] = record
-	return nil
+	if release.Slug != "" {
+		m.pendingContentReleases[id] = release
+	}
+	m.leaves[key] = leaveResult{seatHash: tokenHash, release: release, expiresAt: now.Add(JoinReplayRetention)}
+	m.mu.Unlock()
+	return release, nil
 }
 
 func (m *Manager) Decide(id, senderKey, seatID, requestID, decision string, now time.Time) (DecisionResult, error) {

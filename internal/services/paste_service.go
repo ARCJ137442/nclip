@@ -2,6 +2,7 @@ package services
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
@@ -23,6 +24,10 @@ type PasteService struct {
 	consumeLocks [256]sync.Mutex
 }
 
+// ChannelOrphanTTL is a private crash-cleanup bound for temporary channel
+// content. Active channel content is exempt; this is not a product TTL.
+const ChannelOrphanTTL = 168 * time.Hour
+
 // NewPasteService creates a new paste service
 func NewPasteService(store storage.PasteStore, config *config.Config) *PasteService {
 	return &PasteService{
@@ -33,35 +38,39 @@ func NewPasteService(store storage.PasteStore, config *config.Config) *PasteServ
 
 // CreatePasteRequest represents a request to create a paste
 type CreatePasteRequest struct {
-	Content       []byte
-	Filename      string
-	ContentType   string
-	CustomSlug    string
-	BurnAfterRead bool
-	TTL           time.Duration
-	Share         *models.ShareManifest
-	Public        bool
+	Content            []byte
+	Filename           string
+	ContentType        string
+	CustomSlug         string
+	BurnAfterRead      bool
+	TTL                time.Duration
+	Share              *models.ShareManifest
+	Public             bool
+	EphemeralChannelID string
 }
 
 // CreatePasteStreamRequest is the bounded-memory form of CreatePasteRequest.
 type CreatePasteStreamRequest struct {
-	Content       io.Reader
-	Size          int64
-	ContentPrefix []byte
-	Filename      string
-	ContentType   string
-	CustomSlug    string
-	BurnAfterRead bool
-	TTL           time.Duration
-	Share         *models.ShareManifest
-	Public        bool
+	Content            io.Reader
+	Size               int64
+	ContentPrefix      []byte
+	Filename           string
+	ContentType        string
+	CustomSlug         string
+	BurnAfterRead      bool
+	TTL                time.Duration
+	Share              *models.ShareManifest
+	Public             bool
+	EphemeralChannelID string
 }
 
 // CreatePasteResponse represents the response from creating a paste
 type CreatePasteResponse struct {
-	Slug      string
-	URL       string
-	ExpiresAt time.Time
+	Slug         string
+	URL          string
+	ExpiresAt    time.Time
+	Size         int64
+	MetadataSize int64
 }
 
 // GenerateSlug generates a unique slug for a paste
@@ -85,7 +94,10 @@ func (s *PasteService) GenerateSlug() (string, error) {
 			}
 			// exists, check if expired
 			existing, err := s.store.Get(candidate)
-			if err != nil || existing == nil || existing.IsExpired() {
+			if err != nil {
+				continue
+			}
+			if existing == nil || !existing.IsEphemeral() && existing.IsExpired() {
 				slug = candidate
 				return slug, nil
 			}
@@ -109,7 +121,7 @@ func (s *PasteService) ValidateCustomSlug(slug string) error {
 		if err != nil {
 			return fmt.Errorf("failed to retrieve existing paste: %w", err)
 		}
-		if existing != nil && !existing.IsExpired() {
+		if existing != nil && (existing.IsEphemeral() || !existing.IsExpired()) {
 			return fmt.Errorf("slug already exists")
 		}
 	}
@@ -119,16 +131,17 @@ func (s *PasteService) ValidateCustomSlug(slug string) error {
 // CreatePaste creates a new paste
 func (s *PasteService) CreatePaste(req CreatePasteRequest) (*CreatePasteResponse, error) {
 	return s.CreatePasteStream(CreatePasteStreamRequest{
-		Content:       bytes.NewReader(req.Content),
-		Size:          int64(len(req.Content)),
-		ContentPrefix: req.Content,
-		Filename:      req.Filename,
-		ContentType:   req.ContentType,
-		CustomSlug:    req.CustomSlug,
-		BurnAfterRead: req.BurnAfterRead,
-		TTL:           req.TTL,
-		Share:         req.Share,
-		Public:        req.Public,
+		Content:            bytes.NewReader(req.Content),
+		Size:               int64(len(req.Content)),
+		ContentPrefix:      req.Content,
+		Filename:           req.Filename,
+		ContentType:        req.ContentType,
+		CustomSlug:         req.CustomSlug,
+		BurnAfterRead:      req.BurnAfterRead,
+		TTL:                req.TTL,
+		Share:              req.Share,
+		Public:             req.Public,
+		EphemeralChannelID: req.EphemeralChannelID,
 	})
 }
 
@@ -139,6 +152,12 @@ func (s *PasteService) CreatePasteStream(req CreatePasteStreamRequest) (*CreateP
 	}
 	if req.Size < 0 {
 		return nil, fmt.Errorf("invalid content size: %d", req.Size)
+	}
+	if req.EphemeralChannelID != "" {
+		if req.Public || req.BurnAfterRead {
+			return nil, fmt.Errorf("invalid ephemeral paste policy")
+		}
+		req.TTL = ChannelOrphanTTL
 	}
 	var slug string
 	var err error
@@ -163,19 +182,38 @@ func (s *PasteService) CreatePasteStream(req CreatePasteStreamRequest) (*CreateP
 		contentType = utils.DetectContentType(req.Filename, req.ContentPrefix)
 	}
 	paste := &models.Paste{
-		ID:            slug,
-		CreatedAt:     createdAt,
-		ExpiresAt:     &expiresAt,
-		Size:          req.Size,
-		ContentType:   contentType,
-		BurnAfterRead: req.BurnAfterRead,
-		ReadCount:     0,
-		Share:         req.Share,
-		Public:        req.Public,
+		ID:                 slug,
+		CreatedAt:          createdAt,
+		ExpiresAt:          &expiresAt,
+		Size:               req.Size,
+		ContentType:        contentType,
+		BurnAfterRead:      req.BurnAfterRead,
+		ReadCount:          0,
+		Share:              req.Share,
+		Public:             req.Public,
+		EphemeralChannelID: req.EphemeralChannelID,
+	}
+	var metadataSize int64
+	if paste.IsEphemeral() {
+		metadata, err := json.MarshalIndent(paste, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("failed to encode paste metadata: %w", err)
+		}
+		metadataSize = int64(len(metadata))
 	}
 
-	if err := s.store.StoreContentStream(slug, req.Content, req.Size); err != nil {
-		return nil, fmt.Errorf("failed to store content: %w", err)
+	var storeErr error
+	if req.EphemeralChannelID != "" {
+		if channelStore, ok := s.store.(storage.ChannelContentStore); ok {
+			storeErr = channelStore.StoreChannelContentStream(slug, req.Content, req.Size)
+		} else {
+			storeErr = s.store.StoreContentStream(slug, req.Content, req.Size)
+		}
+	} else {
+		storeErr = s.store.StoreContentStream(slug, req.Content, req.Size)
+	}
+	if storeErr != nil {
+		return nil, fmt.Errorf("failed to store content: %w", storeErr)
 	}
 	if err := s.store.Store(paste); err != nil {
 		if cleanupErr := s.store.Delete(slug); cleanupErr != nil {
@@ -185,9 +223,11 @@ func (s *PasteService) CreatePasteStream(req CreatePasteStreamRequest) (*CreateP
 	}
 
 	return &CreatePasteResponse{
-		Slug:      slug,
-		URL:       "", // Will be set by handler based on request context
-		ExpiresAt: expiresAt,
+		Slug:         slug,
+		URL:          "", // Will be set by handler based on request context
+		ExpiresAt:    expiresAt,
+		Size:         req.Size,
+		MetadataSize: metadataSize,
 	}, nil
 }
 
@@ -255,7 +295,7 @@ func (s *PasteService) GetPaste(slug string) (*models.Paste, error) {
 	if paste == nil {
 		return nil, storage.ErrNotFound
 	}
-	if paste.IsExpired() {
+	if paste.IsExpired() && !paste.IsEphemeral() {
 		// Log a warning that an expired paste was requested and attempt deletion.
 		// We keep returning not-found semantics (handlers will map to 404) but
 		// emit a WARN so the event is visible in logs.

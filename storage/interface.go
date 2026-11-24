@@ -12,6 +12,8 @@ import (
 // so callers can use errors.Is(err, ErrNotFound) regardless of backend.
 var ErrNotFound = errors.New("paste not found")
 
+const ChannelContentTempPrefix = ".nclip-channel-content-"
+
 // PasteStore defines the interface for paste storage backends
 type PasteStore interface {
 	// Store saves a paste to the storage backend
@@ -55,4 +57,16 @@ type PasteStore interface {
 	// This is used by handlers to perform early size checks without
 	// retrieving the entire object.
 	StatContent(id string) (exists bool, size int64, err error)
+}
+
+// EphemeralPasteLister is an internal cleanup capability. Its results must
+// not be returned to user-facing management APIs.
+type EphemeralPasteLister interface {
+	ListEphemeralPastes() ([]models.Paste, error)
+}
+
+// ChannelContentStore gives unpublished channel finalization files a distinct
+// temporary prefix so startup cleanup can remove them without touching normal shares.
+type ChannelContentStore interface {
+	StoreChannelContentStream(id string, content io.Reader, size int64) error
 }

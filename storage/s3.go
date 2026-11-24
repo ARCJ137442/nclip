@@ -110,7 +110,7 @@ func (s *S3Store) Get(id string) (*models.Paste, error) {
 		log.Printf("[ERROR] S3 Get: failed to unmarshal metadata for %s: %v", id, err)
 		return nil, err
 	}
-	if paste.IsExpired() {
+	if paste.IsExpired() && !paste.IsEphemeral() {
 		log.Printf("[INFO] S3 Get: paste %s is expired", id)
 		// Attempt to delete expired objects (best-effort)
 		if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -128,6 +128,89 @@ func (s *S3Store) Get(id string) (*models.Paste, error) {
 		return nil, ErrNotFound
 	}
 	return &paste, nil
+}
+
+func (s *S3Store) readMetadata(id string) (*models.Paste, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(applyS3Prefix(s.prefix, id+".json")),
+	})
+	if err != nil {
+		var apiErr smithy.APIError
+		if errors.As(err, &apiErr) {
+			code := apiErr.ErrorCode()
+			if code == "NoSuchKey" || code == "NotFound" || code == "404" {
+				return nil, ErrNotFound
+			}
+		}
+		if strings.Contains(err.Error(), "StatusCode: 404") || strings.Contains(err.Error(), "NotFound") {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	defer obj.Body.Close()
+	data, err := io.ReadAll(obj.Body)
+	if err != nil {
+		return nil, err
+	}
+	var paste models.Paste
+	if err := json.Unmarshal(data, &paste); err != nil {
+		return nil, err
+	}
+	return &paste, nil
+}
+
+// ListEphemeralPastes is an internal cleanup scan. Ordinary listings must not
+// expose channel content.
+func (s *S3Store) ListEphemeralPastes() ([]models.Paste, error) {
+	prefix := s.prefix
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+	var token *string
+	var pastes []models.Paste
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		page, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{
+			Bucket:            aws.String(s.bucket),
+			Prefix:            aws.String(prefix),
+			ContinuationToken: token,
+		})
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("list ephemeral paste metadata: %w", err)
+		}
+		for _, object := range page.Contents {
+			if object.Key == nil {
+				continue
+			}
+			key := strings.TrimPrefix(*object.Key, prefix)
+			if strings.Contains(key, "/") || !strings.HasSuffix(key, ".json") {
+				continue
+			}
+			id := strings.TrimSuffix(key, ".json")
+			if !utils.IsValidSlug(id) {
+				continue
+			}
+			paste, err := s.readMetadata(id)
+			if errors.Is(err, ErrNotFound) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			if paste != nil && paste.IsEphemeral() {
+				pastes = append(pastes, *paste)
+			}
+		}
+		if page.IsTruncated == nil || !*page.IsTruncated || page.NextContinuationToken == nil {
+			break
+		}
+		token = page.NextContinuationToken
+	}
+	return pastes, nil
 }
 
 func (s *S3Store) Exists(id string) (bool, error) {
@@ -220,6 +303,10 @@ func (s *S3Store) StoreContentStream(id string, content io.Reader, size int64) e
 		}
 	}
 	return err
+}
+
+func (s *S3Store) StoreChannelContentStream(id string, content io.Reader, size int64) error {
+	return s.StoreContentStream(id, content, size)
 }
 
 func (s *S3Store) GetContent(id string) ([]byte, error) {

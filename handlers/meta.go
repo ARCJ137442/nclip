@@ -41,6 +41,10 @@ func (h *MetaHandler) GetMetadata(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Paste not found"})
 		return
 	}
+	if paste.IsEphemeral() {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Paste not found"})
+		return
+	}
 
 	// Return metadata without content, pretty-printed JSON
 	response := gin.H{
@@ -81,6 +85,10 @@ func (h *MetaHandler) DeletePaste(c *gin.Context) {
 	}
 
 	if paste == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Paste not found"})
+		return
+	}
+	if paste.IsEphemeral() {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Paste not found"})
 		return
 	}

@@ -1,16 +1,27 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/johnwmail/nclip/config"
 	"github.com/johnwmail/nclip/internal/channels"
+	"github.com/johnwmail/nclip/models"
+	"github.com/johnwmail/nclip/storage"
 )
 
 func channelCreateRequest(router http.Handler, requestID string, headers map[string]string) *httptest.ResponseRecorder {
@@ -109,6 +120,16 @@ func TestChannelCreateCookieScopeAndIdempotency(t *testing.T) {
 	router.ServeHTTP(page, pageRequest)
 	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), body.ID) {
 		t.Fatalf("channel page: %d %s", page.Code, page.Body.String())
+	}
+}
+
+func TestLambdaModeFailsClosedForProcessLocalChannels(t *testing.T) {
+	t.Setenv("AWS_LAMBDA_FUNCTION_NAME", "isolated-channel-test")
+	router := shareTestRouter(t, 4<<20, false)
+	requestID, _ := channels.NewRequestID()
+	response := channelCreateRequest(router, requestID, nil)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "channel_unavailable") {
+		t.Fatalf("Lambda channel create = %d %s", response.Code, response.Body.String())
 	}
 }
 
@@ -483,6 +504,25 @@ func channelLeaveRequest(router http.Handler, channelID, requestID, seatToken st
 		"Origin":             "https://clip.test",
 		"Sec-Fetch-Site":     "same-origin",
 	})
+}
+
+func channelRequestWithCookie(router http.Handler, method, path string, body []byte, cookie *http.Cookie, headers map[string]string) *httptest.ResponseRecorder {
+	return channelRequestWithCookies(router, method, path, body, []*http.Cookie{cookie}, headers)
+}
+
+func channelRequestWithCookies(router http.Handler, method, path string, body []byte, cookies []*http.Cookie, headers map[string]string) *httptest.ResponseRecorder {
+	request := httptest.NewRequest(method, path, bytes.NewReader(body))
+	for key, value := range headers {
+		request.Header.Set(key, value)
+	}
+	for _, cookie := range cookies {
+		if cookie != nil {
+			request.AddCookie(cookie)
+		}
+	}
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, request)
+	return response
 }
 
 func TestAnonymousJoinAdmitStatusAndLeave(t *testing.T) {
@@ -861,5 +901,441 @@ func TestSenderAndReceiverCredentialsSelectTheirOwnStatusRole(t *testing.T) {
 				t.Fatalf("sender state presence = %t, body=%v", hasSenderState, status)
 			}
 		})
+	}
+}
+
+func TestChannelContentChunkFinalizeIsIdempotentAndHiddenFromOrdinaryRoutes(t *testing.T) {
+	router, store, dataDir := shareTestRouterWithStore(t, 128<<20, false)
+	createID, _ := channels.NewRequestID()
+	created := channelCreateRequest(router, createID, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create channel: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	senderCookie := created.Result().Cookies()[0]
+	otherCreateID, _ := channels.NewRequestID()
+	otherCreated := channelCreateRequest(router, otherCreateID, nil)
+	if otherCreated.Code != http.StatusCreated {
+		t.Fatalf("create second channel: %d %s", otherCreated.Code, otherCreated.Body.String())
+	}
+	otherChannel := decodeChannelCreate(t, otherCreated)
+	otherSenderCookie := otherCreated.Result().Cookies()[0]
+	joinID, _ := channels.NewRequestID()
+	joined := channelJoinRequest(router, channel.ID, joinID, "", nil)
+	if joined.Code != http.StatusCreated {
+		t.Fatalf("join: %d %s", joined.Code, joined.Body.String())
+	}
+	senderStatus := httptest.NewRequest(http.MethodGet, "/api/v1/channels/"+channel.ID, nil)
+	senderStatus.AddCookie(senderCookie)
+	senderStatusResponse := httptest.NewRecorder()
+	router.ServeHTTP(senderStatusResponse, senderStatus)
+	var statusBody map[string]any
+	if senderStatusResponse.Code != http.StatusOK || json.Unmarshal(senderStatusResponse.Body.Bytes(), &statusBody) != nil {
+		t.Fatalf("sender status: %d %s", senderStatusResponse.Code, senderStatusResponse.Body.String())
+	}
+	seat, _ := statusBody["seat"].(map[string]any)
+	seatID, _ := seat["seat_id"].(string)
+	decisionID, _ := channels.NewRequestID()
+	decisionBody, _ := json.Marshal(map[string]string{"seat_id": seatID, "decision": "admit"})
+	admit := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", decisionBody, senderCookie, map[string]string{
+		"Content-Type":    "application/json",
+		"Idempotency-Key": decisionID,
+		"Origin":          "https://clip.test",
+		"Sec-Fetch-Site":  "same-origin",
+	})
+	if admit.Code != http.StatusOK {
+		t.Fatalf("admit receiver: %d %s", admit.Code, admit.Body.String())
+	}
+
+	content := make([]byte, 100<<20)
+	manifest := models.ShareManifest{Version: 1, Items: []models.ShareItem{{
+		Kind:  "file",
+		Name:  "notes.txt",
+		Parts: []models.SharePart{{Key: "part1", MIME: "text/plain", Size: int64(len(content))}},
+	}}}
+	initID, _ := channels.NewRequestID()
+	initBody, _ := json.Marshal(gin.H{"manifest": manifest})
+	contentPath := "/api/v1/channels/" + channel.ID + "/content"
+	unauthorizedInitID, _ := channels.NewRequestID()
+	unauthorized := channelRequestWithCookie(router, http.MethodPost, contentPath, initBody, otherSenderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": unauthorizedInitID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+		"X-Channel": otherChannel.ID,
+	})
+	if unauthorized.Code != http.StatusForbidden {
+		t.Fatalf("different sender capability attached content: %d %s", unauthorized.Code, unauthorized.Body.String())
+	}
+	initRequest := func() *httptest.ResponseRecorder {
+		return channelRequestWithCookie(router, http.MethodPost, contentPath, initBody, senderCookie, map[string]string{
+			"Content-Type":    "application/json",
+			"Idempotency-Key": initID,
+			"Origin":          "https://clip.test",
+			"Sec-Fetch-Site":  "same-origin",
+			"X-Channel":       otherChannel.ID,
+		})
+	}
+	init := initRequest()
+	if init.Code != http.StatusCreated {
+		t.Fatalf("content init: %d %s", init.Code, init.Body.String())
+	}
+	var initBodyJSON map[string]any
+	if err := json.Unmarshal(init.Body.Bytes(), &initBodyJSON); err != nil {
+		t.Fatal(err)
+	}
+	uploadID, _ := initBodyJSON["upload_id"].(string)
+	if uploadID == "" || initBodyJSON["state"] != channels.ContentUploading {
+		t.Fatalf("invalid upload session: %v", initBodyJSON)
+	}
+	replayedInit := initRequest()
+	var replayedInitJSON map[string]any
+	if replayedInit.Code != http.StatusOK || json.Unmarshal(replayedInit.Body.Bytes(), &replayedInitJSON) != nil || replayedInitJSON["upload_id"] != uploadID {
+		t.Fatalf("init replay: %d %s", replayedInit.Code, replayedInit.Body.String())
+	}
+
+	chunkPath := contentPath + "/" + uploadID + "/parts/part1"
+	sendChunk := func(offset int, part []byte) *httptest.ResponseRecorder {
+		hash := sha256.Sum256(part)
+		return channelRequestWithCookie(router, http.MethodPut, chunkPath, part, senderCookie, map[string]string{
+			"Upload-Offset":  strconv.Itoa(offset),
+			"X-Chunk-SHA256": hex.EncodeToString(hash[:]),
+			"Origin":         "https://clip.test",
+			"Sec-Fetch-Site": "same-origin",
+			"X-Channel":      otherChannel.ID,
+		})
+	}
+	firstEnd := min(channels.MaxContentChunkBytes, len(content))
+	firstChunk := content[:firstEnd]
+	for offset := 0; offset < len(content); {
+		end := min(offset+channels.MaxContentChunkBytes, len(content))
+		response := sendChunk(offset, content[offset:end])
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("chunk at offset %d: %d %s", offset, response.Code, response.Body.String())
+		}
+		if offset == 0 {
+			replay := sendChunk(0, firstChunk)
+			if replay.Code != http.StatusNoContent || replay.Header().Get("X-Chunk-Replayed") != "true" {
+				t.Fatalf("chunk replay: %d %s headers=%v", replay.Code, replay.Body.String(), replay.Header())
+			}
+		}
+		offset = end
+	}
+
+	finalizeID, _ := channels.NewRequestID()
+	finalizePath := contentPath + "/" + uploadID + "/finalize"
+	finalizeHeaders := map[string]string{
+		"Idempotency-Key": finalizeID,
+		"Origin":          "https://clip.test",
+		"Sec-Fetch-Site":  "same-origin",
+		"X-Channel":       otherChannel.ID,
+	}
+	finalized := channelRequestWithCookie(router, http.MethodPost, finalizePath, nil, senderCookie, finalizeHeaders)
+	if finalized.Code != http.StatusCreated || !strings.Contains(finalized.Body.String(), `"state":"held"`) {
+		t.Fatalf("finalize: %d %s", finalized.Code, finalized.Body.String())
+	}
+	replayedFinalize := channelRequestWithCookie(router, http.MethodPost, finalizePath, nil, senderCookie, finalizeHeaders)
+	if replayedFinalize.Code != http.StatusOK || !strings.Contains(replayedFinalize.Body.String(), `"replayed":true`) {
+		t.Fatalf("finalize replay: %d %s", replayedFinalize.Code, replayedFinalize.Body.String())
+	}
+
+	ephemeral, err := store.ListEphemeralPastes()
+	if err != nil || len(ephemeral) != 1 {
+		t.Fatalf("ephemeral listing: len=%d err=%v", len(ephemeral), err)
+	}
+	paste := ephemeral[0]
+	if paste.EphemeralChannelID != channel.ID || paste.ExpiresAt == nil || paste.ExpiresAt.Before(time.Now().Add(167*time.Hour)) {
+		t.Fatalf("ephemeral metadata/fallback TTL incorrect: %+v", paste)
+	}
+	expiredFallback := paste
+	expiredAt := time.Now().Add(-time.Second)
+	expiredFallback.ExpiresAt = &expiredAt
+	if err := store.Store(&expiredFallback); err != nil {
+		t.Fatal(err)
+	}
+	if stillHeld, err := store.Get(paste.ID); err != nil || stillHeld == nil || !stillHeld.IsEphemeral() {
+		t.Fatalf("fallback TTL removed channel content while active: %v", err)
+	}
+	reader, storedSize, err := store.OpenContent(paste.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storedHash := sha256.New()
+	if _, err := io.Copy(storedHash, reader); err != nil {
+		_ = reader.Close()
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	wantHash := sha256.Sum256(content)
+	if storedSize != int64(len(content)) || !bytes.Equal(storedHash.Sum(nil), wantHash[:]) {
+		t.Fatalf("stored content checksum/size mismatch: got %d bytes, want %d", storedSize, len(content))
+	}
+	if visible, err := store.ListPastes(); err != nil || len(visible) != 0 {
+		t.Fatalf("ordinary management listing exposed ephemeral content: %v %v", visible, err)
+	}
+	ordinaryRoutes := []struct {
+		method  string
+		path    string
+		headers map[string]string
+	}{
+		{method: http.MethodGet, path: "/api/v1/shares/" + paste.ID},
+		{method: http.MethodGet, path: "/api/v1/shares/" + paste.ID + "/content"},
+		{method: http.MethodPost, path: "/api/v1/shares/" + paste.ID + "/receive", headers: map[string]string{"X-Nclip-Confirm": "1"}},
+		{method: http.MethodGet, path: "/" + paste.ID},
+		{method: http.MethodGet, path: "/raw/" + paste.ID},
+		{method: http.MethodGet, path: "/json/" + paste.ID},
+		{method: http.MethodGet, path: "/api/v1/meta/" + paste.ID},
+		{method: http.MethodDelete, path: "/" + paste.ID},
+	}
+	for _, route := range ordinaryRoutes {
+		response := shareRequest(router, route.method, route.path, nil, route.headers)
+		if response.Code != http.StatusNotFound {
+			t.Errorf("ordinary route %s %s exposed ephemeral paste: %d %s", route.method, route.path, response.Code, response.Body.String())
+		}
+	}
+
+	closeID, _ := channels.NewRequestID()
+	closed := channelRequestWithCookie(router, http.MethodDelete, "/api/v1/channels/"+channel.ID, nil, senderCookie, map[string]string{
+		"Idempotency-Key": closeID,
+		"Origin":          "https://clip.test",
+		"Sec-Fetch-Site":  "same-origin",
+	})
+	if closed.Code != http.StatusNoContent {
+		t.Fatalf("close channel cleanup: %d %s", closed.Code, closed.Body.String())
+	}
+	if _, err := store.Get(paste.ID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("close left ephemeral content behind: %v", err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dataDir, ".nclip-channel-upload-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("close left upload staging directories behind: %v %v", leftovers, err)
+	}
+}
+
+func TestChannelContentHonorsUploadAuthAndPairedSeatRequirement(t *testing.T) {
+	router, store, dataDir := shareTestRouterWithStore(t, 4<<20, true)
+	createID, _ := channels.NewRequestID()
+	created := channelCreateRequest(router, createID, map[string]string{"X-Api-Key": "test-key"})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create with upload key: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	senderCookie := created.Result().Cookies()[0]
+	joinID, _ := channels.NewRequestID()
+	if joined := channelJoinRequest(router, channel.ID, joinID, "", nil); joined.Code != http.StatusCreated {
+		t.Fatalf("anonymous join without UploadAuth key: %d %s", joined.Code, joined.Body.String())
+	}
+	manifest := models.ShareManifest{Version: 1, Items: []models.ShareItem{{
+		Kind: "file", Name: "data.bin", Parts: []models.SharePart{{Key: "part1", MIME: "application/octet-stream", Size: 4}},
+	}}}
+	body, _ := json.Marshal(gin.H{"manifest": manifest})
+	requestID, _ := channels.NewRequestID()
+	path := "/api/v1/channels/" + channel.ID + "/content"
+	baseHeaders := map[string]string{
+		"Content-Type":    "application/json",
+		"Idempotency-Key": requestID,
+		"Origin":          "https://clip.test",
+		"Sec-Fetch-Site":  "same-origin",
+	}
+	withoutKey := channelRequestWithCookie(router, http.MethodPost, path, body, senderCookie, baseHeaders)
+	if withoutKey.Code != http.StatusUnauthorized {
+		t.Fatalf("content init without UploadAuth key = %d %s", withoutKey.Code, withoutKey.Body.String())
+	}
+	withKeyHeaders := map[string]string{}
+	for key, value := range baseHeaders {
+		withKeyHeaders[key] = value
+	}
+	withKeyHeaders["X-Api-Key"] = "test-key"
+	whileUnpaired := channelRequestWithCookie(router, http.MethodPost, path, body, senderCookie, withKeyHeaders)
+	if whileUnpaired.Code != http.StatusConflict || !strings.Contains(whileUnpaired.Body.String(), "content_conflict") {
+		t.Fatalf("content init before receiver is paired = %d %s", whileUnpaired.Code, whileUnpaired.Body.String())
+	}
+	if ephemerals, err := store.ListEphemeralPastes(); err != nil || len(ephemerals) != 0 {
+		t.Fatalf("rejected content init left a paste: %v %v", ephemerals, err)
+	}
+	leftovers, err := filepath.Glob(filepath.Join(dataDir, ".nclip-channel-upload-*"))
+	if err != nil || len(leftovers) != 0 {
+		t.Fatalf("rejected content init left staging data: %v %v", leftovers, err)
+	}
+}
+
+func TestChannelContentAbortAndSenderCloseRemoveIncompleteStaging(t *testing.T) {
+	router, store, dataDir := shareTestRouterWithStore(t, 4<<20, false)
+	createID, _ := channels.NewRequestID()
+	created := channelCreateRequest(router, createID, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	senderCookie := created.Result().Cookies()[0]
+	joinID, _ := channels.NewRequestID()
+	if response := channelJoinRequest(router, channel.ID, joinID, "", nil); response.Code != http.StatusCreated {
+		t.Fatalf("join: %d %s", response.Code, response.Body.String())
+	}
+	statusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/channels/"+channel.ID, nil)
+	statusRequest.AddCookie(senderCookie)
+	statusResponse := httptest.NewRecorder()
+	router.ServeHTTP(statusResponse, statusRequest)
+	var senderStatus map[string]any
+	if statusResponse.Code != http.StatusOK || json.Unmarshal(statusResponse.Body.Bytes(), &senderStatus) != nil {
+		t.Fatalf("sender status: %d %s", statusResponse.Code, statusResponse.Body.String())
+	}
+	seatInfo, _ := senderStatus["seat"].(map[string]any)
+	seatID, _ := seatInfo["seat_id"].(string)
+	decisionID, _ := channels.NewRequestID()
+	decision, _ := json.Marshal(map[string]string{"seat_id": seatID, "decision": "admit"})
+	if response := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", decision, senderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": decisionID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	}); response.Code != http.StatusOK {
+		t.Fatalf("admit: %d %s", response.Code, response.Body.String())
+	}
+	manifest := models.ShareManifest{Version: 1, Items: []models.ShareItem{{
+		Kind: "file", Name: "partial.bin", Parts: []models.SharePart{{Key: "part1", MIME: "application/octet-stream", Size: 8}},
+	}}}
+	initBody, _ := json.Marshal(gin.H{"manifest": manifest})
+	contentPath := "/api/v1/channels/" + channel.ID + "/content"
+	init := func(id string) *httptest.ResponseRecorder {
+		return channelRequestWithCookie(router, http.MethodPost, contentPath, initBody, senderCookie, map[string]string{
+			"Content-Type": "application/json", "Idempotency-Key": id, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+		})
+	}
+	firstID, _ := channels.NewRequestID()
+	first := init(firstID)
+	var firstSession map[string]any
+	if first.Code != http.StatusCreated || json.Unmarshal(first.Body.Bytes(), &firstSession) != nil {
+		t.Fatalf("first init: %d %s", first.Code, first.Body.String())
+	}
+	firstUploadID, _ := firstSession["upload_id"].(string)
+	chunk := []byte("12345678")
+	chunkHash := sha256.Sum256(chunk)
+	chunkPath := contentPath + "/" + firstUploadID + "/parts/part1"
+	chunkHeaders := map[string]string{
+		"Upload-Offset": "0", "X-Chunk-SHA256": hex.EncodeToString(chunkHash[:]), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	}
+	if response := channelRequestWithCookie(router, http.MethodPut, chunkPath, chunk, senderCookie, chunkHeaders); response.Code != http.StatusNoContent {
+		t.Fatalf("first chunk: %d %s", response.Code, response.Body.String())
+	}
+	if response := channelRequestWithCookie(router, http.MethodDelete, contentPath+"/"+firstUploadID, nil, senderCookie, map[string]string{
+		"Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	}); response.Code != http.StatusNoContent {
+		t.Fatalf("abort: %d %s", response.Code, response.Body.String())
+	}
+	if leftovers, err := filepath.Glob(filepath.Join(dataDir, ".nclip-channel-upload-*")); err != nil || len(leftovers) != 0 {
+		t.Fatalf("abort left staging data: %v %v", leftovers, err)
+	}
+	if ephemeral, err := store.ListEphemeralPastes(); err != nil || len(ephemeral) != 0 {
+		t.Fatalf("abort left an ephemeral paste: %v %v", ephemeral, err)
+	}
+
+	secondID, _ := channels.NewRequestID()
+	second := init(secondID)
+	var secondSession map[string]any
+	if second.Code != http.StatusCreated || json.Unmarshal(second.Body.Bytes(), &secondSession) != nil {
+		t.Fatalf("slot not reusable after abort: %d %s", second.Code, second.Body.String())
+	}
+	secondUploadID, _ := secondSession["upload_id"].(string)
+	secondChunkPath := contentPath + "/" + secondUploadID + "/parts/part1"
+	if response := channelRequestWithCookie(router, http.MethodPut, secondChunkPath, chunk, senderCookie, chunkHeaders); response.Code != http.StatusNoContent {
+		t.Fatalf("second chunk: %d %s", response.Code, response.Body.String())
+	}
+	closeID, _ := channels.NewRequestID()
+	closed := channelRequestWithCookie(router, http.MethodDelete, "/api/v1/channels/"+channel.ID, nil, senderCookie, map[string]string{
+		"Idempotency-Key": closeID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	if closed.Code != http.StatusNoContent {
+		t.Fatalf("close during upload: %d %s", closed.Code, closed.Body.String())
+	}
+	if leftovers, err := filepath.Glob(filepath.Join(dataDir, ".nclip-channel-upload-*")); err != nil || len(leftovers) != 0 {
+		t.Fatalf("sender close left staging data: %v %v", leftovers, err)
+	}
+}
+
+func TestChannelContentUsesPerUserEffectiveUploadLimitAtInit(t *testing.T) {
+	router := accountRouter(t)
+	admin := signIn(t, router, "admin", "test-admin-password")
+	uploadID := createAccount(t, admin, "small-sender", gin.H{"upload": true, "download": true, "manage": false})
+	quota := int64(1 << 20)
+	updated := admin.call(http.MethodPut, "/api/v1/users/"+uploadID, gin.H{
+		"username":           "small-sender",
+		"permissions":        gin.H{"upload": true, "download": true, "manage": false},
+		"upload_limit_bytes": quota,
+		"version":            1,
+	}, true)
+	if updated.Code != http.StatusOK {
+		t.Fatalf("set per-user cap: %d %s", updated.Code, updated.Body.String())
+	}
+	sender := signIn(t, router, "small-sender", "test-user-password")
+	createID, _ := channels.NewRequestID()
+	created := accountChannelCreate(router, sender, createID, "")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create channel: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	joinID, _ := channels.NewRequestID()
+	join := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/join", nil, sender.cookie, map[string]string{
+		"Idempotency-Key": joinID,
+		"Origin":          "https://clip.test",
+		"Sec-Fetch-Site":  "same-origin",
+		"X-CSRF-Token":    sender.csrf,
+	})
+	if join.Code != http.StatusCreated {
+		t.Fatalf("self join: %d %s", join.Code, join.Body.String())
+	}
+	manifest := models.ShareManifest{Version: 1, Items: []models.ShareItem{{
+		Kind: "file", Name: "over-limit.bin", Parts: []models.SharePart{{Key: "part1", MIME: "application/octet-stream", Size: quota + 1}},
+	}}}
+	body, _ := json.Marshal(gin.H{"manifest": manifest})
+	initID, _ := channels.NewRequestID()
+	response := channelRequestWithCookies(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/content", body, []*http.Cookie{sender.cookie, created.Result().Cookies()[0]}, map[string]string{
+		"Content-Type":    "application/json",
+		"Idempotency-Key": initID,
+		"Origin":          "https://clip.test",
+		"Sec-Fetch-Site":  "same-origin",
+		"X-CSRF-Token":    sender.csrf,
+	})
+	if response.Code != http.StatusRequestEntityTooLarge || !strings.Contains(response.Body.String(), "content_too_large") {
+		t.Fatalf("content init ignored effective user limit: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestStartupRemovesOrphanChannelContentAndChunkDirectories(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	pasteID := "RPHN5"
+	expires := time.Now().Add(24 * time.Hour)
+	paste := &models.Paste{ID: pasteID, CreatedAt: time.Now(), ExpiresAt: &expires, Size: 4, ContentType: "text/plain", EphemeralChannelID: "old-channel"}
+	if err := store.StoreContent(pasteID, []byte("lost")); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Store(paste); err != nil {
+		t.Fatal(err)
+	}
+	beforeSweep, err := store.ListEphemeralPastes()
+	if err != nil || len(beforeSweep) != 1 {
+		t.Fatalf("test setup did not store an ephemeral paste: %v %v", beforeSweep, err)
+	}
+	staging := filepath.Join(dataDir, ".nclip-channel-upload-stale")
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(staging, "part1.part"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	finalTemp := filepath.Join(dataDir, storage.ChannelContentTempPrefix+"stale")
+	if err := os.WriteFile(finalTemp, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = setupRouter(store, &config.Config{DataDir: dataDir, URL: "https://clip.test", BufferSize: 4 << 20, DefaultTTL: 24 * time.Hour})
+	if _, err := store.Get(pasteID); !errors.Is(err, storage.ErrNotFound) {
+		t.Fatalf("startup kept orphan channel paste: %v", err)
+	}
+	if _, err := os.Stat(staging); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup kept orphan chunk directory: %v", err)
+	}
+	if _, err := os.Stat(finalTemp); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup kept orphan finalization temp: %v", err)
 	}
 }

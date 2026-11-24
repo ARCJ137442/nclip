@@ -1,6 +1,6 @@
 # P1a-0 信道契约冻结（修订审阅稿）
 
-状态：P1a-0 修订稿，等待审阅方明确“通过”。获通过前不开始 G1；本文不授权部署。
+状态：P1a-0 已通过；G1/G2 已通过，G3 实施中；本文不授权部署。
 
 依据：P1 channel design、P1 iteration plan、P0 既有行为及已确认的用户裁定。
 
@@ -74,9 +74,12 @@
 
 ## 5. 内容隔离、交付与恢复
 
-- D1：`POST /api/v1/channels/:id/content` 创建上传会话；后续通过信道域分块写入与 finalize 子端点传输；内部复用现有 `SharesHandler`/`PasteService` 创建逻辑。凭据与授权先由信道域校验。
-- D2：分块上传按 offset/hash 幂等；声明 manifest 与 part 总大小在 init 校验；每块校验 offset、长度、hash 和 init 时额度快照。重试不重复追加或超出 init 声明。
-- 临时内容标记为 ephemeral/channel。普通分享 metadata/content/receive、legacy slug、raw/json、meta 路径对临时记录统一 404；管理台账不列临时内容；普通 publicShare 与 Gate 不放行临时记录。
+- D1：`POST /api/v1/channels/:id/content` 的 JSON `{manifest}` 创建上传会话；`PUT /api/v1/channels/:id/content/:uploadID/parts/:partKey` 写分块；`POST .../:uploadID/finalize` 完成入库；`DELETE .../:uploadID` 放弃未完成会话。创建、写块、finalize 和 abort 每次都校验信道 `sender_key`，无账号模式另逐请求校验 UploadAuth API key；账号模式逐请求校验 upload 权限与 CSRF。内部复用现有 `SharesHandler`/`PasteService`，不把 `X-Channel` 当授权。
+- D2：每 part 按 4 MiB 固定块写入，最后一块为该 part 的剩余字节；每块使用十进制 `Upload-Offset` 与十六进制 SHA-256 `X-Chunk-SHA256`。manifest 必须声明所有 part 的逻辑字节总数；init 时固定完整 `effectiveUploadLimit` 快照并检查总数，此后每块只能写入声明范围。相同 offset/长度/hash 重试返回已接受，不重复追加；同 offset 不同内容、越序/未对齐 offset 或超出声明均冲突。
+- init 在 `empty → uploading` 原子占槽并原子预留全局物理峰值；单写者锁同时串行化同信道 slot 与所有信道 reservation。令 `L` 为 init 时冻结的有效逻辑额度、`N` 为 manifest part 数（`1 ≤ N ≤ 96`）、`M=64 KiB` 为 manifest 上限、`Z=1024×(N+1)` 为 ZIP/目录有界开销、`Q` 为该文件系统的 allocation block 大小。首版在本地文件存储上的 reservation 为 `R=3L+2(M+Z)+(N+3)Q`；远端 S3 存储的本地 staging reservation 为 `R=2L+M+Z+(N+1)Q`。它覆盖 part 暂存、ZIP/manifest、文件系统块取整及最终副本同时存在的峰值。预算以启动清扫后的每文件系统 `F0`、10% 保护底线和动态 `Fnow` 检查为准。普通分享不计入信道预算，但会通过 `Fnow` 降低新 init 的可用空间。预留失败 fail closed；ENOSPC 只 abort 未完成上传，保留 held 内容。
+- 临时 paste 标记为 ephemeral/channel，内部保留 168 小时孤儿兜底时间；它不进入 `expires_at` 用户响应，也不是产品 TTL。存储读取不得仅因兜底时刻删除活跃信道内容；周期清扫只有在 channel manager 确认内容不活跃后才删。进程启动先删除全部上次遗留的信道 staging 与 ephemeral paste，再采集 `F0`。
+- 信道 manager、内容席位和全局磁盘 reservation 是进程内单写者状态；P1a 信道仅支持单进程服务。Lambda/serverless 与多实例共享存储部署必须 fail closed，不运行跨实例会误删活跃内容的启动清扫。
+- 普通分享 metadata/content/receive、legacy slug、raw/json、meta 路径对 ephemeral 记录统一 404；管理台账不列临时内容；普通 publicShare 与 Gate 不放行临时记录。
 - 同一内容版本的 multipart boundary 稳定；响应提供 ETag、Accept-Ranges，支持 If-Range/Content-Range；Range 按完整 multipart 响应字节寻址。
 - 内容只有在 receiver seat 与有效 claim 绑定时可读。发送者撤回、kick、close 必须取消在途写出。成功写完后销毁；leave/关闭/掉线释放流程销毁临时内容。单读由独占 claim/seat 锁保证，不把“删除先于交付”写成永久不变量。
 - 活跃内容不因磁盘预算、清扫或普通分享写入自动删除。完成、显式释放、掉线后的释放倒计时及重启孤儿清扫按既定信道生命周期删除。普通分享 TTL/访问行为保持现状。

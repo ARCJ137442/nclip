@@ -113,7 +113,7 @@ func main() {
 	}
 
 	// Setup router
-	router := setupRouter(store, cfg)
+	router, channelHandler := setupRouterWithChannels(store, cfg)
 
 	// Check if running in Lambda environment
 	if isLambdaEnvironment() {
@@ -128,7 +128,7 @@ func main() {
 
 	// Run in container/server mode
 	log.Println("Starting in HTTP server mode")
-	runHTTPServer(router, cfg, store)
+	runHTTPServer(router, cfg, store, channelHandler)
 }
 
 // lambdaHandler handles Lambda requests for both v1 and v2 formats
@@ -202,6 +202,11 @@ func lambdaHandler(ctx context.Context, event interface{}) (interface{}, error) 
 
 // setupRouter creates and configures the Gin router
 func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
+	router, _ := setupRouterWithChannels(store, cfg)
+	return router
+}
+
+func setupRouterWithChannels(store storage.PasteStore, cfg *config.Config) (*gin.Engine, *handlers.ChannelHandler) {
 	// Initialize service
 	pasteService := services.NewPasteService(store, cfg)
 
@@ -235,6 +240,12 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	sharesHandler := handlers.NewSharesHandler(pasteService, cfg)
 	channelManager := channels.NewManager()
 	channelHandler := handlers.NewChannelHandler(channelManager, cfg, accountHandler)
+	channelHandler.SetSharesHandler(sharesHandler)
+	if isLambdaEnvironment() {
+		channelHandler.Disable("channel state requires a single process")
+	} else if err := channelHandler.InitializeContent(store); err != nil {
+		log.Printf("[WARN] Channel content uploads disabled: %v", err)
+	}
 
 	// Create Gin router
 	router := gin.New()
@@ -281,6 +292,18 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	router.POST("/api/v1/channels/:id/heartbeat", channelHandler.Heartbeat)
 	router.POST("/api/v1/channels/:id/seat/heartbeat", channelHandler.SeatHeartbeat)
 	router.POST("/api/v1/channels/:id/leave", channelHandler.Leave)
+	if cfg.UploadAuth && !cfg.AccountsEnabled {
+		auth := apiKeyAuth(cfg)
+		router.POST("/api/v1/channels/:id/content", auth, channelHandler.ContentInit)
+		router.PUT("/api/v1/channels/:id/content/:uploadID/parts/:partKey", auth, channelHandler.ContentChunk)
+		router.POST("/api/v1/channels/:id/content/:uploadID/finalize", auth, channelHandler.ContentFinalize)
+		router.DELETE("/api/v1/channels/:id/content/:uploadID", auth, channelHandler.ContentAbort)
+	} else {
+		router.POST("/api/v1/channels/:id/content", channelHandler.ContentInit)
+		router.PUT("/api/v1/channels/:id/content/:uploadID/parts/:partKey", channelHandler.ContentChunk)
+		router.POST("/api/v1/channels/:id/content/:uploadID/finalize", channelHandler.ContentFinalize)
+		router.DELETE("/api/v1/channels/:id/content/:uploadID", channelHandler.ContentAbort)
+	}
 	router.GET("/c/:id", channelHandler.Page)
 	router.GET("/api/v1/ui-config", sharesHandler.UIConfig)
 	if cfg.UploadAuth && !cfg.AccountsEnabled {
@@ -328,7 +351,7 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Resource not found"})
 	})
 
-	return router
+	return router, channelHandler
 }
 
 func registerAccountRoutes(router *gin.Engine, h *handlers.AccountHandler, meta *handlers.MetaHandler, limit *config.UploadLimit) {
@@ -548,13 +571,16 @@ func (w *bodyCaptureWriter) Write(b []byte) (int, error) {
 }
 
 // runHTTPServer starts the HTTP server for container mode
-func runHTTPServer(router *gin.Engine, cfg *config.Config, store storage.PasteStore) {
+func runHTTPServer(router *gin.Engine, cfg *config.Config, store storage.PasteStore, channelHandler *handlers.ChannelHandler) {
 	// Ensure cleanup on exit
 	defer func() {
 		if err := store.Close(); err != nil {
 			log.Printf("Error closing storage: %v", err)
 		}
 	}()
+	janitorContext, stopJanitor := context.WithCancel(context.Background())
+	defer stopJanitor()
+	go channelHandler.RunEphemeralJanitor(janitorContext)
 
 	// Create HTTP server
 	server := &http.Server{

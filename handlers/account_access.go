@@ -150,7 +150,7 @@ func (h *AccountHandler) publicOrMissingShare(c *gin.Context) bool {
 	if errors.Is(err, storage.ErrNotFound) {
 		return true
 	}
-	return err == nil && paste != nil && paste.IsExpired()
+	return err == nil && paste != nil && (paste.IsExpired() || paste.IsEphemeral())
 }
 
 func (h *AccountHandler) publicShare(c *gin.Context) bool {
@@ -158,7 +158,7 @@ func (h *AccountHandler) publicShare(c *gin.Context) bool {
 		return false
 	}
 	paste, err := h.pastes.Get(c.Param("slug"))
-	return err == nil && paste != nil && paste.Public && !paste.IsExpired()
+	return err == nil && paste != nil && paste.Public && !paste.IsExpired() && !paste.IsEphemeral()
 }
 
 func requiredPermission(c *gin.Context) string {

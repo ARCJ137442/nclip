@@ -61,6 +61,10 @@ type Record struct {
 	senderHash     [sha256.Size]byte
 	senderLastSeen time.Time
 	seat           *seatState
+	ContentState   string `json:"content_state,omitempty"`
+	contentUpload  *ContentUpload
+	contentSlug    string
+	contentHeld    int64
 }
 
 type createResult struct {
@@ -78,24 +82,31 @@ type Manager struct {
 	joinResults   map[string]joinOutcome
 	closedSeats   map[[sha256.Size]byte]seatClosure
 	// closedSeatIDs lets a delayed sender decision resolve the old seat's terminal state.
-	closedSeatIDs map[string]seatClosure
-	decisions     map[string]decisionResult
-	leaves        map[string]leaveResult
-	masterKey     [sha256.Size]byte
-	keyReady      bool
+	closedSeatIDs          map[string]seatClosure
+	decisions              map[string]decisionResult
+	leaves                 map[string]leaveResult
+	content                contentCapacity
+	contentUploads         map[string]*ContentUpload
+	contentInits           map[string]contentInitReplay
+	pendingContentReleases map[string]ContentRelease
+	masterKey              [sha256.Size]byte
+	keyReady               bool
 }
 
 func NewManager() *Manager {
 	return &Manager{
-		channels:      make(map[string]Record),
-		creates:       make(map[string]createResult),
-		closedCreates: make(map[string]time.Time),
-		closedJoins:   make(map[string]time.Time),
-		joinResults:   make(map[string]joinOutcome),
-		closedSeats:   make(map[[sha256.Size]byte]seatClosure),
-		closedSeatIDs: make(map[string]seatClosure),
-		decisions:     make(map[string]decisionResult),
-		leaves:        make(map[string]leaveResult),
+		channels:               make(map[string]Record),
+		creates:                make(map[string]createResult),
+		closedCreates:          make(map[string]time.Time),
+		closedJoins:            make(map[string]time.Time),
+		joinResults:            make(map[string]joinOutcome),
+		closedSeats:            make(map[[sha256.Size]byte]seatClosure),
+		closedSeatIDs:          make(map[string]seatClosure),
+		decisions:              make(map[string]decisionResult),
+		leaves:                 make(map[string]leaveResult),
+		contentUploads:         make(map[string]*ContentUpload),
+		contentInits:           make(map[string]contentInitReplay),
+		pendingContentReleases: make(map[string]ContentRelease),
 	}
 }
 
@@ -185,6 +196,7 @@ func (m *Manager) Create(scope, requestID string, visibility Visibility) (Record
 		SenderOnline:   true,
 		senderHash:     sha256.Sum256([]byte(senderKey)),
 		senderLastSeen: now,
+		ContentState:   ContentEmpty,
 	}
 	m.channels[id] = record
 	m.creates[key] = createResult{visibility: visibility, record: record, key: key}
@@ -228,16 +240,28 @@ func (m *Manager) SenderAuthorized(id, senderKey string) bool {
 // Close releases the current empty G2 channel and prevents a concurrent create
 // retry from reopening it for the closed-key retention window.
 func (m *Manager) Close(id, senderKey string) error {
+	release, err := m.CloseWithContent(id, senderKey)
+	m.CleanupContentRelease(release)
+	return err
+}
+
+func (m *Manager) CloseWithContent(id, senderKey string) (ContentRelease, error) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	record, ok := m.channels[id]
 	if !ok {
-		return nil
+		release := m.pendingContentReleases[id]
+		m.mu.Unlock()
+		return release, nil
 	}
 	if !matchHash(record.senderHash, senderKey) {
-		return ErrUnauthorized
+		m.mu.Unlock()
+		return ContentRelease{}, ErrUnauthorized
 	}
 	now := time.Now()
+	release := m.detachContentLocked(&record)
+	if release.Slug != "" {
+		m.pendingContentReleases[id] = release
+	}
 	m.releaseSeatLocked(&record, "sender_closed", now)
 	delete(m.channels, id)
 	m.pruneClosedCreatesLocked(now)
@@ -247,5 +271,6 @@ func (m *Manager) Close(id, senderKey string) error {
 			m.closedCreates[key] = now.Add(ClosedCreateRetention)
 		}
 	}
-	return nil
+	m.mu.Unlock()
+	return release, nil
 }

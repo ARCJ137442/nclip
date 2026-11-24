@@ -13,6 +13,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/johnwmail/nclip/config"
 	"github.com/johnwmail/nclip/internal/channels"
+	"github.com/johnwmail/nclip/storage"
 )
 
 const senderCookieName = "nclip_sender_key"
@@ -36,11 +37,25 @@ type ChannelHandler struct {
 	manager            *channels.Manager
 	config             *config.Config
 	accounts           *AccountHandler
+	shares             *SharesHandler
+	store              storage.PasteStore
+	disabledReason     string
+	cleanupMu          sync.Mutex
+	nextCleanup        time.Time
 	createMu           sync.Mutex
 	createWindows      map[string]createWindowState
 	joinMu             sync.Mutex
 	joinIPWindows      map[string]createWindowState
 	joinChannelWindows map[string]createWindowState
+	contentChunkSlots  chan struct{}
+}
+
+func (h *ChannelHandler) SetSharesHandler(shares *SharesHandler) {
+	h.shares = shares
+}
+
+func (h *ChannelHandler) Disable(reason string) {
+	h.disabledReason = reason
 }
 
 func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *AccountHandler) *ChannelHandler {
@@ -51,6 +66,7 @@ func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *
 		createWindows:      make(map[string]createWindowState),
 		joinIPWindows:      make(map[string]createWindowState),
 		joinChannelWindows: make(map[string]createWindowState),
+		contentChunkSlots:  make(chan struct{}, maxConcurrentChannelChunks),
 	}
 }
 
@@ -59,10 +75,14 @@ func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *
 func (h *ChannelHandler) Gate() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.FullPath()
+		if h.disabledReason != "" && channelRoutePath(path) {
+			c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": "channel_unavailable"})
+			return
+		}
 		if path != "/api/v1/channels" && path != "/api/v1/channels/:id" && path != "/c/:id" &&
 			path != "/api/v1/channels/:id/join" && path != "/api/v1/channels/:id/admit" &&
 			path != "/api/v1/channels/:id/heartbeat" && path != "/api/v1/channels/:id/seat/heartbeat" &&
-			path != "/api/v1/channels/:id/leave" {
+			path != "/api/v1/channels/:id/leave" && !channelContentPath(path) {
 			c.Next()
 			return
 		}
@@ -71,6 +91,13 @@ func (h *ChannelHandler) Gate() gin.HandlerFunc {
 		c.Header("Content-Security-Policy", "frame-ancestors 'none'")
 		c.Header("Referrer-Policy", "same-origin")
 		c.Header("X-Content-Type-Options", "nosniff")
+		if channelContentPath(path) {
+			if !h.authorizeContent(c, path) {
+				return
+			}
+			c.Next()
+			return
+		}
 
 		if path == "/api/v1/channels" {
 			if c.Request.Method != http.MethodPost {
@@ -169,6 +196,68 @@ func (h *ChannelHandler) Gate() gin.HandlerFunc {
 		}
 		c.Next()
 	}
+}
+
+func channelRoutePath(path string) bool {
+	return path == "/api/v1/channels" || strings.HasPrefix(path, "/api/v1/channels/") || path == "/c/:id"
+}
+
+func channelContentPath(path string) bool {
+	switch path {
+	case "/api/v1/channels/:id/content",
+		"/api/v1/channels/:id/content/:uploadID/parts/:partKey",
+		"/api/v1/channels/:id/content/:uploadID/finalize",
+		"/api/v1/channels/:id/content/:uploadID":
+		return true
+	default:
+		return false
+	}
+}
+
+func (h *ChannelHandler) authorizeContent(c *gin.Context, path string) bool {
+	method := http.MethodPost
+	if path == "/api/v1/channels/:id/content/:uploadID/parts/:partKey" {
+		method = http.MethodPut
+	} else if path == "/api/v1/channels/:id/content/:uploadID" {
+		method = http.MethodDelete
+	}
+	if c.Request.Method != method {
+		c.AbortWithStatus(http.StatusMethodNotAllowed)
+		return false
+	}
+	if !h.sameOrigin(c) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "csrf_failed"})
+		return false
+	}
+	if _, ok := h.manager.Get(c.Param("id")); !ok {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": channels.ErrChannelNotFound.Error()})
+		return false
+	}
+	if !h.senderAuthorized(c, c.Param("id")) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": channels.ErrUnauthorized.Error()})
+		return false
+	}
+	if h.accounts == nil {
+		return true
+	}
+	user, session, ok := h.accounts.requestUser(c)
+	if c.IsAborted() {
+		return false
+	}
+	if !ok {
+		h.accounts.loginRequired(c)
+		return false
+	}
+	c.Set(accountContext, user)
+	if !user.Permissions.Upload {
+		h.accounts.forbidden(c)
+		return false
+	}
+	if !h.accounts.csrf(c, session) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "csrf_failed"})
+		return false
+	}
+	return true
 }
 
 func (h *ChannelHandler) authorizeCreate(c *gin.Context) bool {
@@ -375,7 +464,7 @@ func (h *ChannelHandler) recordCreateLocked(ip string, now time.Time) {
 func (h *ChannelHandler) Close(c *gin.Context) {
 	senderKey, _ := c.Cookie(senderCookieName)
 	h.createMu.Lock()
-	err := h.manager.Close(c.Param("id"), senderKey)
+	release, err := h.manager.CloseWithContent(c.Param("id"), senderKey)
 	h.createMu.Unlock()
 	if err != nil {
 		if errors.Is(err, channels.ErrUnauthorized) {
@@ -383,6 +472,11 @@ func (h *ChannelHandler) Close(c *gin.Context) {
 			return
 		}
 		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "channel_close_failed"})
+		return
+	}
+	h.manager.CleanupContentRelease(release)
+	if err := h.deleteReleasedContent(release); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "channel_close_cleanup_failed"})
 		return
 	}
 	http.SetCookie(c.Writer, &http.Cookie{
@@ -396,6 +490,20 @@ func (h *ChannelHandler) Close(c *gin.Context) {
 		Expires:  time.Unix(1, 0),
 	})
 	c.Status(http.StatusNoContent)
+}
+
+func (h *ChannelHandler) deleteReleasedContent(release channels.ContentRelease) error {
+	if release.Slug == "" {
+		return nil
+	}
+	if h.shares == nil {
+		return errors.New("channel share service is unavailable")
+	}
+	if err := h.shares.service.DeletePaste(release.Slug); err != nil {
+		return err
+	}
+	h.manager.ContentReleaseDeleted(release)
+	return nil
 }
 
 func (h *ChannelHandler) sameOrigin(c *gin.Context) bool {

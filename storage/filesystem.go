@@ -109,7 +109,7 @@ func (fs *FilesystemStore) Get(id string) (*models.Paste, error) {
 		log.Printf("[ERROR] Get: failed to unmarshal metadata for %s: %v", id, err)
 		return nil, err
 	}
-	if paste.IsExpired() {
+	if paste.IsExpired() && !paste.IsEphemeral() {
 		log.Printf("[WARN] FS Get: paste %s is expired", id)
 		// Delete expired paste files directly (we already hold the mutex) so subsequent accesses are clean
 		_ = os.Remove(contentPath)
@@ -195,6 +195,14 @@ func (fs *FilesystemStore) StoreContent(id string, content []byte) error {
 // StoreContentStream writes to a private temporary file and renames it only
 // after the full payload and size have been verified.
 func (fs *FilesystemStore) StoreContentStream(id string, content io.Reader, size int64) error {
+	return fs.storeContentStream(id, content, size, "."+id+".upload-*")
+}
+
+func (fs *FilesystemStore) StoreChannelContentStream(id string, content io.Reader, size int64) error {
+	return fs.storeContentStream(id, content, size, ChannelContentTempPrefix+"*")
+}
+
+func (fs *FilesystemStore) storeContentStream(id string, content io.Reader, size int64, tempPattern string) error {
 	contentPath, err := safePath(fs.dataDir, id)
 	if err != nil {
 		return err
@@ -206,7 +214,7 @@ func (fs *FilesystemStore) StoreContentStream(id string, content io.Reader, size
 		log.Printf("[ERROR] FS StoreContentStream: failed to create data directory %s: %v", fs.dataDir, err)
 		return err
 	}
-	tmp, err := os.CreateTemp(fs.dataDir, "."+id+".upload-*")
+	tmp, err := os.CreateTemp(fs.dataDir, tempPattern)
 	if err != nil {
 		return fmt.Errorf("create content temp file: %w", err)
 	}
@@ -336,6 +344,41 @@ func (fs *FilesystemStore) Close() error {
 
 // ListPastes lists active metadata, excluding private account subdirectories.
 func (fs *FilesystemStore) ListPastes() ([]models.Paste, error) {
+	pastes, err := fs.listPastes(false)
+	return pastes, err
+}
+
+// ListEphemeralPastes is reserved for channel startup/runtime cleanup. It is
+// not the management listing and must never be exposed to ordinary callers.
+func (fs *FilesystemStore) ListEphemeralPastes() ([]models.Paste, error) {
+	entries, err := os.ReadDir(fs.dataDir)
+	if err != nil {
+		return nil, err
+	}
+	pastes := make([]models.Paste, 0)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		if !utils.IsValidSlug(id) {
+			continue
+		}
+		paste, err := fs.readMetadata(id)
+		if errors.Is(err, ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if paste.IsEphemeral() {
+			pastes = append(pastes, *paste)
+		}
+	}
+	return pastes, nil
+}
+
+func (fs *FilesystemStore) listPastes(ephemeralOnly bool) ([]models.Paste, error) {
 	entries, err := os.ReadDir(fs.dataDir)
 	if err != nil {
 		return nil, err
@@ -356,7 +399,31 @@ func (fs *FilesystemStore) ListPastes() ([]models.Paste, error) {
 		if err != nil {
 			return nil, err
 		}
+		if paste.IsEphemeral() != ephemeralOnly {
+			continue
+		}
 		pastes = append(pastes, *paste)
 	}
 	return pastes, nil
+}
+
+func (fs *FilesystemStore) readMetadata(id string) (*models.Paste, error) {
+	metaPath, err := safePath(fs.dataDir, id+".json")
+	if err != nil {
+		return nil, err
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	metaData, err := os.ReadFile(metaPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	var paste models.Paste
+	if err := json.Unmarshal(metaData, &paste); err != nil {
+		return nil, err
+	}
+	return &paste, nil
 }

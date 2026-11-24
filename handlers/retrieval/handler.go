@@ -116,6 +116,10 @@ func (h *Handler) View(c *gin.Context) {
 		h.renderNotFound(c, "Paste not found or deleted")
 		return
 	}
+	if paste.IsEphemeral() {
+		h.renderNotFound(c, "Paste not found or deleted")
+		return
+	}
 
 	// Early strict size check: ask the store for the existence and size of
 	// the content. This uses a store-specific stat (filesystem: os.Stat,
@@ -262,6 +266,10 @@ func (h *Handler) Raw(c *gin.Context) {
 	paste, err := h.service.GetPaste(slug)
 	if err != nil {
 		log.Printf("[ERROR] Raw: %v", err)
+		c.JSON(http.StatusNotFound, gin.H{"error": "Paste not found or deleted"})
+		return
+	}
+	if paste.IsEphemeral() {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Paste not found or deleted"})
 		return
 	}

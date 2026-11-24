@@ -6,16 +6,23 @@ import (
 
 // Paste represents a paste/clipboard entry in the system
 type Paste struct {
-	ID            string         `json:"id" bson:"_id"`
-	CreatedAt     time.Time      `json:"created_at" bson:"created_at"`
-	ExpiresAt     *time.Time     `json:"expires_at" bson:"expires_at,omitempty"`
-	Size          int64          `json:"size" bson:"size"`
-	ContentType   string         `json:"content_type" bson:"content_type"`
-	BurnAfterRead bool           `json:"burn_after_read" bson:"burn_after_read"`
-	ReadCount     int            `json:"read_count" bson:"read_count"`
-	Content       []byte         `json:"-" bson:"content"` // Not exposed in JSON
-	Share         *ShareManifest `json:"share,omitempty" bson:"share,omitempty"`
-	Public        bool           `json:"public,omitempty" bson:"public,omitempty"`
+	ID                 string         `json:"id" bson:"_id"`
+	CreatedAt          time.Time      `json:"created_at" bson:"created_at"`
+	ExpiresAt          *time.Time     `json:"expires_at" bson:"expires_at,omitempty"`
+	Size               int64          `json:"size" bson:"size"`
+	ContentType        string         `json:"content_type" bson:"content_type"`
+	BurnAfterRead      bool           `json:"burn_after_read" bson:"burn_after_read"`
+	ReadCount          int            `json:"read_count" bson:"read_count"`
+	Content            []byte         `json:"-" bson:"content"` // Not exposed in JSON
+	Share              *ShareManifest `json:"share,omitempty" bson:"share,omitempty"`
+	Public             bool           `json:"public,omitempty" bson:"public,omitempty"`
+	EphemeralChannelID string         `json:"ephemeral_channel_id,omitempty" bson:"ephemeral_channel_id,omitempty"`
+}
+
+// IsEphemeral reports whether this paste belongs to a live channel and must
+// stay outside ordinary share and management surfaces.
+func (p *Paste) IsEphemeral() bool {
+	return p != nil && p.EphemeralChannelID != ""
 }
 
 // IsExpired checks if the paste has expired

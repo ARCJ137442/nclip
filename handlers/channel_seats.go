@@ -162,8 +162,14 @@ func (h *ChannelHandler) Leave(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": channels.ErrInvalidRequestID.Error()})
 		return
 	}
-	if err := h.manager.Leave(c.Param("id"), c.GetHeader("Idempotency-Key"), c.GetHeader(seatTokenHeader), time.Now()); err != nil {
+	release, err := h.manager.LeaveWithContent(c.Param("id"), c.GetHeader("Idempotency-Key"), c.GetHeader(seatTokenHeader), time.Now())
+	if err != nil {
 		h.channelError(c, err)
+		return
+	}
+	h.manager.CleanupContentRelease(release)
+	if err := h.deleteReleasedContent(release); err != nil {
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "channel_leave_cleanup_failed"})
 		return
 	}
 	c.Status(http.StatusNoContent)

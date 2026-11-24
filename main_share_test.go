@@ -23,9 +23,15 @@ import (
 )
 
 func shareTestRouter(t *testing.T, limit int64, auth bool) *gin.Engine {
+	router, _, _ := shareTestRouterWithStore(t, limit, auth)
+	return router
+}
+
+func shareTestRouterWithStore(t *testing.T, limit int64, auth bool) (*gin.Engine, *storage.FilesystemStore, string) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
-	store, err := storage.NewFilesystemStore(t.TempDir())
+	dataDir := t.TempDir()
+	store, err := storage.NewFilesystemStore(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +40,8 @@ func shareTestRouter(t *testing.T, limit int64, auth bool) *gin.Engine {
 			t.Error(err)
 		}
 	})
-	return setupRouter(store, &config.Config{URL: "https://clip.test", BufferSize: limit, DefaultTTL: 72 * time.Hour, MaxRenderSize: 1024, UploadAuth: auth, APIKeys: "test-key", Version: "test"})
+	router := setupRouter(store, &config.Config{URL: "https://clip.test", DataDir: dataDir, BufferSize: limit, DefaultTTL: 72 * time.Hour, MaxRenderSize: 1024, UploadAuth: auth, APIKeys: "test-key", Version: "test"})
+	return router, store, dataDir
 }
 
 func shareRequest(router http.Handler, method, url string, body io.Reader, headers map[string]string) *httptest.ResponseRecorder {

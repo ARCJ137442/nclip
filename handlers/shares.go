@@ -30,6 +30,11 @@ const (
 	maxShareTTL = 168 * time.Hour
 )
 
+var (
+	errShareArchive = errors.New("share archive failed")
+	errShareStore   = errors.New("share storage failed")
+)
+
 // SharesHandler adapts multipart clipboard messages to the existing paste store.
 type SharesHandler struct {
 	service     *services.PasteService
@@ -318,38 +323,88 @@ func (h *SharesHandler) Create(c *gin.Context) {
 		shareError(c, 400, err.Error())
 		return
 	}
-	buildSharePreviews(&u.manifest, u.parts)
 	ttl, err := shareTTL(c, h.config.DefaultTTL)
 	if err != nil {
 		shareError(c, 400, err.Error())
 		return
 	}
-	content, contentType, err := buildStoredShare(&u.manifest, u)
-	if err != nil {
-		shareError(c, 500, "archive_failed")
-		return
-	}
-	defer func() { _ = content.Remove() }()
 	burn := c.GetHeader("X-Burn") == "true"
 	visibility := c.GetHeader("X-Nclip-Visibility")
 	if visibility != "" && visibility != "authenticated" && visibility != "public" {
 		shareError(c, 400, "invalid_visibility")
 		return
 	}
-	resp, err := h.service.CreatePasteStream(services.CreatePasteStreamRequest{
-		Content:       content,
-		Size:          content.Size,
-		ContentType:   contentType,
-		TTL:           ttl,
-		BurnAfterRead: burn,
-		Share:         &u.manifest,
-		Public:        visibility == "public",
-	})
+	resp, err := h.createStoredShare(u, ttl, burn, visibility == "public", "")
 	if err != nil {
+		if errors.Is(err, errShareArchive) {
+			shareError(c, 500, "archive_failed")
+			return
+		}
 		shareError(c, 500, "store_failed")
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"slug": resp.Slug, "url": h.shareURL(c, resp.Slug), "burn_after_read": burn, "expires_at": resp.ExpiresAt, "public": visibility == "public", "manifest": u.manifest})
+}
+
+func (h *SharesHandler) createStoredShare(upload *shareUpload, ttl time.Duration, burn, public bool, channelID string) (*services.CreatePasteResponse, error) {
+	buildSharePreviews(&upload.manifest, upload.parts)
+	content, contentType, err := buildStoredShare(&upload.manifest, upload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errShareArchive, err)
+	}
+	usesInputPart := false
+	for _, part := range upload.parts {
+		if part == content {
+			usesInputPart = true
+			break
+		}
+	}
+	if !usesInputPart {
+		defer func() { _ = content.Remove() }()
+	}
+	response, err := h.service.CreatePasteStream(services.CreatePasteStreamRequest{
+		Content:            content,
+		Size:               content.Size,
+		ContentType:        contentType,
+		TTL:                ttl,
+		BurnAfterRead:      burn,
+		Share:              &upload.manifest,
+		Public:             public,
+		EphemeralChannelID: channelID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", errShareStore, err)
+	}
+	return response, nil
+}
+
+func (h *SharesHandler) CreateEphemeralShare(channelID, directory string, manifest models.ShareManifest, parts map[string]*spool.File) (*services.CreatePasteResponse, error) {
+	if channelID == "" || directory == "" {
+		return nil, fmt.Errorf("channel id and staging directory are required")
+	}
+	if err := validateManifest(&manifest); err != nil {
+		return nil, err
+	}
+	for _, item := range manifest.Items {
+		for _, part := range item.Parts {
+			file := parts[part.Key]
+			if file == nil || file.Size != part.Size {
+				return nil, fmt.Errorf("part_size_mismatch")
+			}
+		}
+	}
+	upload := newShareUpload(directory)
+	upload.manifest = manifest
+	upload.manifestSeen = true
+	for key, file := range parts {
+		if err := upload.add(key, file); err != nil {
+			return nil, err
+		}
+	}
+	if err := validateShareFiles(&upload.manifest, upload.parts); err != nil {
+		return nil, err
+	}
+	return h.createStoredShare(upload, services.ChannelOrphanTTL, false, false, channelID)
 }
 
 func (h *SharesHandler) get(c *gin.Context) (*models.Paste, bool) {
@@ -359,6 +414,10 @@ func (h *SharesHandler) get(c *gin.Context) (*models.Paste, bool) {
 	}
 	p, err := h.service.GetPaste(c.Param("slug"))
 	if err != nil {
+		shareError(c, 404, "not_found")
+		return nil, false
+	}
+	if p.IsEphemeral() {
 		shareError(c, 404, "not_found")
 		return nil, false
 	}

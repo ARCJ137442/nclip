@@ -29,6 +29,9 @@ func (h *AccountHandler) Shares(c *gin.Context) {
 	filtered := make([]models.Paste, 0, len(pastes))
 	var totalBytes int64
 	for _, paste := range pastes {
+		if paste.IsEphemeral() {
+			continue
+		}
 		if matchesShare(paste, query) {
 			filtered = append(filtered, paste)
 			totalBytes += paste.Size
