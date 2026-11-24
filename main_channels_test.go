@@ -322,9 +322,14 @@ func TestChannelCloseClearsCookieAndFreesSlot(t *testing.T) {
 	if retried.Code != http.StatusNoContent {
 		t.Fatalf("idempotent close retry: %d %s", retried.Code, retried.Body.String())
 	}
-	recreated := channelCreateRequest(router, createID, map[string]string{"X-Nclip-Visibility": "public"})
+	closedReplay := channelCreateRequest(router, createID, map[string]string{"X-Nclip-Visibility": "public"})
+	if closedReplay.Code != http.StatusConflict || !strings.Contains(closedReplay.Body.String(), "channel_create_closed") {
+		t.Fatalf("close did not suppress same-key replay: %d %s", closedReplay.Code, closedReplay.Body.String())
+	}
+	newCreateID, _ := channels.NewRequestID()
+	recreated := channelCreateRequest(router, newCreateID, map[string]string{"X-Nclip-Visibility": "public"})
 	if recreated.Code != http.StatusCreated || decodeChannelCreate(t, recreated).ID == channel.ID {
-		t.Fatalf("closed channel slot/idempotency record was not released: %d %s", recreated.Code, recreated.Body.String())
+		t.Fatalf("closed channel slot was not released: %d %s", recreated.Code, recreated.Body.String())
 	}
 }
 
@@ -392,5 +397,70 @@ func TestConcurrentCreateRetryConsumesOneRateSlot(t *testing.T) {
 	}
 	if response := channelCreateRequest(router, newID, nil); response.Code != http.StatusTooManyRequests {
 		t.Fatalf("new request after exactly 30 unique creates = %d, want 429", response.Code)
+	}
+}
+func TestConcurrentCloseAndSameKeyCreateAtLimitNeverReopen(t *testing.T) {
+	router := shareTestRouter(t, 4<<20, false)
+	for i := 0; i < 29; i++ {
+		requestID, err := channels.NewRequestID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response := channelCreateRequest(router, requestID, nil); response.Code != http.StatusCreated {
+			t.Fatalf("prefill %d: %d %s", i, response.Code, response.Body.String())
+		}
+	}
+	requestID, err := channels.NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	created := channelCreateRequest(router, requestID, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("target create: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	closeID, err := channels.NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var wait sync.WaitGroup
+	var retry, closeResponse *httptest.ResponseRecorder
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		retry = channelCreateRequest(router, requestID, nil)
+	}()
+	go func() {
+		defer wait.Done()
+		request := httptest.NewRequest(http.MethodDelete, "/api/v1/channels/"+channel.ID, nil)
+		request.Header.Set("Idempotency-Key", closeID)
+		request.Header.Set("Origin", "https://clip.test")
+		request.Header.Set("Sec-Fetch-Site", "same-origin")
+		request.AddCookie(created.Result().Cookies()[0])
+		closeResponse = httptest.NewRecorder()
+		router.ServeHTTP(closeResponse, request)
+	}()
+	wait.Wait()
+
+	if closeResponse.Code != http.StatusNoContent {
+		t.Fatalf("close response = %d %s", closeResponse.Code, closeResponse.Body.String())
+	}
+	if retry.Code != http.StatusCreated && retry.Code != http.StatusConflict {
+		t.Fatalf("same-key concurrent retry = %d %s", retry.Code, retry.Body.String())
+	}
+	if retry.Code == http.StatusCreated && decodeChannelCreate(t, retry).ID != channel.ID {
+		t.Fatal("same-key concurrent retry created a different channel")
+	}
+	status := shareRequest(router, http.MethodGet, "/api/v1/channels/"+channel.ID, nil, nil)
+	if status.Code != http.StatusNotFound {
+		t.Fatalf("channel reopened after close: status=%d body=%s", status.Code, status.Body.String())
+	}
+	newID, err := channels.NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := channelCreateRequest(router, newID, nil); response.Code != http.StatusTooManyRequests {
+		t.Fatalf("concurrent retry bypassed full IP limit: %d %s", response.Code, response.Body.String())
 	}
 }

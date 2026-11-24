@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestCreateIdempotencyAndSenderCapability(t *testing.T) {
@@ -116,18 +117,23 @@ func TestChannelLimitAndCloseClearsCreateReplay(t *testing.T) {
 	if err := manager.Close(firstID, firstKey); err != nil {
 		t.Fatalf("sender close: %v", err)
 	}
-	if manager.HasCreate("sender", firstRequestID) || manager.SenderAuthorized(firstID, firstKey) {
-		t.Fatal("closed channel or its create replay record remained")
+	if manager.HasCreate("sender", firstRequestID) || !manager.IsCreateClosed("sender", firstRequestID) || manager.SenderAuthorized(firstID, firstKey) {
+		t.Fatal("closed channel replay tombstone or sender capability state is incorrect")
 	}
+	if _, _, _, err := manager.Create("sender", firstRequestID, VisibilityPublic); err != ErrCreateClosed {
+		t.Fatalf("create retry after close = %v", err)
+	}
+	manager.mu.Lock()
+	manager.pruneClosedCreatesLocked(time.Now().Add(ClosedCreateRetention))
+	manager.mu.Unlock()
 	record, _, replay, err := manager.Create("sender", firstRequestID, VisibilityPublic)
 	if err != nil {
-		t.Fatalf("create after close: %v", err)
+		t.Fatalf("create after replay retention: %v", err)
 	}
 	if replay || record.ID == firstID || firstKey == "" {
-		t.Fatal("closed idempotency result was unexpectedly replayed")
+		t.Fatal("expired close tombstone incorrectly replayed a closed channel")
 	}
 }
-
 func TestCreateReplayDoesNotStoreSenderKey(t *testing.T) {
 	if _, ok := reflect.TypeOf(createResult{}).FieldByName("senderKey"); ok {
 		t.Fatal("create replay record retains a plaintext sender capability")

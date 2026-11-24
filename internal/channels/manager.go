@@ -11,8 +11,11 @@ import (
 	"time"
 )
 
-// MaxChannels bounds in-memory channel and create-idempotency records; Close frees a slot.
-const MaxChannels = 1024
+const (
+	MaxChannels           = 1024
+	MaxChannelRecords     = 61440
+	ClosedCreateRetention = time.Minute
+)
 
 type Visibility string
 
@@ -29,6 +32,7 @@ var (
 	ErrInvalidVisibility   = errors.New("invalid_visibility")
 	ErrCapacity            = errors.New("channel_capacity_reached")
 	ErrUnauthorized        = errors.New("channel_forbidden")
+	ErrCreateClosed        = errors.New("channel_create_closed")
 )
 
 type Record struct {
@@ -42,18 +46,24 @@ type Record struct {
 type createResult struct {
 	visibility Visibility
 	record     Record
+	key        string
 }
 
 type Manager struct {
-	mu        sync.Mutex
-	channels  map[string]Record
-	creates   map[string]createResult
-	masterKey [sha256.Size]byte
-	keyReady  bool
+	mu            sync.Mutex
+	channels      map[string]Record
+	creates       map[string]createResult
+	closedCreates map[string]time.Time
+	masterKey     [sha256.Size]byte
+	keyReady      bool
 }
 
 func NewManager() *Manager {
-	return &Manager{channels: make(map[string]Record), creates: make(map[string]createResult)}
+	return &Manager{
+		channels:      make(map[string]Record),
+		creates:       make(map[string]createResult),
+		closedCreates: make(map[string]time.Time),
+	}
 }
 
 func ValidRequestID(value string) bool {
@@ -69,10 +79,23 @@ func NewRequestID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(raw), nil
 }
 
+func createKey(scope, requestID string) string {
+	return scope + "|" + requestID
+}
+
 func (m *Manager) HasCreate(scope, requestID string) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	_, ok := m.creates[scope+"\x00"+requestID]
+	m.pruneClosedCreatesLocked(time.Now())
+	_, ok := m.creates[createKey(scope, requestID)]
+	return ok
+}
+
+func (m *Manager) IsCreateClosed(scope, requestID string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.pruneClosedCreatesLocked(time.Now())
+	_, ok := m.closedCreates[createKey(scope, requestID)]
 	return ok
 }
 
@@ -83,16 +106,21 @@ func (m *Manager) Create(scope, requestID string, visibility Visibility) (Record
 	if visibility != VisibilityAuthenticated && visibility != VisibilityPublic {
 		return Record{}, "", false, ErrInvalidVisibility
 	}
-	key := scope + "\x00" + requestID
+	key := createKey(scope, requestID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	now := time.Now()
+	m.pruneClosedCreatesLocked(now)
+	if _, closed := m.closedCreates[key]; closed {
+		return Record{}, "", false, ErrCreateClosed
+	}
 	if prior, ok := m.creates[key]; ok {
 		if prior.visibility != visibility {
 			return Record{}, "", false, ErrIdempotencyConflict
 		}
 		return prior.record, m.deriveSenderKey(scope, requestID, prior.record.ID), true, nil
 	}
-	if len(m.channels) >= MaxChannels {
+	if len(m.channels) >= MaxChannels || len(m.channels)+len(m.closedCreates) >= MaxChannelRecords {
 		return Record{}, "", false, ErrCapacity
 	}
 	if !m.keyReady {
@@ -111,13 +139,21 @@ func (m *Manager) Create(scope, requestID string, visibility Visibility) (Record
 	record := Record{
 		ID:         id,
 		Visibility: visibility,
-		CreatedAt:  time.Now().UTC(),
+		CreatedAt:  now.UTC(),
 		State:      StateOpen,
 		senderHash: sha256.Sum256([]byte(senderKey)),
 	}
 	m.channels[id] = record
-	m.creates[key] = createResult{visibility: visibility, record: record}
+	m.creates[key] = createResult{visibility: visibility, record: record, key: key}
 	return record, senderKey, false, nil
+}
+
+func (m *Manager) pruneClosedCreatesLocked(now time.Time) {
+	for key, expiresAt := range m.closedCreates {
+		if !expiresAt.After(now) {
+			delete(m.closedCreates, key)
+		}
+	}
 }
 
 func (m *Manager) deriveSenderKey(scope, requestID, channelID string) string {
@@ -146,8 +182,8 @@ func (m *Manager) SenderAuthorized(id, senderKey string) bool {
 	return subtle.ConstantTimeCompare(record.senderHash[:], got[:]) == 1
 }
 
-// Close removes an empty channel and its create idempotency record. A missing
-// channel is already closed; retrying DELETE therefore remains idempotent.
+// Close removes an empty channel and its create result. A short closed-key
+// tombstone prevents an in-flight create retry from reopening the channel.
 func (m *Manager) Close(id, senderKey string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -163,9 +199,12 @@ func (m *Manager) Close(id, senderKey string) error {
 		return ErrUnauthorized
 	}
 	delete(m.channels, id)
+	now := time.Now()
+	m.pruneClosedCreatesLocked(now)
 	for key, result := range m.creates {
 		if result.record.ID == id {
 			delete(m.creates, key)
+			m.closedCreates[key] = now.Add(ClosedCreateRetention)
 		}
 	}
 	return nil

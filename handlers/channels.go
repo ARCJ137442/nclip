@@ -190,6 +190,10 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 		return
 	}
+	if errors.Is(err, channels.ErrCreateClosed) {
+		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": err.Error()})
+		return
+	}
 	if errors.Is(err, channels.ErrIdempotencyConflict) {
 		c.AbortWithStatusJSON(http.StatusConflict, gin.H{"error": err.Error()})
 		return
@@ -228,6 +232,9 @@ func (h *ChannelHandler) createChannel(scope, requestID, ip string, visibility c
 	}
 	h.createMu.Lock()
 	defer h.createMu.Unlock()
+	if h.manager.IsCreateClosed(scope, requestID) {
+		return channels.Record{}, "", false, channels.ErrCreateClosed
+	}
 	now := time.Now()
 	firstRequest := !h.manager.HasCreate(scope, requestID)
 	if firstRequest && !h.allowCreateLocked(ip, now) {
@@ -271,7 +278,10 @@ func (h *ChannelHandler) recordCreateLocked(ip string, now time.Time) {
 
 func (h *ChannelHandler) Close(c *gin.Context) {
 	senderKey, _ := c.Cookie(senderCookieName)
-	if err := h.manager.Close(c.Param("id"), senderKey); err != nil {
+	h.createMu.Lock()
+	err := h.manager.Close(c.Param("id"), senderKey)
+	h.createMu.Unlock()
+	if err != nil {
 		if errors.Is(err, channels.ErrUnauthorized) {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": err.Error()})
 			return
