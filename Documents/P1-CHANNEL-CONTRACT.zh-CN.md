@@ -1,63 +1,94 @@
-# P1a-0 信道契约冻结（审阅稿）
+# P1a-0 信道契约冻结（修订审阅稿）
 
-状态：提交审阅前的契约候选。获审阅方“通过”后，按 G1–G6 分批实施；本文件不授权部署。
+状态：P1a-0 修订稿，等待审阅方明确“通过”。获通过前不开始 G1；本文不授权部署。
 
-依据：P1 channel design 与 P1 iteration plan（2026-11-24）；与既有 P0 和用户在本线程给出的边界一致。
+依据：P1 channel design、P1 iteration plan、P0 既有行为及已确认的用户裁定。
 
-## 1. 内容容量与磁盘保护
+## 1. 内容额度与磁盘空间
 
-1. 每条信道同一时刻最多关联一份待交付内容。该信道内容的逻辑字节总量沿用普通分享的有效单次上传上限：账号模式按上传者当前用户额度与服务端限制计算；无账号模式沿用既有服务端上传限制和 UploadAuth。不得另建面向终端用户的“信道容量”设置。
-2. 这项单次上限约束的是该信道暂存内容大小，不是网络速率或带宽承诺。
-3. 全部信道另受一个服务端磁盘总量保护。候选默认值为信道数据目录所在文件系统在进程启动时的可用空间的 10%；由服务端内部策略控制，不提供 UI、公开 API 或可查询的剩余量。达到保护线时，拒绝新的信道内容写入，返回不泄露容量和磁盘余量的通用暂不可用说明。
-4. 预留空间必须原子化，避免并发上传同时通过检查造成超额。离开、踢出、撤回、关闭及清扫释放对应预留。不能为腾空间删除仍活跃占用的内容或自动释放席位。普通分享内容不计入信道暂存额度。
-5. 文件系统可用空间可能被其他进程改变；若实际写入仍遇到磁盘不足，上传失败并清理该次未完成内容，已存在的活跃内容保留。
+### 1.1 单信道额度
+
+- 一个信道同一时刻最多有一份待交付内容；该内容逻辑字节总量沿用普通分享的完整 `effectiveUploadLimit(c)` 规则，不另设面向用户的信道额度。
+- 内容上传 init 时，服务端按当时的认证用户、服务端 BufferSize、共享上传限制和现有条件计算并固定一次有效额度快照。init 同时验证 manifest 声明的总 part 字节数不超过该快照；每个分块及 finalize 都按同一快照验证。管理员之后调整额度不改变已创建上传会话的额度。
+- 此额度限制内容大小，不代表速率或带宽保证。无账号模式继续使用现有 UploadAuth 与服务端上传规则。
+
+### 1.2 全局物理空间预算
+
+把每个实际承载信道文件的文件系统分别记为 `i`；分块暂存、组装临时文件和最终信道内容都必须纳入其所在文件系统的预算，不能只计 DataDir。
+
+进程启动顺序固定为：
+
+1. 信道状态为内存态，重启后不存在可继续使用的信道；先清扫所有上次遗留的信道分块、组装临时文件和最终临时内容。
+2. 所有清扫成功后，对每个承载信道文件的文件系统读取可用字节，记为 `F0_i`。读取失败时信道内容上传 fail closed。
+3. 每个文件系统的保护底线 `floor_i = ceil(F0_i × 0.10)`；对应的全局信道预算 `B_i = max(0, F0_i - floor_i)`。10% 是服务端保护底线，不是客户端配额；启动后固定此快照，不随可用空间变化重算。
+
+每次 content init 都必须先在任何请求体字节写入前完成以下原子操作：
+
+- 在同一 ChannelManager 单写者锁内，验证该信道内容槽为 `empty`、占用它并转为 `uploading`；不同 request/idempotency key 的并发 init 中只有一个成功，另一个返回 409。相同 key 返回同一上传会话。
+- 根据已固定的逻辑额度和存储流程，逐文件系统计算本会话的物理峰值上界 `R_i`。`R_i` 包含该文件系统上的分块暂存、组装/最终文件在临时副本并存期间的空间，以及 manifest、归档目录、文件系统分配等有界开销；按最坏同时存在的物理字节预留，不以逻辑 part 字节数代替。分块大小、item 上限和归档上界必须使每个 `R_i` 可计算且有限。
+- 在同一锁内逐文件系统原子验证 `heldPhysical_i + uploadingReservations_i + R_i <= B_i` 并记录 reservation。每个上传会话的 reservation 计一次完整峰值 `R_i`；实际已写入的暂存字节属于该 reservation，不重复累加。finalize 时将 reservation 原子替换为最终保留文件的实际物理字节；abort、kick、close 和清扫时释放 reservation/实际占用。
+- 同时逐文件系统读取当前 free bytes `Fnow_i`。要求每个 `Fnow_i >= floor_i + outstandingUnmaterializedReservations_i + R_i` 后才允许开始传输。普通分享不计入 `B_i`，但其写入仍会降低同一文件系统的 `Fnow_i`，因此会影响新信道 init 的动态检查。普通分享与信道写入在检查后仍可能竞争磁盘；若发生 ENOSPC，只清理未完成上传及其 reservation，保留已有活跃内容。
+- `F0_i` 快照预算不因普通分享而变化。之后每次新传输都对每个相关文件系统用当前 `Fnow_i` 检查保护底线；已活跃或已预留的信道不因普通分享占用增加而被自动删除、kick 或缩短寿命。
+
+磁盘比例、预算、reservation 数量和剩余空间不得出现在 UI、公开 API 或用户可查询的管理信息中；超限只返回通用的“暂时无法接收新内容”错误。此保护不向客户端透露机器盘容量。
 
 ## 2. 路由与身份凭据
 
 | 操作 | 账号模式 | 无账号模式 | 凭据与边界 |
 |---|---|---|---|
-| 创建信道 | 登录、upload 权限、CSRF | 无 UploadAuth 时按现有开放策略；启用 UploadAuth 时要求 API key | 返回目的绑定 HttpOnly `sender_key` cookie，不在响应体返回密钥 |
-| 上传信道内容 | 信道 `sender_key` + 上传策略 | `sender_key` + 已启用时的 UploadAuth | 新建 `POST /api/v1/channels/:id/content`；内部复用既有创建服务；不接受 `X-Channel` 作为授权 |
-| 加入信道 | 公开可匿名；非公开需登录及 download 权限；身份只从会话解析 | 匿名加入 | 已登录会话的写操作仍校验 CSRF |
-| 查看状态 | 按明确 sender/receiver 角色验证 | 同左 | sender-only 只认 `sender_key`；receiver-only 只认 `seat_token`；不得“任一凭据均放行” |
+| 创建信道 | 登录、upload 权限、CSRF | 无 UploadAuth 时按现有开放策略；启用 UploadAuth 时要求 API key | 设置下述目的绑定 `sender_key` cookie，不在响应体返回密钥 |
+| 上传内容 init/chunk/finalize | 账号上传策略 + 信道 `sender_key` | `sender_key` + 已启用时的 UploadAuth | 信道域端点；内部复用现有分享创建服务；不接受 `X-Channel` 作为授权 |
+| 加入信道 | 显式公开可匿名；非公开需登录和 download 权限；身份只从会话解析 | 匿名加入 | 已登录会话的写操作校验 CSRF |
+| 查看状态 | 按明确 sender/receiver 角色验证 | 同左 | sender-only 只认 `sender_key`；receiver-only 只认 `seat_token` |
 | 放行、拒绝、踢出、关闭 | sender-only | sender-only | `sender_key` + 同源/防 CSRF 校验 |
 | 心跳、内容读取、leave | receiver-only | receiver-only | `seat_token` 专用 header；`claim_token` 专用 header；令牌不进 URL 或浏览器持久存储 |
-| 页面 | 按可见性接入；先解析登录会话 | 公开页面可匿名 | 信道感知 access middleware；不能把信道路径整体加入 `publicPath`；`/c/:id` 在 `/:slug` 前注册 |
+| 页面 | 信道感知 access middleware；先解析会话，再按 visibility 判定 | 公开页面可匿名 | 不整体豁免 Gate；`/c/:id` 在 `/:slug` 前注册 |
 
-`sender_key` cookie Path 为对应信道 API 路径并跨页面刷新保留；浏览器关闭后不保证可恢复。页面 URL、Referrer、普通分享路径及管理列表不得泄露令牌或临时内容。
+`sender_key` cookie 属性固定如下：
 
-## 3. 状态、幂等与时间
+- `HttpOnly`、`SameSite=Strict`，不设置 `Max-Age` 或 `Expires`（会话 cookie）。
+- `Path=/api/v1/channels/<完整 channel id>`，精确绑定单条信道，不使用父路径。
+- 仅当请求的外部 scheme 已由 TLS 或已配置的可信代理确认是 HTTPS 时设置 `Secure`；不能信任任意客户端提供的转发头。
+- 信道进入 terminal closed 状态时服务端主动清除此 cookie；清除使用相同 name、Path、SameSite、Secure、HttpOnly 属性并设置删除语义。刷新页面不清除；浏览器会话结束后不承诺恢复。
 
-- 信道 ID 使用 CSPRNG 至少 128 bit；默认一席。发送端预置后，首个获准接收方加入即触发发送；双方在线是发送前提。
+## 3. 状态、原子操作与幂等
+
+- 信道 ID 使用 CSPRNG 至少 128 bit；默认一席。发送端预置后，首个获准接收方加入触发发送；双方在线是发送前提。
 - 席位轴：`open → pending_admit → paired`；拒绝/同意超时回到 open；leave、kick、撤回、页面关闭释放席位。
-- 内容轴：`empty → uploading → held`；上传失败清理未完成内容并回到 empty；`pending_admit` 时服务端不得已有内容文件。
-- 信道没有产品 TTL。发送者离开后不再接受新加入；已有活跃占用仍由当前规则管理。进程重启结束内存信道并清扫孤儿临时内容，UI 明示此边界。
-- 页面前台心跳 5 秒、隐藏页 30 秒；超过 90 秒无活证据才按崩溃/断网处理。该兜底不影响仍存活且持续心跳的长暂停；发送者可随时 kick。
-- 匿名放行窗 2 分钟。过期后释放 pending 席位；发送端离线时需其确认的 join 返回 410。
-- 页面关闭/刷新使用非 bfcache `pagehide` 的 keepalive/beacon `leave`，立即释放并销毁临时内容。下载管理器随接收页终止，不允许 ticket lease 独立续命。当前页面网络中断后的同页恢复最多 2 分钟；接收页关闭、刷新或 leave 后，旧令牌立即失效。
-- create、join、admit、leave 使用 request id 或等价幂等键；同键重试返回同一决策/结果，不重复建信道或占席。上传分块按 offset + hash 幂等。
-- join 限速按来源 IP 与信道两维实施。候选默认：每 IP 每 60 秒 30 次新 join、每信道每 60 秒 5 次新 join；同幂等键重试不重复计数。限速响应给出可重试时间，不暴露内部计数。
+- 内容轴：`empty → uploading → held`。槽位必须在 init 收到任何分块字节前原子占用；上传失败清理临时文件并回到 empty；`pending_admit` 阶段服务端没有内容文件。
+- create/join/admit/leave/content init/content finalize/kick/close 均有 request id 或等价 idempotency key。相同 key 重试返回相同会话或决策，不重复 side effect；相反的 admit 决策返回冲突。
+- 同信道不同 content-init key 在 `uploading` 或 `held` 状态返回 409。相同 init key 返回相同 upload session；finalize 重试返回同一结果。kick 重试保持已释放的 open 状态；close 重试保持 closed。channel lock 串行化 kick 与 close，close 是终态。
+- 信道没有产品 TTL。发送者离开后不接受新加入、不再上传；已有活跃占用继续由接收页和释放规则管理。重启清理所有孤儿信道文件，UI 明示信道不跨进程重启。
+- 接收页前台心跳 5 秒、隐藏页 30 秒；超过 90 秒无活证据才按崩溃/断网处理。存活页长暂停不自动释放，发送者可随时 kick。
+- 匿名放行窗 2 分钟；过期后释放 pending 席位。发送端离线时需其确认的 join 返回 410。
+- 页面关闭/刷新走非 bfcache `pagehide` 的 keepalive/beacon `leave`，立即释放并销毁临时内容。下载管理器随接收页终止，不允许 ticket lease 独立续命。同页网络中断恢复最多 2 分钟；leave、刷新或关闭后旧令牌失效。
+- 对相同幂等 key 的重试不重复计入 join rate limit。
 
-## 4. 内容、隔离与恢复
+## 4. Join 限速口径
 
-- D1：使用信道域内容端点 `POST /api/v1/channels/:id/content`，内部复用现有 `SharesHandler`/`PasteService`。凭据和授权由信道域验证。
-- D2：信道上传采用分块可恢复协议，每块带 offset 与 hash；重复块幂等，偏移/摘要冲突明确失败。接收续传按完整 multipart 响应字节寻址。
-- 内容标记为 ephemeral/channel。普通分享 API（metadata、content、receive）、legacy slug、raw/json、meta 路径对临时内容统一 404；管理台账不列出临时内容；普通 publicShare 与 Gate 不得放行临时记录。
-- Multipart boundary 对同一内容版本稳定；响应提供 ETag、Accept-Ranges，支持 If-Range/Content-Range。seat/claim 只走专用 header。
-- 内容只有在 receiver seat 与有效 claim 绑定时可读。发送者撤回、kick、关闭必须取消在途写出。完成写出后销毁；leave/关闭/掉线释放流程销毁临时内容。单读由未来信道的独占 claim/seat 锁保证，不以“删除先于交付”作为永久不变量。
-- 临时内容存储清扫不得删除活跃占用；重启清扫孤儿内容。普通分享存储、TTL 和访问行为保持现状。
+- 来源 IP 只通过 Gin 的 `ClientIP()` 与显式可信代理配置解析；实现不得自行读取/信任任意 `X-Forwarded-For`。未列入可信代理的转发头一律视为不可信。
+- 首版候选阈值：每 IP 每滚动 60 秒最多 30 次；每信道每滚动 60 秒最多 5 次。
+- 一个 join request id 首次通过语法、可见性和身份授权校验时计为一个新 join attempt；成功、`seats_full` 和已存在 pending 的冲突都计数。认证/可见性失败和无效请求不计数；同一 request id 的重试不重复计数。超过限额返回 429 与 Retry-After。
 
-## 5. 确认与隐私
+## 5. 内容隔离、交付与恢复
 
-- 账号模式下，join 时能从会话解析身份的接收方显示用户名并零确认，包括显式公开信道；同时必须完成“非预期登录账号通过公开链接自动接收”的红队验收。
-- 账号模式匿名接收方进入 pending_admit；无账号模式的每次立即发送都由发送者确认。确认前服务端没有内容文件。确认显示匿名身份及加入信息。
-- 信道临时身份仅在信道存续期间对发送者可见，不写入管理回执或长期取件记录。接收者在 join 前看到身份披露说明。
-- 默认一席；暂不实现 P1b 份数代数、P1c 回执或 P1d 管理图表。不做 P2 渐进交付、P2P、owner/ACL/分组或跨页面恢复。
+- D1：`POST /api/v1/channels/:id/content` 创建上传会话；后续通过信道域分块写入与 finalize 子端点传输；内部复用现有 `SharesHandler`/`PasteService` 创建逻辑。凭据与授权先由信道域校验。
+- D2：分块上传按 offset/hash 幂等；声明 manifest 与 part 总大小在 init 校验；每块校验 offset、长度、hash 和 init 时额度快照。重试不重复追加或超出 init 声明。
+- 临时内容标记为 ephemeral/channel。普通分享 metadata/content/receive、legacy slug、raw/json、meta 路径对临时记录统一 404；管理台账不列临时内容；普通 publicShare 与 Gate 不放行临时记录。
+- 同一内容版本的 multipart boundary 稳定；响应提供 ETag、Accept-Ranges，支持 If-Range/Content-Range；Range 按完整 multipart 响应字节寻址。
+- 内容只有在 receiver seat 与有效 claim 绑定时可读。发送者撤回、kick、close 必须取消在途写出。成功写完后销毁；leave/关闭/掉线释放流程销毁临时内容。单读由独占 claim/seat 锁保证，不把“删除先于交付”写成永久不变量。
+- 活跃内容不因磁盘预算、清扫或普通分享写入自动删除。完成、显式释放、掉线后的释放倒计时及重启孤儿清扫按既定信道生命周期删除。普通分享 TTL/访问行为保持现状。
 
-## 6. 分批门禁与验证
+## 6. 身份与范围
 
-- 本契约本身为 P1a-0；先交审阅方审阅。未通过前不开始 G1。
-- G1–G6 各自独立提交、测试和回传审阅；需修改时修复并重新审阅。一个批次通过后才进入下一批。
-- 浏览器/设备测试仅用隔离实例、数据与端口。G5 使用真实双设备/双浏览器，不用同一浏览器多标签替代。
-- 最终审阅覆盖验收矩阵、上传与 Range 恢复、身份/门禁、临时内容防旁路、leave/pagehide、异常掉线、kick/撤回中断、代理设置及部署演练。
-- 最终审阅通过之前不部署。部署与线上验收通过后才算 Done。
+- 账号模式中，join 可从会话解析身份的接收方显示用户名并零确认，包括显式公开信道；必须测试非预期登录账号通过公开链接自动接收的风险。
+- 账号模式匿名接收方进入 pending_admit；无账号模式每次立即发送都由发送者确认。确认前服务端没有内容文件；确认显示匿名身份及加入信息。
+- 信道临时身份只在信道存续期间对发送者可见，不写长期回执。接收者在 join 前看到身份披露。
+- 默认一席；不做 P1b 份数、P1c 回执、P1d 管理图表、P2 渐进交付、P2P、owner/ACL/分组或跨页面恢复。
+
+## 7. 分批门禁
+
+- 本文件为 P1a-0；审阅通过后才进入 G1。
+- G1–G6 分批独立提交、测试、回传 SHA/文件/命令与输出/浏览器证据/边界/下一批计划；需修改则修复后重送审，通过前不得推进。
+- 浏览器测试仅使用隔离数据和端口；G5 使用真实双设备/双浏览器。
+- 最终审阅覆盖上传和 Range 恢复、访问控制、临时内容防旁路、pagehide/leave、异常掉线、kick/撤回中断、代理配置及部署演练。最终审阅通过前不部署；完成线上验收后才算 Done。
