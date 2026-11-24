@@ -12,6 +12,7 @@ import (
 // so callers can use errors.Is(err, ErrNotFound) regardless of backend.
 var ErrNotFound = errors.New("paste not found")
 var ErrSlugReserved = errors.New("paste slug is reserved for channel content")
+var ErrSlugReservationLost = errors.New("paste slug reservation was lost")
 var ErrChannelWriterNotOwned = errors.New("channel writer lock is not owned")
 
 const ChannelContentTempPrefix = ".nclip-channel-content-"
@@ -89,5 +90,15 @@ type ChannelWriterStore interface {
 
 // PasteSlugReserver atomically holds a slug across a content+metadata create.
 type PasteSlugReserver interface {
-	ReservePasteSlug(id string) (func() error, error)
+	ReservePasteSlug(id string) (token string, release func() error, err error)
+}
+
+type PasteSlugAwareStore interface {
+	StorePasteContentStream(id, token string, content io.Reader, size int64) error
+	StorePasteMetadata(paste *models.Paste, token string) error
+}
+
+type ReservedChannelContentStore interface {
+	StoreChannelContentStreamReserved(id, token string, content io.Reader, size int64) error
+	CommitChannelContentReserved(id, token string) error
 }

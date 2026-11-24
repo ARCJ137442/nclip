@@ -71,12 +71,27 @@ func NewFilesystemStore(dataDir string) (*FilesystemStore, error) {
 
 // Store saves the paste metadata (JSON) to local filesystem
 func (fs *FilesystemStore) Store(paste *models.Paste) error {
+	return fs.storePasteMetadata(paste, "")
+}
+
+func (fs *FilesystemStore) StorePasteMetadata(paste *models.Paste, token string) error {
+	return fs.storePasteMetadata(paste, token)
+}
+
+func (fs *FilesystemStore) storePasteMetadata(paste *models.Paste, token string) error {
 	metaPath, err := safePath(fs.dataDir, paste.ID+".json")
+	if err != nil {
+		return err
+	}
+	reservationPath, err := safePath(fs.dataDir, PasteSlugReservationPrefix+paste.ID+".lock")
 	if err != nil {
 		return err
 	}
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
+	if err := fs.checkPasteSlugReservationLocked(reservationPath, token); err != nil {
+		return err
+	}
 	metaData, err := json.MarshalIndent(paste, "", "  ")
 	if err != nil {
 		log.Printf("[ERROR] FS Store: failed to marshal metadata for %s: %v", paste.ID, err)
@@ -85,6 +100,23 @@ func (fs *FilesystemStore) Store(paste *models.Paste) error {
 	if err := os.WriteFile(metaPath, metaData, 0o644); err != nil { // #nosec G306 -- path sanitised by safePath
 		log.Printf("[ERROR] FS Store: failed to write metadata for %s: %v", paste.ID, err)
 		return err
+	}
+	return nil
+}
+
+func (fs *FilesystemStore) checkPasteSlugReservationLocked(path, token string) error {
+	contents, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		if token != "" {
+			return ErrSlugReservationLost
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if token == "" || string(contents) != token {
+		return ErrSlugReserved
 	}
 	return nil
 }
@@ -226,10 +258,27 @@ func (fs *FilesystemStore) StoreContent(id string, content []byte) error {
 // StoreContentStream writes to a private temporary file and renames it only
 // after the full payload and size have been verified.
 func (fs *FilesystemStore) StoreContentStream(id string, content io.Reader, size int64) error {
-	return fs.storeContentStream(id, content, size, "."+id+".upload-*")
+	return fs.storeContentStream(id, content, size, "."+id+".upload-*", "")
+}
+
+func (fs *FilesystemStore) StorePasteContentStream(id, token string, content io.Reader, size int64) error {
+	return fs.storeContentStream(id, content, size, "."+id+".upload-*", token)
 }
 
 func (fs *FilesystemStore) StoreChannelContentStream(id string, content io.Reader, size int64) error {
+	token, release, err := fs.ReservePasteSlug(id)
+	if err != nil {
+		return err
+	}
+	storeErr := fs.StoreChannelContentStreamReserved(id, token, content, size)
+	releaseErr := release()
+	if storeErr != nil {
+		return storeErr
+	}
+	return releaseErr
+}
+
+func (fs *FilesystemStore) StoreChannelContentStreamReserved(id, token string, content io.Reader, size int64) error {
 	if !utils.IsValidSlug(id) {
 		return errUnsafeID
 	}
@@ -249,6 +298,15 @@ func (fs *FilesystemStore) StoreChannelContentStream(id string, content io.Reade
 		return err
 	}
 	fs.mu.Lock()
+	reservationPath, pathErr := safePath(fs.dataDir, PasteSlugReservationPrefix+id+".lock")
+	if pathErr != nil {
+		fs.mu.Unlock()
+		return pathErr
+	}
+	if err := fs.checkPasteSlugReservationLocked(reservationPath, token); err != nil {
+		fs.mu.Unlock()
+		return err
+	}
 	for _, path := range []string{contentPath, metaPath} {
 		if _, err := os.Stat(path); err == nil {
 			fs.mu.Unlock()
@@ -308,6 +366,33 @@ func (fs *FilesystemStore) CommitChannelContent(id string) error {
 	return nil
 }
 
+func (fs *FilesystemStore) CommitChannelContentReserved(id, token string) error {
+	if !utils.IsValidSlug(id) {
+		return errUnsafeID
+	}
+	stagePath, err := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
+	if err != nil {
+		return err
+	}
+	contentPath, err := safePath(fs.dataDir, id)
+	if err != nil {
+		return err
+	}
+	reservationPath, err := safePath(fs.dataDir, PasteSlugReservationPrefix+id+".lock")
+	if err != nil {
+		return err
+	}
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	if err := fs.checkPasteSlugReservationLocked(reservationPath, token); err != nil {
+		return err
+	}
+	if err := os.Rename(stagePath, contentPath); err != nil {
+		return fmt.Errorf("publish channel content: %w", err)
+	}
+	return nil
+}
+
 // SweepPendingChannelContent removes finalization states that did not finish.
 // Pending markers remain until content and metadata are deleted, making a
 // crash during cleanup safe to retry on the next startup.
@@ -356,7 +441,7 @@ func (fs *FilesystemStore) SweepPendingChannelContent() error {
 	return nil
 }
 
-func (fs *FilesystemStore) storeContentStream(id string, content io.Reader, size int64, tempPattern string) error {
+func (fs *FilesystemStore) storeContentStream(id string, content io.Reader, size int64, tempPattern, token string) error {
 	contentPath, err := safePath(fs.dataDir, id)
 	if err != nil {
 		return err
@@ -397,6 +482,19 @@ func (fs *FilesystemStore) storeContentStream(id string, content io.Reader, size
 	}
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
+	reservationPath, pathErr := safePath(fs.dataDir, PasteSlugReservationPrefix+id+".lock")
+	if pathErr != nil {
+		_ = os.Remove(tmpPath)
+		return pathErr
+	}
+	if err := fs.checkPasteSlugReservationLocked(reservationPath, token); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if err := fs.checkPasteSlugReservationLocked(reservationPath, token); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
 	if !strings.HasPrefix(id, ChannelContentTempPrefix) {
 		pendingPath, pathErr := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
 		if pathErr != nil {
@@ -596,45 +694,46 @@ func (fs *FilesystemStore) WithChannelWriter(run func() error) error {
 	return run()
 }
 
-func (fs *FilesystemStore) ReservePasteSlug(id string) (func() error, error) {
+func (fs *FilesystemStore) ReservePasteSlug(id string) (string, func() error, error) {
 	if !utils.IsValidSlug(id) {
-		return nil, errUnsafeID
+		return "", nil, errUnsafeID
 	}
 	contentPath, err := safePath(fs.dataDir, id)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	metaPath, err := safePath(fs.dataDir, id+".json")
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	pendingPath, err := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	reservationPath, err := safePath(fs.dataDir, PasteSlugReservationPrefix+id+".lock")
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if err := os.MkdirAll(fs.dataDir, 0o755); err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	tokenBytes := make([]byte, 32)
 	if _, err := rand.Read(tokenBytes); err != nil {
-		return nil, fmt.Errorf("create paste slug reservation token: %w", err)
+		return "", nil, fmt.Errorf("create paste slug reservation token: %w", err)
 	}
 	token := hex.EncodeToString(tokenBytes)
 	fs.mu.Lock()
 	for _, path := range []string{contentPath, metaPath, pendingPath} {
 		if _, err := os.Stat(path); err == nil {
 			fs.mu.Unlock()
-			return nil, ErrSlugReserved
+			return "", nil, ErrSlugReserved
 		} else if !os.IsNotExist(err) {
 			fs.mu.Unlock()
-			return nil, err
+			return "", nil, err
 		}
 	}
 	file, err := os.OpenFile(reservationPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	createdReservation := err == nil
 	if err == nil {
 		_, err = file.WriteString(token)
 	}
@@ -648,11 +747,16 @@ func (fs *FilesystemStore) ReservePasteSlug(id string) (func() error, error) {
 	}
 	fs.mu.Unlock()
 	if err != nil {
-		_ = os.Remove(reservationPath)
-		if os.IsExist(err) {
-			return nil, ErrSlugReserved
+		if createdReservation {
+			contents, readErr := os.ReadFile(reservationPath)
+			if readErr == nil && string(contents) == token {
+				_ = os.Remove(reservationPath)
+			}
 		}
-		return nil, fmt.Errorf("reserve paste slug: %w", err)
+		if os.IsExist(err) {
+			return "", nil, ErrSlugReserved
+		}
+		return "", nil, fmt.Errorf("reserve paste slug: %w", err)
 	}
 	var once sync.Once
 	var releaseErr error
@@ -676,7 +780,7 @@ func (fs *FilesystemStore) ReservePasteSlug(id string) (func() error, error) {
 		})
 		return releaseErr
 	}
-	return release, nil
+	return token, release, nil
 }
 
 // ListPastes lists active metadata, excluding private account subdirectories.

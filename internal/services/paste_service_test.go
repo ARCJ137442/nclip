@@ -57,7 +57,7 @@ func TestCreatePasteHoldsSlugReservationThroughMetadataCommit(t *testing.T) {
 	if err := service.ValidateCustomSlug("RSV52"); err == nil {
 		t.Fatal("second create accepted a slug reserved by an in-flight first create")
 	}
-	if _, err := fs.ReservePasteSlug("RSV52"); !errors.Is(err, storage.ErrSlugReserved) {
+	if _, _, err := fs.ReservePasteSlug("RSV52"); !errors.Is(err, storage.ErrSlugReserved) {
 		t.Fatalf("competing reservation did not lose the slug race: %v", err)
 	}
 	close(reader.proceed)

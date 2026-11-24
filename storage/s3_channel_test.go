@@ -49,21 +49,37 @@ func TestS3PendingFinalizeIsSweptAndWriterLockIsExclusive(t *testing.T) {
 	if err := second.AcquireChannelWriter(); err == nil {
 		t.Fatal("second S3 store acquired an already-held writer lock")
 	}
-	releaseSlug, err := first.ReservePasteSlug("RSV52")
+	slugToken, releaseSlug, err := first.ReservePasteSlug("RSV52")
 	if err != nil {
 		t.Fatalf("reserve S3 paste slug: %v", err)
 	}
 	if exists, err := second.Exists("RSV52"); err != nil || !exists {
 		t.Fatalf("S3 slug reservation not visible to peer: exists=%t err=%v", exists, err)
 	}
-	if _, err := second.ReservePasteSlug("RSV52"); !errors.Is(err, ErrSlugReserved) {
+	if _, _, err := second.ReservePasteSlug("RSV52"); !errors.Is(err, ErrSlugReserved) {
 		t.Fatalf("second S3 store acquired reserved slug: %v", err)
+	}
+	if err := first.StoreContentStream("RSV52", bytes.NewReader([]byte("intruder")), int64(len("intruder"))); !errors.Is(err, ErrSlugReserved) {
+		t.Fatalf("ordinary S3 write bypassed an active reservation: %v", err)
+	}
+	if err := first.StorePasteContentStream("RSV52", slugToken, bytes.NewReader([]byte("owner")), int64(len("owner"))); err != nil {
+		t.Fatalf("reservation owner could not store S3 content: %v", err)
+	}
+	expires := time.Now().Add(time.Hour)
+	if err := first.StorePasteMetadata(&models.Paste{ID: "RSV52", CreatedAt: time.Now(), ExpiresAt: &expires, Size: 5, ContentType: "text/plain"}, slugToken); err != nil {
+		t.Fatalf("reservation owner could not store S3 metadata: %v", err)
 	}
 	if err := releaseSlug(); err != nil {
 		t.Fatalf("release S3 paste slug: %v", err)
 	}
+	if exists, err := second.Exists("RSV52"); err != nil || !exists {
+		t.Fatalf("committed S3 paste was not visible after reservation release: exists=%t err=%v", exists, err)
+	}
+	if err := first.Delete("RSV52"); err != nil {
+		t.Fatalf("delete S3 slug reservation fixture: %v", err)
+	}
 	if exists, err := second.Exists("RSV52"); err != nil || exists {
-		t.Fatalf("released S3 slug remains occupied: exists=%t err=%v", exists, err)
+		t.Fatalf("deleted S3 slug remained occupied: exists=%t err=%v", exists, err)
 	}
 
 	if err := first.StoreChannelContentStream("ARPH5", bytes.NewReader([]byte("orphan")), int64(len("orphan"))); err != nil {
@@ -72,7 +88,7 @@ func TestS3PendingFinalizeIsSweptAndWriterLockIsExclusive(t *testing.T) {
 	if err := first.StoreChannelContentStream("CMT32", bytes.NewReader([]byte("committed")), int64(len("committed"))); err != nil {
 		t.Fatalf("store commit test content: %v", err)
 	}
-	expires := time.Now().Add(time.Hour)
+	expires = time.Now().Add(time.Hour)
 	if err := first.Store(&models.Paste{ID: "CMT32", CreatedAt: time.Now(), ExpiresAt: &expires, Size: 9, ContentType: "text/plain", EphemeralChannelID: "channel"}); err != nil {
 		t.Fatalf("store commit test metadata: %v", err)
 	}

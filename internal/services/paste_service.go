@@ -174,13 +174,20 @@ func (s *PasteService) CreatePasteStream(req CreatePasteStreamRequest) (*CreateP
 			return nil, fmt.Errorf("failed to generate slug: %w", err)
 		}
 	}
+	slugToken := ""
+	var releaseSlug func() error
+	slugAwareStore, hasSlugAwareStore := s.store.(storage.PasteSlugAwareStore)
 	if reserver, ok := s.store.(storage.PasteSlugReserver); ok {
-		release, err := reserver.ReservePasteSlug(slug)
+		slugToken, releaseSlug, err = reserver.ReservePasteSlug(slug)
 		if err != nil {
 			return nil, fmt.Errorf("failed to reserve paste slug: %w", err)
 		}
+		if !hasSlugAwareStore {
+			_ = releaseSlug()
+			return nil, fmt.Errorf("storage backend cannot write under a slug reservation")
+		}
 		defer func() {
-			if err := release(); err != nil {
+			if err := releaseSlug(); err != nil {
 				log.Printf("[WARN] failed to release paste slug reservation: %v", err)
 			}
 		}()
@@ -217,26 +224,51 @@ func (s *PasteService) CreatePasteStream(req CreatePasteStreamRequest) (*CreateP
 	var storeErr error
 	var channelContentStore storage.ChannelContentStore
 	if req.EphemeralChannelID != "" {
-		if channelStore, ok := s.store.(storage.ChannelContentStore); ok {
+		if slugToken != "" {
+			reservedChannelStore, ok := s.store.(storage.ReservedChannelContentStore)
+			if !ok {
+				return nil, fmt.Errorf("storage backend cannot finalize channel content under a slug reservation")
+			}
+			channelContentStore, ok = s.store.(storage.ChannelContentStore)
+			if !ok {
+				return nil, fmt.Errorf("storage backend cannot expose channel content cleanup")
+			}
+			storeErr = reservedChannelStore.StoreChannelContentStreamReserved(slug, slugToken, req.Content, req.Size)
+		} else if channelStore, ok := s.store.(storage.ChannelContentStore); ok {
 			channelContentStore = channelStore
 			storeErr = channelContentStore.StoreChannelContentStream(slug, req.Content, req.Size)
 		} else {
 			storeErr = s.store.StoreContentStream(slug, req.Content, req.Size)
 		}
 	} else {
-		storeErr = s.store.StoreContentStream(slug, req.Content, req.Size)
+		if slugToken != "" {
+			storeErr = slugAwareStore.StorePasteContentStream(slug, slugToken, req.Content, req.Size)
+		} else {
+			storeErr = s.store.StoreContentStream(slug, req.Content, req.Size)
+		}
 	}
 	if storeErr != nil {
 		return nil, fmt.Errorf("failed to store content: %w", storeErr)
 	}
-	if err := s.store.Store(paste); err != nil {
+	storeMetadata := func() error {
+		if slugToken != "" {
+			return slugAwareStore.StorePasteMetadata(paste, slugToken)
+		}
+		return s.store.Store(paste)
+	}
+	if err := storeMetadata(); err != nil {
 		if cleanupErr := s.store.Delete(slug); cleanupErr != nil {
 			return nil, fmt.Errorf("failed to store metadata: %w; cleanup failed: %v", err, cleanupErr)
 		}
 		return nil, fmt.Errorf("failed to store metadata: %w", err)
 	}
 	if channelContentStore != nil {
-		if err := channelContentStore.CommitChannelContent(slug); err != nil {
+		commitChannel := func() error { return channelContentStore.CommitChannelContent(slug) }
+		if slugToken != "" {
+			reservedChannelStore, _ := s.store.(storage.ReservedChannelContentStore)
+			commitChannel = func() error { return reservedChannelStore.CommitChannelContentReserved(slug, slugToken) }
+		}
+		if err := commitChannel(); err != nil {
 			if cleanupErr := s.store.Delete(slug); cleanupErr != nil {
 				return nil, fmt.Errorf("failed to publish channel content: %w; cleanup failed: %v", err, cleanupErr)
 			}

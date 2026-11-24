@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,8 +53,19 @@ func NewS3Store(bucket, prefix string, tempDir ...string) (*S3Store, error) {
 }
 
 func (s *S3Store) Store(paste *models.Paste) error {
+	return s.storePasteMetadata(paste, "")
+}
+
+func (s *S3Store) StorePasteMetadata(paste *models.Paste, token string) error {
+	return s.storePasteMetadata(paste, token)
+}
+
+func (s *S3Store) storePasteMetadata(paste *models.Paste, token string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if err := s.checkPasteSlugReservation(ctx, paste.ID, token); err != nil {
+		return err
+	}
 	// Store metadata
 	metaKey := applyS3Prefix(s.prefix, paste.ID+".json")
 	metaData, err := json.MarshalIndent(paste, "", "  ")
@@ -241,37 +253,38 @@ func (s *S3Store) Exists(id string) (bool, error) {
 	return false, nil
 }
 
-func (s *S3Store) ReservePasteSlug(id string) (func() error, error) {
+func (s *S3Store) ReservePasteSlug(id string) (string, func() error, error) {
 	if !utils.IsValidSlug(id) {
-		return nil, fmt.Errorf("invalid paste slug")
+		return "", nil, fmt.Errorf("invalid paste slug")
 	}
 	exists, err := s.Exists(id)
 	if err != nil {
-		return nil, err
+		return "", nil, err
 	}
 	if exists {
-		return nil, ErrSlugReserved
+		return "", nil, ErrSlugReserved
 	}
-	token := make([]byte, 32)
-	if _, err := rand.Read(token); err != nil {
-		return nil, fmt.Errorf("create S3 paste slug reservation token: %w", err)
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", nil, fmt.Errorf("create S3 paste slug reservation token: %w", err)
 	}
+	token := hex.EncodeToString(tokenBytes)
 	key := applyS3Prefix(s.prefix, PasteSlugReservationPrefix+id+".lock")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	result, err := s.client.PutObject(ctx, &s3.PutObjectInput{
 		Bucket:        aws.String(s.bucket),
 		Key:           aws.String(key),
-		Body:          bytes.NewReader(token),
+		Body:          strings.NewReader(token),
 		ContentLength: aws.Int64(int64(len(token))),
 		IfNoneMatch:   aws.String("*"),
 	})
 	if err != nil {
 		var apiErr smithy.APIError
 		if errors.As(err, &apiErr) && (apiErr.ErrorCode() == "PreconditionFailed" || apiErr.ErrorCode() == "ConditionalRequestConflict") {
-			return nil, ErrSlugReserved
+			return "", nil, ErrSlugReserved
 		}
-		return nil, fmt.Errorf("reserve S3 paste slug: %w", err)
+		return "", nil, fmt.Errorf("reserve S3 paste slug: %w", err)
 	}
 	var once sync.Once
 	var releaseErr error
@@ -290,7 +303,7 @@ func (s *S3Store) ReservePasteSlug(id string) (func() error, error) {
 		})
 		return releaseErr
 	}
-	return release, nil
+	return token, release, nil
 }
 
 func (s *S3Store) objectExists(ctx context.Context, key string) (bool, error) {
@@ -302,6 +315,36 @@ func (s *S3Store) objectExists(ctx context.Context, key string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+func (s *S3Store) checkPasteSlugReservation(ctx context.Context, id, token string) error {
+	key := applyS3Prefix(s.prefix, PasteSlugReservationPrefix+id+".lock")
+	if token == "" {
+		exists, err := s.objectExists(ctx, key)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return ErrSlugReserved
+		}
+		return nil
+	}
+	object, err := s.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(key)})
+	if err != nil {
+		if isS3NotFound(err) {
+			return ErrSlugReservationLost
+		}
+		return err
+	}
+	defer object.Body.Close()
+	content, err := io.ReadAll(io.LimitReader(object.Body, int64(len(token))+1))
+	if err != nil {
+		return err
+	}
+	if string(content) != token {
+		return ErrSlugReservationLost
+	}
+	return nil
 }
 
 func isS3NotFound(err error) bool {
@@ -363,6 +406,20 @@ func (s *S3Store) StoreContent(id string, content []byte) error {
 // StoreContentStream sends seekable streams directly to S3 and stages other
 // readers in a bounded temporary file so the SDK can safely replay them.
 func (s *S3Store) StoreContentStream(id string, content io.Reader, size int64) error {
+	return s.storeContentStreamWithSlugReservation(id, "", content, size)
+}
+
+func (s *S3Store) StorePasteContentStream(id, token string, content io.Reader, size int64) error {
+	return s.storeContentStreamWithSlugReservation(id, token, content, size)
+}
+
+func (s *S3Store) storeContentStreamWithSlugReservation(id, token string, content io.Reader, size int64) error {
+	reservationCtx, reservationCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := s.checkPasteSlugReservation(reservationCtx, id, token); err != nil {
+		reservationCancel()
+		return err
+	}
+	reservationCancel()
 	reserved, err := s.channelSlugReserved(id)
 	if err != nil {
 		return err
@@ -377,6 +434,9 @@ func (s *S3Store) StoreContentStream(id string, content io.Reader, size int64) e
 	defer cleanup()
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if err := s.checkPasteSlugReservation(ctx, id, token); err != nil {
+		return err
+	}
 	reserved, err = s.channelSlugReservedWithContext(ctx, id)
 	if err != nil {
 		return err
@@ -431,6 +491,19 @@ func (s *S3Store) channelSlugReservedWithContext(ctx context.Context, id string)
 }
 
 func (s *S3Store) StoreChannelContentStream(id string, content io.Reader, size int64) error {
+	token, release, err := s.ReservePasteSlug(id)
+	if err != nil {
+		return err
+	}
+	storeErr := s.StoreChannelContentStreamReserved(id, token, content, size)
+	releaseErr := release()
+	if storeErr != nil {
+		return storeErr
+	}
+	return releaseErr
+}
+
+func (s *S3Store) StoreChannelContentStreamReserved(id, token string, content io.Reader, size int64) error {
 	if !utils.IsValidSlug(id) {
 		return fmt.Errorf("invalid channel content id")
 	}
@@ -438,6 +511,9 @@ func (s *S3Store) StoreChannelContentStream(id string, content io.Reader, size i
 	// check only finalization state here so the owning reservation is not rejected.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if err := s.checkPasteSlugReservation(ctx, id, token); err != nil {
+		return err
+	}
 	for _, key := range []string{id + ".json", ChannelContentTempPrefix + id + ".pending", ChannelContentTempPrefix + id + ChannelContentReservationSuffix} {
 		exists, err := s.objectExists(ctx, applyS3Prefix(s.prefix, key))
 		if err != nil {
@@ -530,6 +606,14 @@ func (s *S3Store) channelUploadBody(content io.Reader, size int64) (io.Reader, f
 }
 
 func (s *S3Store) CommitChannelContent(id string) error {
+	return s.commitChannelContent(id, "")
+}
+
+func (s *S3Store) CommitChannelContentReserved(id, token string) error {
+	return s.commitChannelContent(id, token)
+}
+
+func (s *S3Store) commitChannelContent(id, token string) error {
 	if !utils.IsValidSlug(id) {
 		return fmt.Errorf("invalid channel content id")
 	}
@@ -538,6 +622,11 @@ func (s *S3Store) CommitChannelContent(id string) error {
 	copySource := url.PathEscape(s.bucket) + "/" + strings.ReplaceAll(url.PathEscape(stageKey), "%2F", "/")
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	if token != "" {
+		if err := s.checkPasteSlugReservation(ctx, id, token); err != nil {
+			return err
+		}
+	}
 	if _, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
 		Bucket:     aws.String(s.bucket),
 		Key:        aws.String(contentKey),

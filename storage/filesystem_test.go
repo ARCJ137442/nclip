@@ -56,14 +56,14 @@ func TestPasteSlugReservationIsAtomicAcrossFilesystemStores(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = first.Close(); _ = second.Close() }()
-	release, err := first.ReservePasteSlug("RSV52")
+	_, release, err := first.ReservePasteSlug("RSV52")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if exists, err := second.Exists("RSV52"); err != nil || !exists {
 		t.Fatalf("active slug reservation not visible to peer: exists=%t err=%v", exists, err)
 	}
-	if _, err := second.ReservePasteSlug("RSV52"); err != ErrSlugReserved {
+	if _, _, err := second.ReservePasteSlug("RSV52"); err != ErrSlugReserved {
 		t.Fatalf("second store acquired reserved slug: %v", err)
 	}
 	if err := release(); err != nil {
