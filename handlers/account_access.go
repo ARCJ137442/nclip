@@ -119,6 +119,10 @@ func (h *AccountHandler) requestUser(c *gin.Context) (accounts.User, accounts.Se
 	return auth.User, accounts.Session{}, err == nil
 }
 
+func channelPath(path string) bool {
+	return path == "/api/v1/channels" || strings.HasPrefix(path, "/api/v1/channels/") || strings.HasPrefix(path, "/c/")
+}
+
 func publicPath(path string) bool {
 	return strings.HasPrefix(path, "/static/") || path == "/favicon.ico" || path == "/health" || path == "/login" || path == "/api/v1/login" || path == "/api/v1/session"
 }
@@ -252,7 +256,7 @@ func (h *AccountHandler) Gate() gin.HandlerFunc {
 		if strings.HasPrefix(c.Request.URL.Path, "/static/") {
 			c.Header("Cache-Control", "no-cache")
 		}
-		if publicPath(c.Request.URL.Path) {
+		if channelPath(c.Request.URL.Path) || publicPath(c.Request.URL.Path) {
 			c.Next()
 			return
 		}

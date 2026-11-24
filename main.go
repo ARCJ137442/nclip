@@ -21,6 +21,7 @@ import (
 	"github.com/johnwmail/nclip/handlers/retrieval"
 	"github.com/johnwmail/nclip/handlers/upload"
 	"github.com/johnwmail/nclip/internal/accounts"
+	"github.com/johnwmail/nclip/internal/channels"
 	"github.com/johnwmail/nclip/internal/services"
 	"github.com/johnwmail/nclip/storage"
 	"github.com/johnwmail/nclip/utils"
@@ -232,24 +233,24 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	systemHandler := handlers.NewSystemHandler()
 	webuiHandler := handlers.NewWebUIHandler(cfg)
 	sharesHandler := handlers.NewSharesHandler(pasteService, cfg)
+	channelManager := channels.NewManager()
+	channelHandler := handlers.NewChannelHandler(channelManager, cfg, accountHandler)
 
 	// Create Gin router
 	router := gin.New()
+	if err := router.SetTrustedProxies([]string{"127.0.0.1", "::1", "172.16.0.0/12"}); err != nil {
+		panic(err)
+	}
 
-	// Add logging middleware
-	// Use a JSON-safe recovery middleware and canonicalErrors middleware so
-	// API endpoints always return JSON error responses instead of HTML error
-	// pages that the web UI cannot parse.
+	// Add logging and safe recovery before access gates.
 	router.Use(gin.Logger())
 	router.Use(jsonRecovery())
 	router.Use(canonicalErrors())
 	router.Use(gin.Recovery())
 	if accountHandler != nil {
-		if err := router.SetTrustedProxies([]string{"127.0.0.1", "::1", "172.16.0.0/12"}); err != nil {
-			panic(err)
-		}
 		router.Use(accountHandler.Gate())
 	}
+	router.Use(channelHandler.Gate())
 
 	// Load favicon
 	router.StaticFile("/favicon.ico", "./static/favicon.ico")
@@ -268,6 +269,13 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 		router.GET("/", webuiHandler.Index)
 		router.GET("/api/v1/session", func(c *gin.Context) { c.JSON(200, gin.H{"enabled": false, "user": nil}) })
 	}
+	if cfg.UploadAuth && !cfg.AccountsEnabled {
+		router.POST("/api/v1/channels", apiKeyAuth(cfg), channelHandler.Create)
+	} else {
+		router.POST("/api/v1/channels", channelHandler.Create)
+	}
+	router.GET("/api/v1/channels/:id", channelHandler.Status)
+	router.GET("/c/:id", channelHandler.Page)
 	router.GET("/api/v1/ui-config", sharesHandler.UIConfig)
 	if cfg.UploadAuth && !cfg.AccountsEnabled {
 		router.POST("/api/v1/shares", apiKeyAuth(cfg), sharesHandler.Create)
