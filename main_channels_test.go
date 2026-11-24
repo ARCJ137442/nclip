@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -462,5 +463,398 @@ func TestConcurrentCloseAndSameKeyCreateAtLimitNeverReopen(t *testing.T) {
 	}
 	if response := channelCreateRequest(router, newID, nil); response.Code != http.StatusTooManyRequests {
 		t.Fatalf("concurrent retry bypassed full IP limit: %d %s", response.Code, response.Body.String())
+	}
+}
+func channelJoinRequest(router http.Handler, channelID, requestID string, body string, headers map[string]string) *httptest.ResponseRecorder {
+	if headers == nil {
+		headers = map[string]string{}
+	}
+	headers["Idempotency-Key"] = requestID
+	if body != "" {
+		headers["Content-Type"] = "application/json"
+	}
+	return shareRequest(router, http.MethodPost, "/api/v1/channels/"+channelID+"/join", strings.NewReader(body), headers)
+}
+
+func channelLeaveRequest(router http.Handler, channelID, requestID, seatToken string) *httptest.ResponseRecorder {
+	return shareRequest(router, http.MethodPost, "/api/v1/channels/"+channelID+"/leave", nil, map[string]string{
+		"Idempotency-Key":    requestID,
+		"X-Nclip-Seat-Token": seatToken,
+		"Origin":             "https://clip.test",
+		"Sec-Fetch-Site":     "same-origin",
+	})
+}
+
+func TestAnonymousJoinAdmitStatusAndLeave(t *testing.T) {
+	router := accountRouter(t)
+	admin := signIn(t, router, "admin", "test-admin-password")
+	created := accountChannelCreate(router, admin, "Dg4ODg4ODg4ODg4ODg4ODg", "public")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("channel create: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+
+	joinID, _ := channels.NewRequestID()
+	joined := channelJoinRequest(router, channel.ID, joinID, "", nil)
+	if joined.Code != http.StatusCreated {
+		t.Fatalf("anonymous join: %d %s", joined.Code, joined.Body.String())
+	}
+	var seat map[string]any
+	if err := json.Unmarshal(joined.Body.Bytes(), &seat); err != nil {
+		t.Fatal(err)
+	}
+	seatToken, _ := seat["seat_token"].(string)
+	claimToken, _ := seat["claim_token"].(string)
+	pendingUntil, _ := seat["pending_until"].(string)
+	if seat["state"] != "pending_admit" || seat["identity"] != "anonymous" || seat["anonymous"] != true || seatToken == "" || claimToken == "" || pendingUntil == "" {
+		t.Fatalf("unexpected anonymous seat: %v", seat)
+	}
+
+	senderStatusRequest := httptest.NewRequest(http.MethodGet, "/api/v1/channels/"+channel.ID, nil)
+	senderStatusRequest.AddCookie(created.Result().Cookies()[0])
+	senderStatus := httptest.NewRecorder()
+	router.ServeHTTP(senderStatus, senderStatusRequest)
+	var senderState map[string]any
+	if senderStatus.Code != http.StatusOK || json.Unmarshal(senderStatus.Body.Bytes(), &senderState) != nil {
+		t.Fatalf("sender status: %d %s", senderStatus.Code, senderStatus.Body.String())
+	}
+	senderSeat, _ := senderState["seat"].(map[string]any)
+	if senderSeat["identity"] != "anonymous" || senderSeat["state"] != "pending_admit" {
+		t.Fatalf("sender identity snapshot: %v", senderState)
+	}
+
+	decisionID, _ := channels.NewRequestID()
+	admitBody := strings.NewReader("{\"decision\":\"admit\"}")
+	admit := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", admitBody)
+	admit.Header.Set("Content-Type", "application/json")
+	admit.Header.Set("Idempotency-Key", decisionID)
+	admit.Header.Set("Origin", "https://clip.test")
+	admit.Header.Set("Sec-Fetch-Site", "same-origin")
+	admit.AddCookie(created.Result().Cookies()[0])
+	admitted := httptest.NewRecorder()
+	router.ServeHTTP(admitted, admit)
+	if admitted.Code != http.StatusOK || !strings.Contains(admitted.Body.String(), "\"state\":\"paired\"") {
+		t.Fatalf("admit: %d %s", admitted.Code, admitted.Body.String())
+	}
+	replayAdmit := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", strings.NewReader("{\"decision\":\"admit\"}"))
+	replayAdmit.Header = admit.Header.Clone()
+	replayAdmit.AddCookie(created.Result().Cookies()[0])
+	replayed := httptest.NewRecorder()
+	router.ServeHTTP(replayed, replayAdmit)
+	if replayed.Code != http.StatusOK || !strings.Contains(replayed.Body.String(), "\"replayed\":true") {
+		t.Fatalf("admit replay: %d %s", replayed.Code, replayed.Body.String())
+	}
+
+	receiverStatus := httptest.NewRequest(http.MethodGet, "/api/v1/channels/"+channel.ID, nil)
+	receiverStatus.Header.Set("X-Nclip-Seat-Token", seatToken)
+	receiverStatusResponse := httptest.NewRecorder()
+	router.ServeHTTP(receiverStatusResponse, receiverStatus)
+	if receiverStatusResponse.Code != http.StatusOK || !strings.Contains(receiverStatusResponse.Body.String(), "\"seat_state\":\"paired\"") {
+		t.Fatalf("receiver status: %d %s", receiverStatusResponse.Code, receiverStatusResponse.Body.String())
+	}
+
+	leaveID, _ := channels.NewRequestID()
+	leave := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+channel.ID+"/leave", nil)
+	leave.Header.Set("Idempotency-Key", leaveID)
+	leave.Header.Set("X-Nclip-Seat-Token", seatToken)
+	leave.Header.Set("Origin", "https://clip.test")
+	leave.Header.Set("Sec-Fetch-Site", "same-origin")
+	left := httptest.NewRecorder()
+	router.ServeHTTP(left, leave)
+	if left.Code != http.StatusNoContent {
+		t.Fatalf("leave: %d %s", left.Code, left.Body.String())
+	}
+	replayedLeave := channelLeaveRequest(router, channel.ID, leaveID, seatToken)
+	if replayedLeave.Code != http.StatusNoContent {
+		t.Fatalf("leave replay: %d %s", replayedLeave.Code, replayedLeave.Body.String())
+	}
+
+	nextJoinID, _ := channels.NewRequestID()
+	nextJoin := channelJoinRequest(router, channel.ID, nextJoinID, "", nil)
+	if nextJoin.Code != http.StatusCreated {
+		t.Fatalf("next join: %d %s", nextJoin.Code, nextJoin.Body.String())
+	}
+	var nextJoinBody map[string]any
+	if err := json.Unmarshal(nextJoin.Body.Bytes(), &nextJoinBody); err != nil {
+		t.Fatal(err)
+	}
+	nextSeatToken, _ := nextJoinBody["seat_token"].(string)
+	if nextSeatToken == "" {
+		t.Fatal("next join response omitted seat token")
+	}
+	oldLeaveRetry := channelLeaveRequest(router, channel.ID, leaveID, seatToken)
+	if oldLeaveRetry.Code != http.StatusNoContent {
+		t.Fatalf("old leave retry after next join: %d %s", oldLeaveRetry.Code, oldLeaveRetry.Body.String())
+	}
+	nextSeatStatus := httptest.NewRequest(http.MethodGet, "/api/v1/channels/"+channel.ID, nil)
+	nextSeatStatus.Header.Set("X-Nclip-Seat-Token", nextSeatToken)
+	nextSeatResponse := httptest.NewRecorder()
+	router.ServeHTTP(nextSeatResponse, nextSeatStatus)
+	if nextSeatResponse.Code != http.StatusOK {
+		t.Fatalf("old leave retry released next seat: %d %s", nextSeatResponse.Code, nextSeatResponse.Body.String())
+	}
+	closedStatus := httptest.NewRequest(http.MethodGet, "/api/v1/channels/"+channel.ID, nil)
+	closedStatus.Header.Set("X-Nclip-Seat-Token", seatToken)
+	closedStatusResponse := httptest.NewRecorder()
+	router.ServeHTTP(closedStatusResponse, closedStatus)
+	if closedStatusResponse.Code != http.StatusForbidden {
+		t.Fatalf("old seat token after next join = %d %s", closedStatusResponse.Code, closedStatusResponse.Body.String())
+	}
+}
+
+func TestPublicLoggedJoinIsPairedAndNoAccountJoinNeedsAdmission(t *testing.T) {
+	accountRouter := accountRouter(t)
+	admin := signIn(t, accountRouter, "admin", "test-admin-password")
+	publicCreated := accountChannelCreate(accountRouter, admin, "Dw8PDw8PDw8PDw8PDw8PDw", "public")
+	if publicCreated.Code != http.StatusCreated {
+		t.Fatalf("public create: %d %s", publicCreated.Code, publicCreated.Body.String())
+	}
+	publicChannel := decodeChannelCreate(t, publicCreated)
+	joinID, _ := channels.NewRequestID()
+	join := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+publicChannel.ID+"/join", nil)
+	join.Header.Set("Idempotency-Key", joinID)
+	join.Header.Set("Origin", "https://clip.test")
+	join.Header.Set("Sec-Fetch-Site", "same-origin")
+	join.Header.Set("X-CSRF-Token", admin.csrf)
+	join.AddCookie(admin.cookie)
+	joined := httptest.NewRecorder()
+	accountRouter.ServeHTTP(joined, join)
+	if joined.Code != http.StatusCreated || !strings.Contains(joined.Body.String(), "\"state\":\"paired\"") || !strings.Contains(joined.Body.String(), "\"identity\":\"admin\"") {
+		t.Fatalf("logged public join: %d %s", joined.Code, joined.Body.String())
+	}
+
+	noAccountRouter := shareTestRouter(t, 4<<20, false)
+	anonChannel := channelCreateRequest(noAccountRouter, "EBAQEBAQEBAQEBAQEBAQEA", map[string]string{"X-Nclip-Visibility": "public"})
+	if anonChannel.Code != http.StatusCreated {
+		t.Fatalf("no-account create: %d %s", anonChannel.Code, anonChannel.Body.String())
+	}
+	anon := decodeChannelCreate(t, anonChannel)
+	anonJoinID, _ := channels.NewRequestID()
+	anonJoined := channelJoinRequest(noAccountRouter, anon.ID, anonJoinID, "", nil)
+	if anonJoined.Code != http.StatusCreated || !strings.Contains(anonJoined.Body.String(), "\"state\":\"pending_admit\"") {
+		t.Fatalf("no-account join: %d %s", anonJoined.Code, anonJoined.Body.String())
+	}
+}
+
+func TestJoinSeatFullAttemptsAreRateLimitedOnce(t *testing.T) {
+	router := shareTestRouter(t, 4<<20, false)
+	createID, _ := channels.NewRequestID()
+	created := channelCreateRequest(router, createID, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	firstID, _ := channels.NewRequestID()
+	first := channelJoinRequest(router, channel.ID, firstID, "", nil)
+	if first.Code != http.StatusCreated {
+		t.Fatalf("first join: %d %s", first.Code, first.Body.String())
+	}
+	for i := 0; i < 4; i++ {
+		requestID, _ := channels.NewRequestID()
+		response := channelJoinRequest(router, channel.ID, requestID, "", nil)
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "seats_full") {
+			t.Fatalf("seats_full attempt %d: %d %s", i, response.Code, response.Body.String())
+		}
+	}
+	retryID, _ := channels.NewRequestID()
+	limited := channelJoinRequest(router, channel.ID, retryID, "", nil)
+	if limited.Code != http.StatusTooManyRequests {
+		t.Fatalf("sixth unique join attempt = %d %s", limited.Code, limited.Body.String())
+	}
+}
+
+func TestJoinRateLimitUsesGinClientIPInsteadOfForwardedHeader(t *testing.T) {
+	router := shareTestRouter(t, 4<<20, false)
+	const channelCount = 7
+	channelIDs := make([]string, channelCount)
+	for i := range channelIDs {
+		createID, _ := channels.NewRequestID()
+		created := channelCreateRequest(router, createID, nil)
+		if created.Code != http.StatusCreated {
+			t.Fatalf("create channel %d: %d %s", i, created.Code, created.Body.String())
+		}
+		channelIDs[i] = decodeChannelCreate(t, created).ID
+	}
+
+	attempt := 0
+	join := func(channelIndex int) *httptest.ResponseRecorder {
+		requestID, _ := channels.NewRequestID()
+		spoofedIP := "198.51.100." + strconv.Itoa(attempt%200+1)
+		attempt++
+		return channelJoinRequest(router, channelIDs[channelIndex], requestID, "", map[string]string{
+			"X-Forwarded-For": spoofedIP,
+		})
+	}
+	for i := range channelIDs {
+		if response := join(i); response.Code != http.StatusCreated {
+			t.Fatalf("initial join %d: %d %s", i, response.Code, response.Body.String())
+		}
+	}
+	for i := 0; i < 30-channelCount; i++ {
+		response := join(i % channelCount)
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), "seats_full") {
+			t.Fatalf("seat-full attempt %d: %d %s", i, response.Code, response.Body.String())
+		}
+	}
+	if response := join(0); response.Code != http.StatusTooManyRequests {
+		t.Fatalf("spoofed forwarded IP bypassed join limit: %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPrivateJoinRequiresDownloadAndSnapshotsUsername(t *testing.T) {
+	router := accountRouter(t)
+	admin := signIn(t, router, "admin", "test-admin-password")
+	created := accountChannelCreate(router, admin, "FhYWFhYWFhYWFhYWFhYWFh", "")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("private channel create: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+
+	anonymousID, _ := channels.NewRequestID()
+	anonymous := channelJoinRequest(router, channel.ID, anonymousID, "", nil)
+	if anonymous.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous private join = %d %s", anonymous.Code, anonymous.Body.String())
+	}
+
+	_ = createAccount(t, admin, "uploadonly", gin.H{"upload": true, "download": false, "manage": false})
+	uploadOnly := signIn(t, router, "uploadonly", "test-user-password")
+	uploadID, _ := channels.NewRequestID()
+	uploadJoin := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+channel.ID+"/join", nil)
+	uploadJoin.Header.Set("Idempotency-Key", uploadID)
+	uploadJoin.Header.Set("Origin", "https://clip.test")
+	uploadJoin.Header.Set("Sec-Fetch-Site", "same-origin")
+	uploadJoin.Header.Set("X-CSRF-Token", uploadOnly.csrf)
+	uploadJoin.AddCookie(uploadOnly.cookie)
+	uploadResponse := httptest.NewRecorder()
+	router.ServeHTTP(uploadResponse, uploadJoin)
+	if uploadResponse.Code != http.StatusForbidden {
+		t.Fatalf("upload-only private join = %d %s", uploadResponse.Code, uploadResponse.Body.String())
+	}
+
+	_ = createAccount(t, admin, "downloadonly", gin.H{"upload": false, "download": true, "manage": false})
+	downloadOnly := signIn(t, router, "downloadonly", "test-user-password")
+	downloadID, _ := channels.NewRequestID()
+	downloadJoin := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+channel.ID+"/join", nil)
+	downloadJoin.Header.Set("Idempotency-Key", downloadID)
+	downloadJoin.Header.Set("Origin", "https://clip.test")
+	downloadJoin.Header.Set("Sec-Fetch-Site", "same-origin")
+	downloadJoin.Header.Set("X-CSRF-Token", downloadOnly.csrf)
+	downloadJoin.AddCookie(downloadOnly.cookie)
+	downloadResponse := httptest.NewRecorder()
+	router.ServeHTTP(downloadResponse, downloadJoin)
+	var privateJoinBody map[string]any
+	if err := json.Unmarshal(downloadResponse.Body.Bytes(), &privateJoinBody); err != nil {
+		t.Fatal(err)
+	}
+	if downloadResponse.Code != http.StatusCreated || privateJoinBody["identity"] != "downloadonly" || privateJoinBody["state"] != "paired" {
+		t.Fatalf("download-only private join = %d %s", downloadResponse.Code, downloadResponse.Body.String())
+	}
+}
+
+func TestConcurrentSameKeyJoinCreatesOneSeatAndReplaysOneResult(t *testing.T) {
+	router := shareTestRouter(t, 4<<20, false)
+	createID, _ := channels.NewRequestID()
+	created := channelCreateRequest(router, createID, nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	joinID, _ := channels.NewRequestID()
+	const concurrentRequests = 24
+	responses := make([]*httptest.ResponseRecorder, concurrentRequests)
+	var wait sync.WaitGroup
+	wait.Add(concurrentRequests)
+	for i := range responses {
+		go func(index int) {
+			defer wait.Done()
+			responses[index] = channelJoinRequest(router, channel.ID, joinID, "", nil)
+		}(i)
+	}
+	wait.Wait()
+
+	var seatToken string
+	for i, response := range responses {
+		if response.Code != http.StatusCreated && response.Code != http.StatusOK {
+			t.Fatalf("join %d: %d %s", i, response.Code, response.Body.String())
+		}
+		var body map[string]any
+		if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+			t.Fatalf("decode join %d: %v", i, err)
+		}
+		got, _ := body["seat_token"].(string)
+		if got == "" || seatToken != "" && got != seatToken {
+			t.Fatalf("join %d returned a different or empty seat token", i)
+		}
+		seatToken = got
+	}
+}
+
+func TestSenderAndReceiverCredentialsSelectTheirOwnStatusRole(t *testing.T) {
+	router := accountRouter(t)
+	admin := signIn(t, router, "admin", "test-admin-password")
+	createID, _ := channels.NewRequestID()
+	created := accountChannelCreate(router, admin, createID, "")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	joinID, _ := channels.NewRequestID()
+	join := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+channel.ID+"/join", nil)
+	join.Header.Set("Idempotency-Key", joinID)
+	join.Header.Set("Origin", "https://clip.test")
+	join.Header.Set("Sec-Fetch-Site", "same-origin")
+	join.Header.Set("X-CSRF-Token", admin.csrf)
+	join.AddCookie(admin.cookie)
+	joined := httptest.NewRecorder()
+	router.ServeHTTP(joined, join)
+	if joined.Code != http.StatusCreated {
+		t.Fatalf("join: %d %s", joined.Code, joined.Body.String())
+	}
+	var joinBody map[string]any
+	if err := json.Unmarshal(joined.Body.Bytes(), &joinBody); err != nil {
+		t.Fatal(err)
+	}
+	seatToken, _ := joinBody["seat_token"].(string)
+	if seatToken == "" {
+		t.Fatal("join response omitted seat token")
+	}
+
+	for _, test := range []struct {
+		name         string
+		seatToken    string
+		wantReceiver bool
+		wantStatus   int
+	}{
+		{name: "sender cookie only", wantStatus: http.StatusOK},
+		{name: "receiver token takes precedence", seatToken: seatToken, wantReceiver: true, wantStatus: http.StatusOK},
+		{name: "invalid receiver token does not fall back to sender", seatToken: "invalid", wantStatus: http.StatusForbidden},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "/api/v1/channels/"+channel.ID, nil)
+			request.AddCookie(created.Result().Cookies()[0])
+			if test.seatToken != "" {
+				request.Header.Set("X-Nclip-Seat-Token", test.seatToken)
+			}
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d: %s", response.Code, response.Body.String())
+			}
+			if test.wantStatus != http.StatusOK {
+				return
+			}
+			var status map[string]any
+			if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
+				t.Fatal(err)
+			}
+			_, hasReceiverState := status["seat_state"]
+			if hasReceiverState != test.wantReceiver {
+				t.Fatalf("receiver state presence = %t, body=%v", hasReceiverState, status)
+			}
+			_, hasSenderState := status["sender_online"]
+			if hasSenderState == test.wantReceiver {
+				t.Fatalf("sender state presence = %t, body=%v", hasSenderState, status)
+			}
+		})
 	}
 }

@@ -215,6 +215,28 @@
               </aside>
             </div>
           </fieldset>
+          <details id="channel-mode" class="channel-mode">
+            <summary data-i18n="channelMode">临时信道</summary>
+            <p class="hint" data-i18n="channelModeHint">两台设备连上后再交付；接收方的登录身份会实时显示给发送者。</p>
+            <label class="check channel-public-toggle" for="channel-public">
+              <input id="channel-public" type="checkbox">
+              <span data-i18n="channelPublic">允许持链接者加入（公开信道）</span>
+            </label>
+            <p id="channel-public-only" class="hint" data-i18n="channelPublicOnly" hidden>此实例不启用账号，信道为公开并需要发送者放行。</p>
+            <button id="channel-open" class="button secondary" type="button" data-i18n="channelOpen">打开临时信道</button>
+            <section id="channel-sender" class="channel-sender" hidden aria-live="polite">
+              <p id="channel-sender-state" class="channel-state"></p>
+              <a id="channel-link" class="channel-link" href=""></a>
+              <p id="channel-identity" class="channel-identity" hidden></p>
+              <div id="channel-decisions" class="channel-decisions" hidden>
+                <button id="channel-admit" class="button primary" type="button" data-i18n="channelAdmit">放行并发送</button>
+                <button id="channel-reject" class="button danger" type="button" data-i18n="channelReject">拒绝</button>
+              </div>
+              <button id="channel-copy" class="button secondary" type="button" data-i18n="channelCopy">复制接收链接</button>
+              <button id="channel-close" class="button danger" type="button" data-i18n="channelClose">关闭信道</button>
+            </section>
+            <p id="channel-error" class="form-error" role="alert" hidden></p>
+          </details>
           <div id="candidate" class="candidate" hidden>
             <div class="candidate-heading">
               <span data-icon="clipboard"></span
@@ -336,5 +358,6 @@
       ><span data-i18n="drop">放下文件，添加到本次发送</span>
     </div>
     <script type="module" src="/static/script.js?v={{.Version}}"></script>
+    <script type="module" src="/static/channel-workspace.js?v={{.Version}}"></script>
   </body>
 </html>

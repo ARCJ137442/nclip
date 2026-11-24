@@ -2513,3 +2513,76 @@ footer a {
     background: var(--line-strong);
   }
 }
+
+.channel-mode {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-small);
+  background: var(--subtle);
+}
+
+.channel-mode > summary {
+  color: var(--text);
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.channel-mode > .hint {
+  margin: 10px 0;
+}
+
+.channel-public-toggle {
+  display: flex;
+  margin: 10px 0;
+}
+
+.channel-sender,
+.channel-receiver {
+  display: grid;
+  gap: 16px;
+}
+
+.channel-sender {
+  margin-top: 14px;
+}
+
+.channel-state {
+  color: var(--text);
+  font-weight: 650;
+}
+
+.channel-link {
+  overflow-wrap: anywhere;
+}
+
+.channel-identity {
+  padding: 12px 14px;
+  border-left: 3px solid var(--accent);
+  background: var(--tint);
+  color: var(--text);
+}
+
+.channel-decisions,
+.channel-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.channel-receiver {
+  max-width: 760px;
+  margin-inline: auto;
+  padding: clamp(22px, 5vw, 42px);
+}
+
+.channel-receiver h1 {
+  margin: 0;
+}
+
+@media (max-width: 600px) {
+  .channel-decisions > .button,
+  .channel-actions > .button {
+    flex: 1 1 100%;
+  }
+}

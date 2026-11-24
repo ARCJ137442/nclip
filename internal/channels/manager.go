@@ -33,14 +33,32 @@ var (
 	ErrCapacity            = errors.New("channel_capacity_reached")
 	ErrUnauthorized        = errors.New("channel_forbidden")
 	ErrCreateClosed        = errors.New("channel_create_closed")
+	ErrSeatsFull           = errors.New("seats_full")
+	ErrSenderOffline       = errors.New("sender_offline")
+	ErrPendingExpired      = errors.New("pending_expired")
+	ErrJoinClosed          = errors.New("join_closed")
+	ErrDecisionConflict    = errors.New("decision_conflict")
+	ErrInvalidDecision     = errors.New("invalid_decision")
 )
 
+type SeatInfo struct {
+	State        string    `json:"state"`
+	Identity     string    `json:"identity"`
+	Anonymous    bool      `json:"anonymous"`
+	JoinedAt     time.Time `json:"joined_at"`
+	PendingUntil time.Time `json:"pending_until,omitempty"`
+}
+
 type Record struct {
-	ID         string     `json:"id"`
-	Visibility Visibility `json:"visibility"`
-	CreatedAt  time.Time  `json:"created_at"`
-	State      string     `json:"state"`
-	senderHash [sha256.Size]byte
+	ID             string     `json:"id"`
+	Visibility     Visibility `json:"visibility"`
+	CreatedAt      time.Time  `json:"created_at"`
+	State          string     `json:"state"`
+	SenderOnline   bool       `json:"sender_online,omitempty"`
+	Seat           *SeatInfo  `json:"seat,omitempty"`
+	senderHash     [sha256.Size]byte
+	senderLastSeen time.Time
+	seat           *seatState
 }
 
 type createResult struct {
@@ -54,6 +72,11 @@ type Manager struct {
 	channels      map[string]Record
 	creates       map[string]createResult
 	closedCreates map[string]time.Time
+	closedJoins   map[string]time.Time
+	joinResults   map[string]joinOutcome
+	closedSeats   map[[sha256.Size]byte]seatClosure
+	decisions     map[string]decisionResult
+	leaves        map[string]leaveResult
 	masterKey     [sha256.Size]byte
 	keyReady      bool
 }
@@ -63,6 +86,11 @@ func NewManager() *Manager {
 		channels:      make(map[string]Record),
 		creates:       make(map[string]createResult),
 		closedCreates: make(map[string]time.Time),
+		closedJoins:   make(map[string]time.Time),
+		joinResults:   make(map[string]joinOutcome),
+		closedSeats:   make(map[[sha256.Size]byte]seatClosure),
+		decisions:     make(map[string]decisionResult),
+		leaves:        make(map[string]leaveResult),
 	}
 }
 
@@ -137,11 +165,13 @@ func (m *Manager) Create(scope, requestID string, visibility Visibility) (Record
 	id := base64.RawURLEncoding.EncodeToString(idBytes)
 	senderKey := m.deriveSenderKey(scope, requestID, id)
 	record := Record{
-		ID:         id,
-		Visibility: visibility,
-		CreatedAt:  now.UTC(),
-		State:      StateOpen,
-		senderHash: sha256.Sum256([]byte(senderKey)),
+		ID:             id,
+		Visibility:     visibility,
+		CreatedAt:      now.UTC(),
+		State:          StateOpen,
+		SenderOnline:   true,
+		senderHash:     sha256.Sum256([]byte(senderKey)),
+		senderLastSeen: now,
 	}
 	m.channels[id] = record
 	m.creates[key] = createResult{visibility: visibility, record: record, key: key}
@@ -170,7 +200,7 @@ func (m *Manager) Get(id string) (Record, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	record, ok := m.channels[id]
-	return record, ok
+	return cloneRecord(record), ok
 }
 
 func (m *Manager) SenderAuthorized(id, senderKey string) bool {
@@ -182,8 +212,8 @@ func (m *Manager) SenderAuthorized(id, senderKey string) bool {
 	return subtle.ConstantTimeCompare(record.senderHash[:], got[:]) == 1
 }
 
-// Close removes an empty channel and its create result. A short closed-key
-// tombstone prevents an in-flight create retry from reopening the channel.
+// Close releases the current empty G2 channel and prevents a concurrent create
+// retry from reopening it for the closed-key retention window.
 func (m *Manager) Close(id, senderKey string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -191,15 +221,12 @@ func (m *Manager) Close(id, senderKey string) error {
 	if !ok {
 		return nil
 	}
-	if senderKey == "" {
+	if !matchHash(record.senderHash, senderKey) {
 		return ErrUnauthorized
 	}
-	got := sha256.Sum256([]byte(senderKey))
-	if subtle.ConstantTimeCompare(record.senderHash[:], got[:]) != 1 {
-		return ErrUnauthorized
-	}
-	delete(m.channels, id)
 	now := time.Now()
+	m.releaseSeatLocked(&record, "sender_closed", now)
+	delete(m.channels, id)
 	m.pruneClosedCreatesLocked(now)
 	for key, result := range m.creates {
 		if result.record.ID == id {

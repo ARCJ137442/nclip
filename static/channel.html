@@ -1,16 +1,30 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="same-origin">
+  <link rel="stylesheet" href="/static/style.css">
   <title>{{.Title}}</title>
 </head>
-<body>
-  <main id="channel-page" data-channel-id="{{.ChannelID}}" data-visibility="{{.Visibility}}">
-    <h1>信道已打开</h1>
-    <p>信道正在准备中，发送与接收操作将在后续批次接入。</p>
-    <p>信道编号：<code>{{.ChannelID}}</code></p>
-  </main>
+<body data-page="channel-receiver">
+  <div class="workspace">
+    {{template "app-header" .}}
+    <main>
+      <section id="channel-page" class="panel channel-receiver" data-channel-id="{{.ChannelID}}" data-visibility="{{.Visibility}}">
+        <h1 data-i18n="channelReceiverTitle">加入临时信道</h1>
+        <p class="hint" data-i18n="channelJoinDisclosure">加入后，你的登录身份或“匿名接收端”状态会实时显示给发送者，仅在信道存续期间可见；信道不留长期取件回执。</p>
+        <div id="receiver-status" class="channel-state" role="status" aria-live="polite" data-i18n="channelStatusLoading">正在连接信道…</div>
+        <div class="channel-actions">
+          <button id="channel-join" class="button primary" type="button" data-i18n="channelJoin">加入并等待</button>
+          <button id="channel-leave" class="button danger" type="button" hidden data-i18n="channelLeave">离开信道</button>
+        </div>
+        <p id="receiver-error" class="form-error" role="alert" hidden></p>
+      </section>
+    </main>
+    {{template "app-footer" .}}
+  </div>
+  <script type="module" src="/static/script.js"></script>
+  <script type="module" src="/static/channel-receiver.js"></script>
 </body>
 </html>

@@ -276,6 +276,11 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 	}
 	router.GET("/api/v1/channels/:id", channelHandler.Status)
 	router.DELETE("/api/v1/channels/:id", channelHandler.Close)
+	router.POST("/api/v1/channels/:id/join", channelHandler.Join)
+	router.POST("/api/v1/channels/:id/admit", channelHandler.Admit)
+	router.POST("/api/v1/channels/:id/heartbeat", channelHandler.Heartbeat)
+	router.POST("/api/v1/channels/:id/seat/heartbeat", channelHandler.SeatHeartbeat)
+	router.POST("/api/v1/channels/:id/leave", channelHandler.Leave)
 	router.GET("/c/:id", channelHandler.Page)
 	router.GET("/api/v1/ui-config", sharesHandler.UIConfig)
 	if cfg.UploadAuth && !cfg.AccountsEnabled {

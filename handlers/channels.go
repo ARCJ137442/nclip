@@ -16,13 +16,16 @@ import (
 )
 
 const senderCookieName = "nclip_sender_key"
+const seatTokenHeader = "X-Nclip-Seat-Token"
 
 var errChannelCreateThrottled = errors.New("channel_create_throttled")
 
 const (
-	createLimitPerMinute = 30
-	createWindow         = time.Minute
-	maxTrackedCreateIPs  = 2048
+	createLimitPerMinute         = 30
+	createWindow                 = time.Minute
+	maxTrackedCreateIPs          = 2048
+	joinLimitPerIPPerMinute      = 30
+	joinLimitPerChannelPerMinute = 5
 )
 
 type createWindowState struct {
@@ -30,19 +33,24 @@ type createWindowState struct {
 }
 
 type ChannelHandler struct {
-	manager       *channels.Manager
-	config        *config.Config
-	accounts      *AccountHandler
-	createMu      sync.Mutex
-	createWindows map[string]createWindowState
+	manager            *channels.Manager
+	config             *config.Config
+	accounts           *AccountHandler
+	createMu           sync.Mutex
+	createWindows      map[string]createWindowState
+	joinMu             sync.Mutex
+	joinIPWindows      map[string]createWindowState
+	joinChannelWindows map[string]createWindowState
 }
 
 func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *AccountHandler) *ChannelHandler {
 	return &ChannelHandler{
-		manager:       manager,
-		config:        cfg,
-		accounts:      accounts,
-		createWindows: make(map[string]createWindowState),
+		manager:            manager,
+		config:             cfg,
+		accounts:           accounts,
+		createWindows:      make(map[string]createWindowState),
+		joinIPWindows:      make(map[string]createWindowState),
+		joinChannelWindows: make(map[string]createWindowState),
 	}
 }
 
@@ -51,7 +59,10 @@ func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *
 func (h *ChannelHandler) Gate() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.FullPath()
-		if path != "/api/v1/channels" && path != "/api/v1/channels/:id" && path != "/c/:id" {
+		if path != "/api/v1/channels" && path != "/api/v1/channels/:id" && path != "/c/:id" &&
+			path != "/api/v1/channels/:id/join" && path != "/api/v1/channels/:id/admit" &&
+			path != "/api/v1/channels/:id/heartbeat" && path != "/api/v1/channels/:id/seat/heartbeat" &&
+			path != "/api/v1/channels/:id/leave" {
 			c.Next()
 			return
 		}
@@ -72,7 +83,62 @@ func (h *ChannelHandler) Gate() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-
+		if path == "/api/v1/channels/:id/join" {
+			if c.Request.Method != http.MethodPost {
+				c.AbortWithStatus(http.StatusMethodNotAllowed)
+				return
+			}
+			record, ok := h.manager.Get(c.Param("id"))
+			if !ok {
+				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "channel_not_found"})
+				return
+			}
+			if !h.authorizeJoin(c, record) {
+				return
+			}
+			c.Next()
+			return
+		}
+		if path == "/api/v1/channels/:id/admit" || path == "/api/v1/channels/:id/heartbeat" {
+			if c.Request.Method != http.MethodPost {
+				c.AbortWithStatus(http.StatusMethodNotAllowed)
+				return
+			}
+			if !h.sameOrigin(c) {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "csrf_failed"})
+				return
+			}
+			if _, ok := h.manager.Get(c.Param("id")); !ok {
+				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "channel_not_found"})
+				return
+			}
+			if !h.senderAuthorized(c, c.Param("id")) {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": channels.ErrUnauthorized.Error()})
+				return
+			}
+			c.Next()
+			return
+		}
+		if path == "/api/v1/channels/:id/leave" || path == "/api/v1/channels/:id/seat/heartbeat" {
+			if c.Request.Method != http.MethodPost {
+				c.AbortWithStatus(http.StatusMethodNotAllowed)
+				return
+			}
+			if !h.sameOrigin(c) {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "csrf_failed"})
+				return
+			}
+			if _, ok := h.manager.Get(c.Param("id")); !ok {
+				c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "channel_not_found"})
+				return
+			}
+			if c.GetHeader(seatTokenHeader) == "" {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": channels.ErrUnauthorized.Error()})
+				return
+			}
+			c.Next()
+			return
+		}
 		if path == "/api/v1/channels/:id" && c.Request.Method == http.MethodDelete {
 			if !h.sameOrigin(c) {
 				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "csrf_failed"})
@@ -89,7 +155,6 @@ func (h *ChannelHandler) Gate() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-
 		if c.Request.Method != http.MethodGet {
 			c.AbortWithStatus(http.StatusMethodNotAllowed)
 			return
@@ -99,10 +164,8 @@ func (h *ChannelHandler) Gate() gin.HandlerFunc {
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "channel_not_found"})
 			return
 		}
-		if path == "/c/:id" || path == "/api/v1/channels/:id" {
-			if !h.authorizeRead(c, record) {
-				return
-			}
+		if !h.authorizeRead(c, record) {
+			return
 		}
 		c.Next()
 	}
@@ -143,8 +206,13 @@ func (h *ChannelHandler) authorizeRead(c *gin.Context, record channels.Record) b
 	if ok {
 		c.Set(accountContext, user)
 	}
-	if record.Visibility == channels.VisibilityPublic || c.FullPath() == "/api/v1/channels/:id" && h.senderAuthorized(c, record.ID) {
+	if record.Visibility == channels.VisibilityPublic {
 		return true
+	}
+	if c.FullPath() == "/api/v1/channels/:id" {
+		if h.senderAuthorized(c, record.ID) || h.manager.SeatAuthorized(record.ID, c.GetHeader(seatTokenHeader)) {
+			return true
+		}
 	}
 	if !ok {
 		h.accounts.loginRequired(c)
@@ -152,6 +220,34 @@ func (h *ChannelHandler) authorizeRead(c *gin.Context, record channels.Record) b
 	}
 	if !user.Permissions.Download {
 		h.accounts.forbidden(c)
+		return false
+	}
+	return true
+}
+
+func (h *ChannelHandler) authorizeJoin(c *gin.Context, record channels.Record) bool {
+	if h.accounts == nil {
+		return true
+	}
+	user, session, ok := h.accounts.requestUser(c)
+	if c.IsAborted() {
+		return false
+	}
+	if ok {
+		c.Set(accountContext, user)
+	}
+	if record.Visibility != channels.VisibilityPublic {
+		if !ok {
+			h.accounts.loginRequired(c)
+			return false
+		}
+		if !user.Permissions.Download {
+			h.accounts.forbidden(c)
+			return false
+		}
+	}
+	if ok && !h.accounts.csrf(c, session) {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "csrf_failed"})
 		return false
 	}
 	return true
@@ -371,6 +467,36 @@ func (h *ChannelHandler) Page(c *gin.Context) {
 }
 
 func (h *ChannelHandler) Status(c *gin.Context) {
-	record, _ := h.manager.Get(c.Param("id"))
-	c.JSON(http.StatusOK, gin.H{"state": record.State})
+	if seatToken := c.GetHeader(seatTokenHeader); seatToken != "" {
+		record, err := h.manager.ReceiverStatus(c.Param("id"), seatToken, time.Now())
+		if err != nil {
+			h.channelError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"state":         record.State,
+			"seat_state":    record.Seat.State,
+			"pending_until": record.Seat.PendingUntil,
+		})
+		return
+	}
+	if senderKey, err := c.Cookie(senderCookieName); err == nil {
+		record, err := h.manager.SenderStatus(c.Param("id"), senderKey, time.Now())
+		if err != nil {
+			h.channelError(c, err)
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"state":         record.State,
+			"sender_online": record.SenderOnline,
+			"seat":          record.Seat,
+		})
+		return
+	}
+	state, err := h.manager.PublicState(c.Param("id"), time.Now())
+	if err != nil {
+		h.channelError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"state": state})
 }
