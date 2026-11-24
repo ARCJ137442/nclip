@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"github.com/johnwmail/nclip/internal/channels"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -236,6 +237,7 @@ func TestAccountChannelRequiresUploadAndPrivateReadRequiresDownload(t *testing.T
 	uploaderPageRequest := httptest.NewRequest(http.MethodGet, "/c/"+channel.ID, nil)
 	uploaderPageRequest.Header.Set("Accept", "text/html")
 	uploaderPageRequest.AddCookie(uploader.cookie)
+	uploaderPageRequest.AddCookie(created.Result().Cookies()[0])
 	uploaderPage := httptest.NewRecorder()
 	router.ServeHTTP(uploaderPage, uploaderPageRequest)
 	if uploaderPage.Code != http.StatusForbidden {
@@ -249,5 +251,98 @@ func TestAccountChannelRequiresUploadAndPrivateReadRequiresDownload(t *testing.T
 	router.ServeHTTP(readerPage, readerPageRequest)
 	if readerPage.Code != http.StatusOK {
 		t.Fatalf("download user private page = %d %s", readerPage.Code, readerPage.Body.String())
+	}
+}
+
+func TestChannelCreationRateLimitAndIdempotentReplay(t *testing.T) {
+	router := shareTestRouter(t, 4<<20, false)
+	firstID := ""
+	firstChannel := ""
+	for i := 0; i < 30; i++ {
+		requestID, err := channels.NewRequestID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := channelCreateRequest(router, requestID, nil)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create %d: %d %s", i, response.Code, response.Body.String())
+		}
+		if i == 0 {
+			firstID = requestID
+			firstChannel = decodeChannelCreate(t, response).ID
+		}
+	}
+	replay := channelCreateRequest(router, firstID, nil)
+	if replay.Code != http.StatusCreated || decodeChannelCreate(t, replay).ID != firstChannel {
+		t.Fatalf("idempotent replay after rate limit: %d %s", replay.Code, replay.Body.String())
+	}
+	limitedID, err := channels.NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	limited := channelCreateRequest(router, limitedID, nil)
+	if limited.Code != http.StatusTooManyRequests || limited.Header().Get("Retry-After") != "60" {
+		t.Fatalf("rate limit response: %d %s retry=%s", limited.Code, limited.Body.String(), limited.Header().Get("Retry-After"))
+	}
+}
+
+func TestChannelCloseClearsCookieAndFreesSlot(t *testing.T) {
+	router := shareTestRouter(t, 4<<20, false)
+	createID, _ := channels.NewRequestID()
+	created := channelCreateRequest(router, createID, map[string]string{"X-Nclip-Visibility": "public"})
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", created.Code, created.Body.String())
+	}
+	channel := decodeChannelCreate(t, created)
+	senderCookie := created.Result().Cookies()[0]
+
+	closeID, _ := channels.NewRequestID()
+	closeRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/channels/"+channel.ID, nil)
+	closeRequest.Header.Set("Idempotency-Key", closeID)
+	closeRequest.Header.Set("Origin", "https://clip.test")
+	closeRequest.Header.Set("Sec-Fetch-Site", "same-origin")
+	closeRequest.AddCookie(senderCookie)
+	closed := httptest.NewRecorder()
+	router.ServeHTTP(closed, closeRequest)
+	if closed.Code != http.StatusNoContent {
+		t.Fatalf("close: %d %s", closed.Code, closed.Body.String())
+	}
+	cleared := closed.Result().Cookies()
+	if len(cleared) != 1 || cleared[0].Name != senderCookie.Name || cleared[0].Path != senderCookie.Path || cleared[0].MaxAge != -1 || cleared[0].SameSite != http.SameSiteStrictMode {
+		t.Fatalf("sender cookie was not actively cleared: %+v", cleared)
+	}
+
+	retryRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/channels/"+channel.ID, nil)
+	retryRequest.Header.Set("Idempotency-Key", closeID)
+	retryRequest.Header.Set("Origin", "https://clip.test")
+	retryRequest.Header.Set("Sec-Fetch-Site", "same-origin")
+	retried := httptest.NewRecorder()
+	router.ServeHTTP(retried, retryRequest)
+	if retried.Code != http.StatusNoContent {
+		t.Fatalf("idempotent close retry: %d %s", retried.Code, retried.Body.String())
+	}
+	recreated := channelCreateRequest(router, createID, map[string]string{"X-Nclip-Visibility": "public"})
+	if recreated.Code != http.StatusCreated || decodeChannelCreate(t, recreated).ID == channel.ID {
+		t.Fatalf("closed channel slot/idempotency record was not released: %d %s", recreated.Code, recreated.Body.String())
+	}
+}
+
+func TestChannelCloseRejectsOtherChannelCapability(t *testing.T) {
+	router := shareTestRouter(t, 4<<20, false)
+	first, _ := channels.NewRequestID()
+	second, _ := channels.NewRequestID()
+	a := channelCreateRequest(router, first, nil)
+	b := channelCreateRequest(router, second, nil)
+	channelA := decodeChannelCreate(t, a)
+	closeRequest := httptest.NewRequest(http.MethodDelete, "/api/v1/channels/"+channelA.ID, nil)
+	closeID, _ := channels.NewRequestID()
+	closeRequest.Header.Set("Idempotency-Key", closeID)
+	closeRequest.Header.Set("Origin", "https://clip.test")
+	closeRequest.Header.Set("Sec-Fetch-Site", "same-origin")
+	closeRequest.AddCookie(b.Result().Cookies()[0])
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, closeRequest)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("other channel sender capability close = %d %s", response.Code, response.Body.String())
 	}
 }

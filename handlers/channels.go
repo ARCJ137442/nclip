@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/johnwmail/nclip/config"
@@ -15,14 +17,31 @@ import (
 
 const senderCookieName = "nclip_sender_key"
 
+const (
+	createLimitPerMinute = 30
+	createWindow         = time.Minute
+	maxTrackedCreateIPs  = 2048
+)
+
+type createWindowState struct {
+	attempts []time.Time
+}
+
 type ChannelHandler struct {
-	manager  *channels.Manager
-	config   *config.Config
-	accounts *AccountHandler
+	manager       *channels.Manager
+	config        *config.Config
+	accounts      *AccountHandler
+	createMu      sync.Mutex
+	createWindows map[string]createWindowState
 }
 
 func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *AccountHandler) *ChannelHandler {
-	return &ChannelHandler{manager: manager, config: cfg, accounts: accounts}
+	return &ChannelHandler{
+		manager:       manager,
+		config:        cfg,
+		accounts:      accounts,
+		createWindows: make(map[string]createWindowState),
+	}
 }
 
 // Gate owns channel access decisions so the account Gate cannot reject an
@@ -52,13 +71,36 @@ func (h *ChannelHandler) Gate() gin.HandlerFunc {
 			return
 		}
 
+		if path == "/api/v1/channels/:id" && c.Request.Method == http.MethodDelete {
+			if !h.sameOrigin(c) {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "csrf_failed"})
+				return
+			}
+			if !channels.ValidRequestID(c.GetHeader("Idempotency-Key")) {
+				c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": channels.ErrInvalidRequestID.Error()})
+				return
+			}
+			if _, exists := h.manager.Get(c.Param("id")); exists && !h.senderAuthorized(c, c.Param("id")) {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": channels.ErrUnauthorized.Error()})
+				return
+			}
+			c.Next()
+			return
+		}
+
+		if c.Request.Method != http.MethodGet {
+			c.AbortWithStatus(http.StatusMethodNotAllowed)
+			return
+		}
 		record, ok := h.manager.Get(c.Param("id"))
 		if !ok {
 			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": "channel_not_found"})
 			return
 		}
-		if !h.authorizeRead(c, record) {
-			return
+		if path == "/c/:id" || path == "/api/v1/channels/:id" {
+			if !h.authorizeRead(c, record) {
+				return
+			}
 		}
 		c.Next()
 	}
@@ -99,7 +141,7 @@ func (h *ChannelHandler) authorizeRead(c *gin.Context, record channels.Record) b
 	if ok {
 		c.Set(accountContext, user)
 	}
-	if record.Visibility == channels.VisibilityPublic || h.senderAuthorized(c, record.ID) {
+	if record.Visibility == channels.VisibilityPublic || c.FullPath() == "/api/v1/channels/:id" && h.senderAuthorized(c, record.ID) {
 		return true
 	}
 	if !ok {
@@ -113,12 +155,20 @@ func (h *ChannelHandler) authorizeRead(c *gin.Context, record channels.Record) b
 	return true
 }
 
-func (h *ChannelHandler) senderAuthorized(c *gin.Context, channelID string) bool {
-	senderKey, err := c.Cookie(senderCookieName)
-	return err == nil && h.manager.SenderAuthorized(channelID, senderKey)
-}
 func (h *ChannelHandler) Create(c *gin.Context) {
 	requestID := c.GetHeader("Idempotency-Key")
+	if !channels.ValidRequestID(requestID) {
+		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": channels.ErrInvalidRequestID.Error()})
+		return
+	}
+
+	scope := channelCreateScope(c, h.config)
+	if !h.manager.HasCreate(scope, requestID) && !h.allowCreate(c.ClientIP()) {
+		c.Header("Retry-After", "60")
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "channel_create_throttled"})
+		return
+	}
+
 	visibility := channels.VisibilityAuthenticated
 	value := c.GetHeader("X-Nclip-Visibility")
 	if value == string(channels.VisibilityPublic) {
@@ -131,9 +181,13 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 		visibility = channels.VisibilityPublic
 	}
 
-	record, senderKey, _, err := h.manager.Create(channelCreateScope(c, h.config), requestID, visibility)
-	if errors.Is(err, channels.ErrInvalidRequestID) || errors.Is(err, channels.ErrInvalidVisibility) {
+	record, senderKey, _, err := h.manager.Create(scope, requestID, visibility)
+	if errors.Is(err, channels.ErrInvalidVisibility) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if errors.Is(err, channels.ErrCapacity) {
+		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 		return
 	}
 	if errors.Is(err, channels.ErrIdempotencyConflict) {
@@ -168,6 +222,82 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 	})
 }
 
+func (h *ChannelHandler) allowCreate(ip string) bool {
+	now := time.Now()
+	cutoff := now.Add(-createWindow)
+	h.createMu.Lock()
+	defer h.createMu.Unlock()
+	for trackedIP, window := range h.createWindows {
+		live := window.attempts[:0]
+		for _, attemptedAt := range window.attempts {
+			if attemptedAt.After(cutoff) {
+				live = append(live, attemptedAt)
+			}
+		}
+		if len(live) == 0 {
+			delete(h.createWindows, trackedIP)
+		} else {
+			window.attempts = live
+			h.createWindows[trackedIP] = window
+		}
+	}
+	window, ok := h.createWindows[ip]
+	if !ok {
+		if len(h.createWindows) >= maxTrackedCreateIPs {
+			return false
+		}
+		window = createWindowState{}
+	}
+	if len(window.attempts) >= createLimitPerMinute {
+		return false
+	}
+	window.attempts = append(window.attempts, now)
+	h.createWindows[ip] = window
+	return true
+}
+
+func (h *ChannelHandler) Close(c *gin.Context) {
+	senderKey, _ := c.Cookie(senderCookieName)
+	if err := h.manager.Close(c.Param("id"), senderKey); err != nil {
+		if errors.Is(err, channels.ErrUnauthorized) {
+			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			return
+		}
+		c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "channel_close_failed"})
+		return
+	}
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     senderCookieName,
+		Value:    "",
+		Path:     "/api/v1/channels/" + c.Param("id"),
+		HttpOnly: true,
+		Secure:   h.secureRequest(c),
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+	})
+	c.Status(http.StatusNoContent)
+}
+
+func (h *ChannelHandler) sameOrigin(c *gin.Context) bool {
+	if h.accounts != nil {
+		return h.accounts.sameOrigin(c)
+	}
+	origin := c.GetHeader("Origin")
+	if origin == "" {
+		return c.GetHeader("Sec-Fetch-Site") != "cross-site"
+	}
+	expected := strings.TrimRight(h.config.URL, "/")
+	if expected == "" {
+		scheme := "http"
+		if h.secureRequest(c) {
+			scheme = "https"
+		}
+		expected = scheme + "://" + c.Request.Host
+	}
+	return origin == expected
+}
+
 func channelCreateScope(c *gin.Context, cfg *config.Config) string {
 	if user, ok := CurrentAccount(c); ok {
 		return "account:" + user.ID
@@ -184,6 +314,11 @@ func channelCreateScope(c *gin.Context, cfg *config.Config) string {
 		return "api-key:" + hex.EncodeToString(digest[:])
 	}
 	return "ip:" + c.ClientIP()
+}
+
+func (h *ChannelHandler) senderAuthorized(c *gin.Context, channelID string) bool {
+	senderKey, err := c.Cookie(senderCookieName)
+	return err == nil && h.manager.SenderAuthorized(channelID, senderKey)
 }
 
 func (h *ChannelHandler) secureRequest(c *gin.Context) bool {

@@ -275,6 +275,7 @@ func setupRouter(store storage.PasteStore, cfg *config.Config) *gin.Engine {
 		router.POST("/api/v1/channels", channelHandler.Create)
 	}
 	router.GET("/api/v1/channels/:id", channelHandler.Status)
+	router.DELETE("/api/v1/channels/:id", channelHandler.Close)
 	router.GET("/c/:id", channelHandler.Page)
 	router.GET("/api/v1/ui-config", sharesHandler.UIConfig)
 	if cfg.UploadAuth && !cfg.AccountsEnabled {

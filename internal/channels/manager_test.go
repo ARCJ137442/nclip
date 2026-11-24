@@ -1,6 +1,7 @@
 package channels
 
 import (
+	"reflect"
 	"sync"
 	"testing"
 )
@@ -33,7 +34,7 @@ func TestCreateIdempotencyAndSenderCapability(t *testing.T) {
 func TestCreateIdempotencyConflictAndScope(t *testing.T) {
 	manager := NewManager()
 	requestID, _ := NewRequestID()
-	first, _, _, err := manager.Create("user:first", requestID, VisibilityAuthenticated)
+	first, firstKey, _, err := manager.Create("user:first", requestID, VisibilityAuthenticated)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,8 +45,8 @@ func TestCreateIdempotencyConflictAndScope(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.ID == second.ID {
-		t.Fatal("idempotency key was not scoped to the requester")
+	if first.ID == second.ID || manager.SenderAuthorized(second.ID, firstKey) {
+		t.Fatal("request scope or sender capability crossed channels")
 	}
 }
 
@@ -82,5 +83,53 @@ func TestRequestIDRequires128RandomBits(t *testing.T) {
 	id, err := NewRequestID()
 	if err != nil || !ValidRequestID(id) {
 		t.Fatalf("generated request id is invalid: %q %v", id, err)
+	}
+}
+
+func TestChannelLimitAndCloseClearsCreateReplay(t *testing.T) {
+	manager := NewManager()
+	var firstID, firstKey string
+	firstRequestID := ""
+	for i := 0; i < MaxChannels; i++ {
+		requestID, err := NewRequestID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		record, senderKey, _, err := manager.Create("sender", requestID, VisibilityPublic)
+		if err != nil {
+			t.Fatalf("create %d: %v", i, err)
+		}
+		if i == 0 {
+			firstID, firstKey, firstRequestID = record.ID, senderKey, requestID
+		}
+	}
+	overflowID, err := NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, err := manager.Create("sender", overflowID, VisibilityPublic); err != ErrCapacity {
+		t.Fatalf("capacity error = %v", err)
+	}
+	if err := manager.Close(firstID, "wrong"); err != ErrUnauthorized {
+		t.Fatalf("wrong sender close error = %v", err)
+	}
+	if err := manager.Close(firstID, firstKey); err != nil {
+		t.Fatalf("sender close: %v", err)
+	}
+	if manager.HasCreate("sender", firstRequestID) || manager.SenderAuthorized(firstID, firstKey) {
+		t.Fatal("closed channel or its create replay record remained")
+	}
+	record, _, replay, err := manager.Create("sender", firstRequestID, VisibilityPublic)
+	if err != nil {
+		t.Fatalf("create after close: %v", err)
+	}
+	if replay || record.ID == firstID || firstKey == "" {
+		t.Fatal("closed idempotency result was unexpectedly replayed")
+	}
+}
+
+func TestCreateReplayDoesNotStoreSenderKey(t *testing.T) {
+	if _, ok := reflect.TypeOf(createResult{}).FieldByName("senderKey"); ok {
+		t.Fatal("create replay record retains a plaintext sender capability")
 	}
 }
