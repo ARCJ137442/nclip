@@ -1424,8 +1424,19 @@ func TestPendingChannelSlugCannotBeReusedAndSweepPreservesOrdinaryShare(t *testi
 	if err := store.StoreChannelContentStream(id, strings.NewReader("channel-staging"), int64(len("channel-staging"))); err != nil {
 		t.Fatal(err)
 	}
+	otherStore, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = otherStore.Close() })
 	if exists, err := store.Exists(id); err != nil || !exists {
 		t.Fatalf("pending channel slug not considered occupied: exists=%t err=%v", exists, err)
+	}
+	if exists, err := otherStore.Exists(id); err != nil || !exists {
+		t.Fatalf("pending channel slug not visible to another store instance: exists=%t err=%v", exists, err)
+	}
+	if err := otherStore.StoreContentStream(id, strings.NewReader("other-instance"), int64(len("other-instance"))); !errors.Is(err, storage.ErrSlugReserved) {
+		t.Fatalf("ordinary upload from another store instance reused pending slug: %v", err)
 	}
 	if err := store.StoreContentStream(id, strings.NewReader("ordinary-share"), int64(len("ordinary-share"))); !errors.Is(err, storage.ErrSlugReserved) {
 		t.Fatalf("ordinary upload reused a reserved pending slug: %v", err)

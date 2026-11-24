@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"sync"
@@ -16,13 +17,15 @@ import (
 
 type blockingJanitorFilesystemStore struct {
 	*storage.FilesystemStore
-	block   atomic.Bool
-	entered chan struct{}
-	proceed chan struct{}
-	once    sync.Once
+	block     atomic.Bool
+	listCalls atomic.Int32
+	entered   chan struct{}
+	proceed   chan struct{}
+	once      sync.Once
 }
 
 func (s *blockingJanitorFilesystemStore) ListEphemeralPastes() ([]models.Paste, error) {
+	s.listCalls.Add(1)
 	if s.block.Load() {
 		s.once.Do(func() { close(s.entered) })
 		<-s.proceed
@@ -133,10 +136,11 @@ func TestSecondHandlerWithoutWriterLockCannotRunJanitor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	second, err := storage.NewFilesystemStore(dataDir)
+	secondBase, err := storage.NewFilesystemStore(dataDir)
 	if err != nil {
 		t.Fatal(err)
 	}
+	second := &blockingJanitorFilesystemStore{FilesystemStore: secondBase, entered: make(chan struct{}), proceed: make(chan struct{})}
 	t.Cleanup(func() { _ = second.Close() })
 	handler := NewChannelHandler(channels.NewManager(), &config.Config{DataDir: dataDir}, nil)
 	if err := handler.InitializeContent(second); err == nil {
@@ -145,7 +149,24 @@ func TestSecondHandlerWithoutWriterLockCannotRunJanitor(t *testing.T) {
 	handler.janitorInterval = time.Millisecond
 	stop := handler.StartEphemeralJanitor()
 	stop()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		handler.RunEphemeralJanitor(ctx)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		cancel()
+		<-done
+		t.Fatal("direct janitor run did not fail closed without writer ownership")
+	}
+	cancel()
 	handler.cleanupExpiredEphemeral(time.Now().Add(2 * channelOrphanSweepInterval))
+	if calls := second.listCalls.Load(); calls != 0 {
+		t.Fatalf("janitor listed orphan content without writer ownership: %d calls", calls)
+	}
 	if _, err := second.Get(paste.ID); err != nil {
 		t.Fatalf("handler without the writer lock deleted active content: %v", err)
 	}

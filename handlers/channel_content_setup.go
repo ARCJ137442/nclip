@@ -141,6 +141,9 @@ func (h *ChannelHandler) cleanupExpiredEphemeralOwned(now time.Time) {
 }
 
 func (h *ChannelHandler) RunEphemeralJanitor(ctx context.Context) {
+	if !h.ContentJanitorReady() {
+		return
+	}
 	interval := h.janitorInterval
 	if interval <= 0 {
 		interval = channelOrphanSweepInterval
@@ -152,6 +155,9 @@ func (h *ChannelHandler) RunEphemeralJanitor(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
+			if !h.ContentJanitorReady() {
+				return
+			}
 			h.cleanupExpiredEphemeral(now)
 		}
 	}
