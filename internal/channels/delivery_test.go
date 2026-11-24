@@ -53,6 +53,21 @@ func heldDeliveryFixture(t *testing.T, now time.Time) (*Manager, Record, string,
 func TestClaimBoundRangeDeliveryResumesAndDeletesAfterCompleteBody(t *testing.T) {
 	now := time.Now()
 	manager, record, _, joined := heldDeliveryFixture(t, now)
+	first := assertDeliveryClaimAndConcurrency(t, manager, record, joined, now)
+	finishPartialDelivery(t, manager, record, first, now)
+	release := finishResumedDelivery(t, manager, record, joined, now.Add(2*time.Second))
+	if release.Slug != "DLV52" {
+		t.Fatalf("completed delivery released wrong content: %+v", release)
+	}
+	manager.ContentReleaseDeleted(release)
+	_, _, _, held, _ := manager.ContentSlotCapacity()
+	if held != 0 {
+		t.Fatalf("delivery deletion did not release held capacity: %d", held)
+	}
+}
+
+func assertDeliveryClaimAndConcurrency(t *testing.T, manager *Manager, record Record, joined JoinResult, now time.Time) *DeliveryLease {
+	t.Helper()
 	if _, err := manager.BeginDelivery(record.ID, joined.SeatToken, "wrong-claim", now); err != ErrUnauthorized {
 		t.Fatalf("wrong claim token = %v", err)
 	}
@@ -63,21 +78,29 @@ func TestClaimBoundRangeDeliveryResumesAndDeletesAfterCompleteBody(t *testing.T)
 	if _, err := manager.BeginDelivery(record.ID, joined.SeatToken, joined.ClaimToken, now); err != ErrDeliveryBusy {
 		t.Fatalf("parallel request for one claim = %v", err)
 	}
-	if err := manager.SetDeliveryRange(first.Lease, 0); err != nil {
+	return first.Lease
+}
+
+func finishPartialDelivery(t *testing.T, manager *Manager, record Record, first *DeliveryLease, now time.Time) {
+	t.Helper()
+	if err := manager.SetDeliveryRange(first, 0); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.RecordDeliveryBytes(first.Lease, 4, now.Add(time.Second)); err != nil {
+	if err := manager.RecordDeliveryBytes(first, 4, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	if _, complete, err := manager.FinishDelivery(first.Lease, 10, false, now.Add(time.Second)); err != nil || complete {
+	if _, complete, err := manager.FinishDelivery(first, 10, false, now.Add(time.Second)); err != nil || complete {
 		t.Fatalf("partial delivery finish = complete:%t err:%v", complete, err)
 	}
 	current, _ := manager.Get(record.ID)
 	if current.ContentState != ContentHeld || current.seat == nil || current.seat.deliveredThrough != 4 {
 		t.Fatalf("partial delivery lost its content/offset: state=%s seat=%+v", current.ContentState, current.seat)
 	}
+}
 
-	second, err := manager.BeginDelivery(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(2*time.Second))
+func finishResumedDelivery(t *testing.T, manager *Manager, record Record, joined JoinResult, now time.Time) ContentRelease {
+	t.Helper()
+	second, err := manager.BeginDelivery(record.ID, joined.SeatToken, joined.ClaimToken, now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -87,22 +110,18 @@ func TestClaimBoundRangeDeliveryResumesAndDeletesAfterCompleteBody(t *testing.T)
 	if err := manager.SetDeliveryRange(second.Lease, 4); err != nil {
 		t.Fatal(err)
 	}
-	if err := manager.RecordDeliveryBytes(second.Lease, 6, now.Add(3*time.Second)); err != nil {
+	if err := manager.RecordDeliveryBytes(second.Lease, 6, now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	release, complete, err := manager.FinishDelivery(second.Lease, 10, true, now.Add(3*time.Second))
+	release, complete, err := manager.FinishDelivery(second.Lease, 10, true, now.Add(time.Second))
 	if err != nil || !complete || release.Slug != "DLV52" {
 		t.Fatalf("completed delivery = release:%+v complete:%t err:%v", release, complete, err)
 	}
-	current, _ = manager.Get(record.ID)
+	current, _ := manager.Get(record.ID)
 	if current.ContentState != ContentEmpty || current.seat != nil {
 		t.Fatalf("completed delivery did not release channel: %+v", current)
 	}
-	manager.ContentReleaseDeleted(release)
-	_, _, _, held, _ := manager.ContentSlotCapacity()
-	if held != 0 {
-		t.Fatalf("delivery deletion did not release held capacity: %d", held)
-	}
+	return release
 }
 
 func TestKickCancelsActiveDeliveryAndIsBoundToItsSeat(t *testing.T) {

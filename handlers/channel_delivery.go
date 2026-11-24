@@ -130,43 +130,54 @@ func (h *ChannelHandler) prepareChannelResponse(lease *channels.DeliveryLease, s
 	if err := h.manager.ReserveDeliverySpace(lease, reservation, freeBytes); err != nil {
 		return nil, err
 	}
-	reserved := true
+	reservationHeld := true
 	defer func() {
-		if reserved {
+		if reservationHeld {
 			h.manager.ReleaseDeliverySpace(lease)
 		}
 	}()
+	prepared, err := h.materializeChannelResponse(lease, slug, paste, plan, reservation)
+	if err != nil {
+		return nil, err
+	}
+	lease.SetSource(prepared.response.File)
+	reservationHeld = false
+	return prepared, nil
+}
+
+func (h *ChannelHandler) materializeChannelResponse(lease *channels.DeliveryLease, slug string, paste *models.Paste, plan channelResponsePlan, reservation int64) (*preparedChannelResponse, error) {
 	directory, err := h.shares.tempDir()
 	if err != nil {
 		return nil, err
 	}
 	prepared := &preparedChannelResponse{directory: directory, plan: plan}
-	cleanup := true
-	defer func() {
-		if cleanup {
-			prepared.close()
-		}
-	}()
-	err = h.shares.service.ReadPasteStream(slug, false, func(_ *models.Paste, source io.Reader, size int64) error {
+	if err := h.readAndBuildChannelResponse(lease, slug, paste, plan, reservation, prepared); err != nil {
+		prepared.close()
+		return nil, err
+	}
+	return prepared, nil
+}
+
+func (h *ChannelHandler) readAndBuildChannelResponse(lease *channels.DeliveryLease, slug string, paste *models.Paste, plan channelResponsePlan, reservation int64, prepared *preparedChannelResponse) error {
+	return h.shares.service.ReadPasteStream(slug, false, func(_ *models.Paste, source io.Reader, size int64) error {
 		if closer, ok := source.(io.Closer); ok {
 			lease.SetSource(closer)
 		}
-		wrapped := contextReader{ctx: lease.Context(), source: source}
-		file, writeErr := spool.Write(directory, "nclip-channel-read-source-*", wrapped, size, 0)
-		if writeErr != nil {
-			return writeErr
+		file, err := spool.Write(prepared.directory, "nclip-channel-read-source-*", contextReader{ctx: lease.Context(), source: source}, size, 0)
+		if err != nil {
+			return err
 		}
 		prepared.source = file
 		if file.Size != size {
 			return fmt.Errorf("size_mismatch")
 		}
-		stored, openErr := openStoredShareContext(lease.Context(), &plan.manifest, file)
-		if openErr != nil {
-			return openErr
+		stored, err := openStoredShareContext(lease.Context(), &plan.manifest, file)
+		if err != nil {
+			return err
 		}
-		response, prepareErr := prepareShareResponseContext(lease.Context(), directory, plan.boundary, paste, plan.manifestBytes, plan.manifest, stored)
-		if prepareErr != nil {
-			return prepareErr
+		response, err := prepareShareResponseContext(lease.Context(), prepared.directory, plan.boundary, paste, plan.manifestBytes, plan.manifest, stored)
+		if err != nil {
+			return err
 		}
 		prepared.response = response
 		if response.Size != plan.size {
@@ -174,13 +185,6 @@ func (h *ChannelHandler) prepareChannelResponse(lease *channels.DeliveryLease, s
 		}
 		return h.manager.MaterializeDeliverySpace(lease, reservation)
 	})
-	if err != nil {
-		return nil, err
-	}
-	lease.SetSource(prepared.response.File)
-	cleanup = false
-	reserved = false
-	return prepared, nil
 }
 
 type contextReader struct {
@@ -222,22 +226,30 @@ func parseChannelRange(value string, total int64) (byteRange, error) {
 		return byteRange{}, fmt.Errorf("invalid range")
 	}
 	if parts[0] == "" {
-		suffix, err := strconv.ParseInt(parts[1], 10, 64)
-		if err != nil || suffix <= 0 {
-			return byteRange{}, fmt.Errorf("invalid range")
-		}
-		if suffix > total {
-			suffix = total
-		}
-		return byteRange{start: total - suffix, end: total - 1}, nil
+		return parseSuffixRange(parts[1], total)
 	}
-	start, err := strconv.ParseInt(parts[0], 10, 64)
+	return parseExplicitRange(parts[0], parts[1], total)
+}
+
+func parseSuffixRange(value string, total int64) (byteRange, error) {
+	suffix, err := strconv.ParseInt(value, 10, 64)
+	if err != nil || suffix <= 0 {
+		return byteRange{}, fmt.Errorf("invalid range")
+	}
+	if suffix > total {
+		suffix = total
+	}
+	return byteRange{start: total - suffix, end: total - 1}, nil
+}
+
+func parseExplicitRange(startValue, endValue string, total int64) (byteRange, error) {
+	start, err := strconv.ParseInt(startValue, 10, 64)
 	if err != nil || start < 0 || start >= total {
 		return byteRange{}, fmt.Errorf("range not satisfiable")
 	}
 	end := total - 1
-	if parts[1] != "" {
-		end, err = strconv.ParseInt(parts[1], 10, 64)
+	if endValue != "" {
+		end, err = strconv.ParseInt(endValue, 10, 64)
 		if err != nil || end < start {
 			return byteRange{}, fmt.Errorf("invalid range")
 		}
@@ -276,21 +288,11 @@ func (h *ChannelHandler) ContentDownload(c *gin.Context) {
 	}()
 
 	total := prepared.response.Size
-	byteRange := byteRange{start: 0, end: total - 1}
-	partial := false
-	if rangeHeader := c.GetHeader("Range"); rangeHeader != "" {
-		ifRange := c.GetHeader("If-Range")
-		if ifRange == "" || ifRange == prepared.plan.etag {
-			byteRange, err = parseChannelRange(rangeHeader, total)
-			if err != nil {
-				c.Header("Content-Range", fmt.Sprintf("bytes */%d", total))
-				c.Header("Accept-Ranges", "bytes")
-				c.AbortWithStatusJSON(http.StatusRequestedRangeNotSatisfiable, gin.H{"error": "range_not_satisfiable"})
-				_, _, _ = h.manager.FinishDelivery(lease, total, false, time.Now())
-				return
-			}
-			partial = true
-		}
+	byteRange, partial, err := requestedChannelRange(c, prepared.plan, total)
+	if err != nil {
+		writeUnsatisfiableChannelRange(c, total)
+		_, _, _ = h.manager.FinishDelivery(lease, total, false, time.Now())
+		return
 	}
 	if err := h.manager.SetDeliveryRange(lease, byteRange.start); err != nil {
 		_, _, _ = h.manager.FinishDelivery(lease, total, false, time.Now())
@@ -299,54 +301,70 @@ func (h *ChannelHandler) ContentDownload(c *gin.Context) {
 	}
 
 	length := byteRange.end - byteRange.start + 1
+	controller := writeChannelDownloadHeaders(c, prepared.plan, byteRange, total, length, partial)
+	complete, streamErr := streamChannelResponse(h, c, lease, prepared, byteRange.start, length, controller)
+	if !complete && lease.Context().Err() != nil {
+		streamErr = lease.Context().Err()
+	}
+	_ = controller.SetWriteDeadline(time.Time{})
+	h.finishChannelDelivery(lease, prepared, total, complete, streamErr)
+}
+
+func requestedChannelRange(c *gin.Context, plan channelResponsePlan, total int64) (byteRange, bool, error) {
+	full := byteRange{start: 0, end: total - 1}
+	rangeHeader := c.GetHeader("Range")
+	if rangeHeader == "" {
+		return full, false, nil
+	}
+	if ifRange := c.GetHeader("If-Range"); ifRange != "" && ifRange != plan.etag {
+		return full, false, nil
+	}
+	requested, err := parseChannelRange(rangeHeader, total)
+	return requested, err == nil, err
+}
+
+func writeUnsatisfiableChannelRange(c *gin.Context, total int64) {
+	c.Header("Content-Range", fmt.Sprintf("bytes */%d", total))
+	c.Header("Accept-Ranges", "bytes")
+	c.AbortWithStatusJSON(http.StatusRequestedRangeNotSatisfiable, gin.H{"error": "range_not_satisfiable"})
+}
+
+func writeChannelDownloadHeaders(c *gin.Context, plan channelResponsePlan, requested byteRange, total, length int64, partial bool) *http.ResponseController {
 	c.Header("Cache-Control", "no-store")
 	c.Header("Referrer-Policy", "no-referrer")
 	c.Header("X-Content-Type-Options", "nosniff")
 	c.Header("Accept-Ranges", "bytes")
-	c.Header("ETag", prepared.plan.etag)
-	c.Header("Content-Type", "multipart/form-data; boundary="+prepared.plan.boundary)
+	c.Header("ETag", plan.etag)
+	c.Header("Content-Type", "multipart/form-data; boundary="+plan.boundary)
 	c.Header("Content-Length", strconv.FormatInt(length, 10))
 	if partial {
-		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", byteRange.start, byteRange.end, total))
+		c.Header("Content-Range", fmt.Sprintf("bytes %d-%d/%d", requested.start, requested.end, total))
 		c.Status(http.StatusPartialContent)
 	} else {
 		c.Status(http.StatusOK)
 	}
 	controller := http.NewResponseController(c.Writer)
+	return controller
+}
+
+func streamChannelResponse(h *ChannelHandler, c *gin.Context, lease *channels.DeliveryLease, prepared *preparedChannelResponse, start, length int64, controller *http.ResponseController) (bool, error) {
 	lease.SetInterrupt(func() { _ = controller.SetWriteDeadline(time.Now()) })
-	reader := io.NewSectionReader(prepared.response.File, byteRange.start, length)
+	reader := io.NewSectionReader(prepared.response.File, start, length)
 	buffer := make([]byte, 64*1024)
 	written := int64(0)
 	var streamErr error
 	for written < length {
-		if lease.Context().Err() != nil {
-			streamErr = lease.Context().Err()
+		if err := lease.Context().Err(); err != nil {
+			streamErr = err
 			break
 		}
-		want := int64(len(buffer))
-		if remain := length - written; remain < want {
-			want = remain
-		}
+		want := min(int64(len(buffer)), length-written)
 		n, readErr := reader.Read(buffer[:int(want)])
 		if n > 0 {
-			nw, writeErr := c.Writer.Write(buffer[:n])
-			if nw > 0 {
-				written += int64(nw)
-				if err := h.manager.RecordDeliveryBytes(lease, int64(nw), time.Now()); err != nil {
-					streamErr = err
-					break
-				}
-			}
+			chunkWritten, writeErr := writeChannelResponseChunk(h, c, lease, controller, buffer[:n])
+			written += chunkWritten
 			if writeErr != nil {
 				streamErr = writeErr
-				break
-			}
-			if nw != n {
-				streamErr = io.ErrShortWrite
-				break
-			}
-			if flushErr := controller.Flush(); flushErr != nil {
-				streamErr = flushErr
 				break
 			}
 		}
@@ -358,11 +376,29 @@ func (h *ChannelHandler) ContentDownload(c *gin.Context) {
 			break
 		}
 	}
-	complete := streamErr == nil && written == length
-	if !complete && lease.Context().Err() != nil {
-		streamErr = lease.Context().Err()
+	return streamErr == nil && written == length, streamErr
+}
+
+func writeChannelResponseChunk(h *ChannelHandler, c *gin.Context, lease *channels.DeliveryLease, controller *http.ResponseController, buffer []byte) (int64, error) {
+	written, err := c.Writer.Write(buffer)
+	if written > 0 {
+		if recordErr := h.manager.RecordDeliveryBytes(lease, int64(written), time.Now()); recordErr != nil {
+			return int64(written), recordErr
+		}
 	}
-	_ = controller.SetWriteDeadline(time.Time{})
+	if err != nil {
+		return int64(written), err
+	}
+	if written != len(buffer) {
+		return int64(written), io.ErrShortWrite
+	}
+	if err := controller.Flush(); err != nil {
+		return int64(written), err
+	}
+	return int64(written), nil
+}
+
+func (h *ChannelHandler) finishChannelDelivery(lease *channels.DeliveryLease, prepared *preparedChannelResponse, total int64, complete bool, streamErr error) {
 	release, delivered, finishErr := h.manager.FinishDelivery(lease, total, complete, time.Now())
 	if finishErr != nil && !errors.Is(finishErr, channels.ErrContentClosed) {
 		log.Printf("[WARN] finish channel delivery: %v", finishErr)
@@ -390,7 +426,7 @@ func channelDeliveryError(c *gin.Context, err error) {
 		channelContentError(c, http.StatusGone, err)
 	case errors.Is(err, channels.ErrJoinClosed), errors.Is(err, channels.ErrContentClosed):
 		channelContentError(c, http.StatusGone, channels.ErrContentClosed)
-	case errors.Is(err, channels.ErrContentBusy), errors.Is(err, channels.ErrDeliveryGap), errors.Is(err, channels.ErrContentConflict):
+	case errors.Is(err, channels.ErrContentBusy), errors.Is(err, channels.ErrDeliveryBusy), errors.Is(err, channels.ErrDeliveryGap), errors.Is(err, channels.ErrContentConflict):
 		channelContentError(c, http.StatusConflict, err)
 	case errors.Is(err, channels.ErrDeliveryNotReady):
 		channelContentError(c, http.StatusConflict, err)

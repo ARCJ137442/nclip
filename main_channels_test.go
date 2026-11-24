@@ -1323,17 +1323,45 @@ func TestChannelContentAbortAndSenderCloseRemoveIncompleteStaging(t *testing.T) 
 	}
 }
 
-func TestChannelDeliveryRequiresClaimAndResumesMultipartRange(t *testing.T) {
+func channelRequestID(t *testing.T) string {
+	t.Helper()
+	id, err := channels.NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+type channelDeliveryFixture struct {
+	router       http.Handler
+	store        *storage.FilesystemStore
+	channelID    string
+	seatToken    string
+	claimToken   string
+	seatID       string
+	senderCookie *http.Cookie
+	contentPath  string
+}
+
+func newChannelDeliveryFixture(t *testing.T, payload []byte) channelDeliveryFixture {
+	t.Helper()
 	router, store, _ := shareTestRouterWithStore(t, 8<<20, false)
-	createID, _ := channels.NewRequestID()
-	created := channelCreateRequest(router, createID, nil)
+	fixture := createAdmittedChannelFixture(t, router)
+	fixture.router = router
+	fixture.store = store
+	fixture.contentPath = "/api/v1/channels/" + fixture.channelID + "/content"
+	uploadChannelFixtureContent(t, fixture, payload)
+	return fixture
+}
+
+func createAdmittedChannelFixture(t *testing.T, router http.Handler) channelDeliveryFixture {
+	t.Helper()
+	created := channelCreateRequest(router, channelRequestID(t), nil)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create channel: %d %s", created.Code, created.Body.String())
 	}
-	channel := decodeChannelCreate(t, created)
-	senderCookie := created.Result().Cookies()[0]
-	joinID, _ := channels.NewRequestID()
-	joined := channelJoinRequest(router, channel.ID, joinID, "", nil)
+	fixture := channelDeliveryFixture{channelID: decodeChannelCreate(t, created).ID, senderCookie: created.Result().Cookies()[0]}
+	joined := channelJoinRequest(router, fixture.channelID, channelRequestID(t), "", nil)
 	var joinBody struct {
 		SeatToken  string `json:"seat_token"`
 		ClaimToken string `json:"claim_token"`
@@ -1341,31 +1369,33 @@ func TestChannelDeliveryRequiresClaimAndResumesMultipartRange(t *testing.T) {
 	if joined.Code != http.StatusCreated || json.Unmarshal(joined.Body.Bytes(), &joinBody) != nil {
 		t.Fatalf("join: %d %s", joined.Code, joined.Body.String())
 	}
-	senderStatus := channelRequestWithCookie(router, http.MethodGet, "/api/v1/channels/"+channel.ID, nil, senderCookie, nil)
+	fixture.seatToken, fixture.claimToken = joinBody.SeatToken, joinBody.ClaimToken
+	status := channelRequestWithCookie(router, http.MethodGet, "/api/v1/channels/"+fixture.channelID, nil, fixture.senderCookie, nil)
 	var senderState struct {
 		Seat *channels.SeatInfo `json:"seat"`
 	}
-	if senderStatus.Code != http.StatusOK || json.Unmarshal(senderStatus.Body.Bytes(), &senderState) != nil || senderState.Seat == nil {
-		t.Fatalf("sender status: %d %s", senderStatus.Code, senderStatus.Body.String())
+	if status.Code != http.StatusOK || json.Unmarshal(status.Body.Bytes(), &senderState) != nil || senderState.Seat == nil {
+		t.Fatalf("sender status: %d %s", status.Code, status.Body.String())
 	}
-	decisionID, _ := channels.NewRequestID()
-	decisionBody, _ := json.Marshal(map[string]string{"seat_id": senderState.Seat.SeatID, "decision": "admit"})
-	decision := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", decisionBody, senderCookie, map[string]string{
-		"Content-Type": "application/json", "Idempotency-Key": decisionID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	fixture.seatID = senderState.Seat.SeatID
+	decisionBody, _ := json.Marshal(map[string]string{"seat_id": fixture.seatID, "decision": "admit"})
+	decision := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+fixture.channelID+"/admit", decisionBody, fixture.senderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": channelRequestID(t), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
 	})
 	if decision.Code != http.StatusOK {
 		t.Fatalf("admit: %d %s", decision.Code, decision.Body.String())
 	}
+	return fixture
+}
 
-	payload := []byte("range-bound-payload")
+func uploadChannelFixtureContent(t *testing.T, fixture channelDeliveryFixture, payload []byte) {
+	t.Helper()
 	manifest := models.ShareManifest{Version: 1, Items: []models.ShareItem{{
-		Kind: "file", Name: "payload.txt", Parts: []models.SharePart{{Key: "part1", MIME: "text/plain", Size: int64(len(payload))}},
+		Kind: "file", Name: "payload.txt", Parts: []models.SharePart{{Key: "part1", MIME: "application/octet-stream", Size: int64(len(payload))}},
 	}}}
 	manifestBody, _ := json.Marshal(gin.H{"manifest": manifest})
-	initID, _ := channels.NewRequestID()
-	contentPath := "/api/v1/channels/" + channel.ID + "/content"
-	init := channelRequestWithCookie(router, http.MethodPost, contentPath, manifestBody, senderCookie, map[string]string{
-		"Content-Type": "application/json", "Idempotency-Key": initID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	init := channelRequestWithCookie(fixture.router, http.MethodPost, fixture.contentPath, manifestBody, fixture.senderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": channelRequestID(t), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
 	})
 	var initBody struct {
 		UploadID string `json:"upload_id"`
@@ -1373,151 +1403,116 @@ func TestChannelDeliveryRequiresClaimAndResumesMultipartRange(t *testing.T) {
 	if init.Code != http.StatusCreated || json.Unmarshal(init.Body.Bytes(), &initBody) != nil {
 		t.Fatalf("content init: %d %s", init.Code, init.Body.String())
 	}
-	chunkHash := sha256.Sum256(payload)
-	chunkPath := contentPath + "/" + initBody.UploadID + "/parts/part1"
-	chunk := channelRequestWithCookie(router, http.MethodPut, chunkPath, payload, senderCookie, map[string]string{
-		"Upload-Offset": "0", "X-Chunk-SHA256": hex.EncodeToString(chunkHash[:]), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	hash := sha256.Sum256(payload)
+	chunk := channelRequestWithCookie(fixture.router, http.MethodPut, fixture.contentPath+"/"+initBody.UploadID+"/parts/part1", payload, fixture.senderCookie, map[string]string{
+		"Upload-Offset": "0", "X-Chunk-SHA256": hex.EncodeToString(hash[:]), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
 	})
 	if chunk.Code != http.StatusNoContent {
 		t.Fatalf("content chunk: %d %s", chunk.Code, chunk.Body.String())
 	}
-	finalizeID, _ := channels.NewRequestID()
-	finalize := channelRequestWithCookie(router, http.MethodPost, contentPath+"/"+initBody.UploadID+"/finalize", nil, senderCookie, map[string]string{
-		"Idempotency-Key": finalizeID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	finalize := channelRequestWithCookie(fixture.router, http.MethodPost, fixture.contentPath+"/"+initBody.UploadID+"/finalize", nil, fixture.senderCookie, map[string]string{
+		"Idempotency-Key": channelRequestID(t), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
 	})
 	if finalize.Code != http.StatusCreated {
 		t.Fatalf("finalize: %d %s", finalize.Code, finalize.Body.String())
 	}
+}
 
-	download := func(rangeHeader, ifRange, claimToken string) *httptest.ResponseRecorder {
-		headers := map[string]string{
-			"X-Nclip-Seat-Token":  joinBody.SeatToken,
-			"X-Nclip-Claim-Token": claimToken,
-			"Origin":              "https://clip.test",
-			"Sec-Fetch-Site":      "same-origin",
-		}
-		if rangeHeader != "" {
-			headers["Range"] = rangeHeader
-		}
-		if ifRange != "" {
-			headers["If-Range"] = ifRange
-		}
-		return channelRequestWithCookies(router, http.MethodGet, contentPath, nil, nil, headers)
+func (f channelDeliveryFixture) download(rangeHeader, ifRange, claimToken string) *httptest.ResponseRecorder {
+	headers := map[string]string{
+		"X-Nclip-Seat-Token": f.seatToken, "X-Nclip-Claim-Token": claimToken,
+		"Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
 	}
-	if response := download("", "", "wrong-claim"); response.Code != http.StatusForbidden {
+	if rangeHeader != "" {
+		headers["Range"] = rangeHeader
+	}
+	if ifRange != "" {
+		headers["If-Range"] = ifRange
+	}
+	return channelRequestWithCookies(f.router, http.MethodGet, f.contentPath, nil, nil, headers)
+}
+
+func TestChannelDeliveryRequiresClaimAndResumesMultipartRange(t *testing.T) {
+	fixture := newChannelDeliveryFixture(t, []byte("range-bound-payload"))
+	assertChannelRangeResumes(t, fixture)
+	assertChannelDeliveryComplete(t, fixture)
+}
+
+func assertChannelRangeResumes(t *testing.T, fixture channelDeliveryFixture) {
+	t.Helper()
+	if response := fixture.download("", "", "wrong-claim"); response.Code != http.StatusForbidden {
 		t.Fatalf("wrong claim token read = %d %s", response.Code, response.Body.String())
 	}
-	if response := download("bytes=8-", "", joinBody.ClaimToken); response.Code != http.StatusConflict {
-		t.Fatalf("range skipped bytes not yet delivered = %d %s", response.Code, response.Body.String())
+	gap := fixture.download("bytes=8-", "", fixture.claimToken)
+	var gapError struct {
+		Error string `json:"error"`
 	}
-	first := download("bytes=0-63", "", joinBody.ClaimToken)
+	if gap.Code != http.StatusConflict || json.Unmarshal(gap.Body.Bytes(), &gapError) != nil || gapError.Error != "range_gap" {
+		t.Fatalf("range skipped bytes error = %d %s", gap.Code, gap.Body.String())
+	}
+	first := fixture.download("bytes=0-63", "", fixture.claimToken)
 	if first.Code != http.StatusPartialContent {
 		t.Fatalf("first range: %d %s", first.Code, first.Body.String())
 	}
-	etag := first.Header().Get("ETag")
-	contentRange := first.Header().Get("Content-Range")
+	etag, contentRange := first.Header().Get("ETag"), first.Header().Get("Content-Range")
 	var start, end, total int
 	if _, err := fmt.Sscanf(contentRange, "bytes %d-%d/%d", &start, &end, &total); err != nil || start != 0 || end != 63 || total <= end || etag == "" || first.Header().Get("Accept-Ranges") != "bytes" {
 		t.Fatalf("invalid first range response: range=%q etag=%q headers=%v err=%v", contentRange, etag, first.Header(), err)
 	}
-	second := download("bytes=64-", etag, joinBody.ClaimToken)
-	if second.Code != http.StatusPartialContent || int64(len(first.Body.Bytes())+len(second.Body.Bytes())) != int64(total) {
-		t.Fatalf("resumed range: status=%d bytes=%d+%d total=%d body=%s", second.Code, first.Body.Len(), second.Body.Len(), total, second.Body.String())
+	second := fixture.download("bytes=64-", etag, fixture.claimToken)
+	if second.Code != http.StatusPartialContent || first.Body.Len()+second.Body.Len() != total {
+		t.Fatalf("resumed range: status=%d bytes=%d+%d total=%d", second.Code, first.Body.Len(), second.Body.Len(), total)
 	}
-	fullBody := append(append([]byte(nil), first.Body.Bytes()...), second.Body.Bytes()...)
-	if !bytes.Contains(fullBody, payload) {
+	if !bytes.Contains(append(append([]byte(nil), first.Body.Bytes()...), second.Body.Bytes()...), []byte("range-bound-payload")) {
 		t.Fatal("multipart range round trip lost the original payload")
 	}
-	if remaining, err := store.ListEphemeralPastes(); err != nil || len(remaining) != 0 {
+}
+
+func assertChannelDeliveryComplete(t *testing.T, fixture channelDeliveryFixture) {
+	t.Helper()
+	if remaining, err := fixture.store.ListEphemeralPastes(); err != nil || len(remaining) != 0 {
 		t.Fatalf("completed delivery retained ephemeral content: remaining=%d err=%v", len(remaining), err)
 	}
-	afterComplete := channelRequestWithCookies(router, http.MethodGet, "/api/v1/channels/"+channel.ID, nil, nil, map[string]string{
-		"X-Nclip-Seat-Token": joinBody.SeatToken, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	terminal := channelRequestWithCookies(fixture.router, http.MethodGet, "/api/v1/channels/"+fixture.channelID, nil, nil, map[string]string{
+		"X-Nclip-Seat-Token": fixture.seatToken, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
 	})
 	var terminalError struct {
 		Error string `json:"error"`
 	}
-	if afterComplete.Code != http.StatusGone || json.Unmarshal(afterComplete.Body.Bytes(), &terminalError) != nil || terminalError.Error != "delivery_complete" {
-		t.Fatalf("completed claim terminal code = %d %s", afterComplete.Code, afterComplete.Body.String())
+	if terminal.Code != http.StatusGone || json.Unmarshal(terminal.Body.Bytes(), &terminalError) != nil || terminalError.Error != "delivery_complete" {
+		t.Fatalf("completed claim terminal code = %d %s", terminal.Code, terminal.Body.String())
 	}
 }
 
 func TestChannelKickInterruptsActiveContentResponse(t *testing.T) {
-	router, store, _ := shareTestRouterWithStore(t, 8<<20, false)
-	createID, _ := channels.NewRequestID()
-	created := channelCreateRequest(router, createID, nil)
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create channel: %d %s", created.Code, created.Body.String())
+	fixture := newChannelDeliveryFixture(t, bytes.Repeat([]byte("kick-me"), 2048))
+	getDone := startActiveChannelDownload(t, fixture)
+	busy := fixture.download("", "", fixture.claimToken)
+	var busyError struct {
+		Error string `json:"error"`
 	}
-	channel := decodeChannelCreate(t, created)
-	senderCookie := created.Result().Cookies()[0]
-	joinID, _ := channels.NewRequestID()
-	joined := channelJoinRequest(router, channel.ID, joinID, "", nil)
-	var joinBody struct {
-		SeatToken  string `json:"seat_token"`
-		ClaimToken string `json:"claim_token"`
+	if busy.Code != http.StatusConflict || json.Unmarshal(busy.Body.Bytes(), &busyError) != nil || busyError.Error != "delivery_busy" {
+		t.Fatalf("parallel delivery error = %d %s", busy.Code, busy.Body.String())
 	}
-	if joined.Code != http.StatusCreated || json.Unmarshal(joined.Body.Bytes(), &joinBody) != nil {
-		t.Fatalf("join: %d %s", joined.Code, joined.Body.String())
+	kickChannelReceiver(t, fixture)
+	select {
+	case <-getDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("sender kick did not interrupt the active response")
 	}
-	senderStatus := channelRequestWithCookie(router, http.MethodGet, "/api/v1/channels/"+channel.ID, nil, senderCookie, nil)
-	var senderState struct {
-		Seat *channels.SeatInfo `json:"seat"`
-	}
-	if senderStatus.Code != http.StatusOK || json.Unmarshal(senderStatus.Body.Bytes(), &senderState) != nil || senderState.Seat == nil {
-		t.Fatalf("sender status: %d %s", senderStatus.Code, senderStatus.Body.String())
-	}
-	decisionID, _ := channels.NewRequestID()
-	decisionBody, _ := json.Marshal(map[string]string{"seat_id": senderState.Seat.SeatID, "decision": "admit"})
-	decision := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", decisionBody, senderCookie, map[string]string{
-		"Content-Type": "application/json", "Idempotency-Key": decisionID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
-	})
-	if decision.Code != http.StatusOK {
-		t.Fatalf("admit: %d %s", decision.Code, decision.Body.String())
-	}
+	assertChannelReceiverKicked(t, fixture)
+}
 
-	payload := bytes.Repeat([]byte("kick-me"), 2048)
-	manifest := models.ShareManifest{Version: 1, Items: []models.ShareItem{{
-		Kind: "file", Name: "payload.txt", Parts: []models.SharePart{{Key: "part1", MIME: "text/plain", Size: int64(len(payload))}},
-	}}}
-	contentPath := "/api/v1/channels/" + channel.ID + "/content"
-	manifestBody, _ := json.Marshal(gin.H{"manifest": manifest})
-	initID, _ := channels.NewRequestID()
-	init := channelRequestWithCookie(router, http.MethodPost, contentPath, manifestBody, senderCookie, map[string]string{
-		"Content-Type": "application/json", "Idempotency-Key": initID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
-	})
-	var initBody struct {
-		UploadID string `json:"upload_id"`
-	}
-	if init.Code != http.StatusCreated || json.Unmarshal(init.Body.Bytes(), &initBody) != nil {
-		t.Fatalf("init: %d %s", init.Code, init.Body.String())
-	}
-	hash := sha256.Sum256(payload)
-	chunk := channelRequestWithCookie(router, http.MethodPut, contentPath+"/"+initBody.UploadID+"/parts/part1", payload, senderCookie, map[string]string{
-		"Upload-Offset": "0", "X-Chunk-SHA256": hex.EncodeToString(hash[:]), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
-	})
-	if chunk.Code != http.StatusNoContent {
-		t.Fatalf("chunk: %d %s", chunk.Code, chunk.Body.String())
-	}
-	finalizeID, _ := channels.NewRequestID()
-	finalize := channelRequestWithCookie(router, http.MethodPost, contentPath+"/"+initBody.UploadID+"/finalize", nil, senderCookie, map[string]string{
-		"Idempotency-Key": finalizeID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
-	})
-	if finalize.Code != http.StatusCreated {
-		t.Fatalf("finalize: %d %s", finalize.Code, finalize.Body.String())
-	}
-
+func startActiveChannelDownload(t *testing.T, fixture channelDeliveryFixture) <-chan struct{} {
+	t.Helper()
 	writer := newKickInterruptWriter()
-	get := httptest.NewRequest(http.MethodGet, contentPath, nil)
-	get.Header.Set("X-Nclip-Seat-Token", joinBody.SeatToken)
-	get.Header.Set("X-Nclip-Claim-Token", joinBody.ClaimToken)
-	get.Header.Set("Origin", "https://clip.test")
-	get.Header.Set("Sec-Fetch-Site", "same-origin")
+	request := httptest.NewRequest(http.MethodGet, fixture.contentPath, nil)
+	request.Header.Set("X-Nclip-Seat-Token", fixture.seatToken)
+	request.Header.Set("X-Nclip-Claim-Token", fixture.claimToken)
+	request.Header.Set("Origin", "https://clip.test")
+	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	getDone := make(chan struct{})
-	go func() {
-		router.ServeHTTP(writer, get)
-		close(getDone)
-	}()
+	go func() { fixture.router.ServeHTTP(writer, request); close(getDone) }()
 	select {
 	case <-writer.started:
 	case <-time.After(3 * time.Second):
@@ -1528,33 +1523,35 @@ func TestChannelKickInterruptsActiveContentResponse(t *testing.T) {
 		t.Fatal("content response finished before the sender action")
 	default:
 	}
-	if get.Context().Err() != nil || writer.interrupted() {
-		t.Fatalf("response stopped before sender kick: request context=%v writer interrupted=%t", get.Context().Err(), writer.interrupted())
+	if request.Context().Err() != nil || writer.interrupted() {
+		t.Fatalf("response stopped before sender kick: context=%v interrupted=%t", request.Context().Err(), writer.interrupted())
 	}
-	kickID, _ := channels.NewRequestID()
-	kickBody, _ := json.Marshal(map[string]string{"seat_id": senderState.Seat.SeatID})
-	kick := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/kick", kickBody, senderCookie, map[string]string{
-		"Content-Type": "application/json", "Idempotency-Key": kickID, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	return getDone
+}
+
+func kickChannelReceiver(t *testing.T, fixture channelDeliveryFixture) {
+	t.Helper()
+	kickBody, _ := json.Marshal(map[string]string{"seat_id": fixture.seatID})
+	kick := channelRequestWithCookie(fixture.router, http.MethodPost, "/api/v1/channels/"+fixture.channelID+"/kick", kickBody, fixture.senderCookie, map[string]string{
+		"Content-Type": "application/json", "Idempotency-Key": channelRequestID(t), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
 	})
 	if kick.Code != http.StatusNoContent {
 		t.Fatalf("kick: %d %s", kick.Code, kick.Body.String())
 	}
-	select {
-	case <-getDone:
-	case <-time.After(3 * time.Second):
-		t.Fatal("sender kick did not interrupt the active response")
-	}
-	afterKick := channelRequestWithCookies(router, http.MethodGet, "/api/v1/channels/"+channel.ID, nil, nil, map[string]string{
-		"X-Nclip-Seat-Token": joinBody.SeatToken,
-		"Origin":             "https://clip.test", "Sec-Fetch-Site": "same-origin",
+}
+
+func assertChannelReceiverKicked(t *testing.T, fixture channelDeliveryFixture) {
+	t.Helper()
+	terminal := channelRequestWithCookies(fixture.router, http.MethodGet, "/api/v1/channels/"+fixture.channelID, nil, nil, map[string]string{
+		"X-Nclip-Seat-Token": fixture.seatToken, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
 	})
 	var terminalError struct {
 		Error string `json:"error"`
 	}
-	if afterKick.Code != http.StatusGone || json.Unmarshal(afterKick.Body.Bytes(), &terminalError) != nil || terminalError.Error != "receiver_kicked" {
-		t.Fatalf("kicked claim terminal code = %d %s", afterKick.Code, afterKick.Body.String())
+	if terminal.Code != http.StatusGone || json.Unmarshal(terminal.Body.Bytes(), &terminalError) != nil || terminalError.Error != "receiver_kicked" {
+		t.Fatalf("kicked claim terminal code = %d %s", terminal.Code, terminal.Body.String())
 	}
-	if remaining, err := store.ListEphemeralPastes(); err != nil || len(remaining) != 0 {
+	if remaining, err := fixture.store.ListEphemeralPastes(); err != nil || len(remaining) != 0 {
 		t.Fatalf("kick left temporary content: remaining=%d err=%v", len(remaining), err)
 	}
 }

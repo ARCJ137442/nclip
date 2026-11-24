@@ -11,9 +11,9 @@ import (
 )
 
 var (
-	ErrDeliveryNotReady = errors.New("channel content is not ready")
-	ErrDeliveryBusy     = errors.New("channel delivery is already active")
-	ErrDeliveryGap      = errors.New("range starts beyond delivered bytes")
+	ErrDeliveryNotReady = errors.New("delivery_not_ready")
+	ErrDeliveryBusy     = errors.New("delivery_busy")
+	ErrDeliveryGap      = errors.New("range_gap")
 	ErrDeliveryComplete = errors.New("delivery_complete")
 	ErrSeatKicked       = errors.New("receiver_kicked")
 )

@@ -20,6 +20,7 @@ Examples describe the software, never a maintainer's live deployment.
 | What may be published? | [Publication and security boundaries](../SECURITY.md) |
 | What ships in the current fork release? | [Release notes and downloads](RELEASE-NOTES.md) |
 | What governs the P1a channel implementation? | [P1a channel contract](P1-CHANNEL-CONTRACT.zh-CN.md) |
+| How are inherited Go lint findings tracked? | [P1 Go lint baseline](P1-GOLANGCI-BASELINE.zh-CN.md) |
 
 Source conventions live in [AGENTS.md](../AGENTS.md). The scoped Copilot instruction
 files under `.github/instructions/` describe editing practices, not an alternate
