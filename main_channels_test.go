@@ -2,13 +2,14 @@ package main
 
 import (
 	"encoding/json"
-	"github.com/johnwmail/nclip/internal/channels"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
+	"github.com/johnwmail/nclip/internal/channels"
 )
 
 func channelCreateRequest(router http.Handler, requestID string, headers map[string]string) *httptest.ResponseRecorder {
@@ -344,5 +345,52 @@ func TestChannelCloseRejectsOtherChannelCapability(t *testing.T) {
 	router.ServeHTTP(response, closeRequest)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("other channel sender capability close = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestConcurrentCreateRetryConsumesOneRateSlot(t *testing.T) {
+	router := shareTestRouter(t, 4<<20, false)
+	for i := 0; i < 29; i++ {
+		requestID, err := channels.NewRequestID()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response := channelCreateRequest(router, requestID, nil); response.Code != http.StatusCreated {
+			t.Fatalf("prefill %d: %d %s", i, response.Code, response.Body.String())
+		}
+	}
+	requestID, err := channels.NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const retries = 16
+	responses := make([]*httptest.ResponseRecorder, retries)
+	var wait sync.WaitGroup
+	for i := range retries {
+		wait.Add(1)
+		go func(i int) {
+			defer wait.Done()
+			responses[i] = channelCreateRequest(router, requestID, nil)
+		}(i)
+	}
+	wait.Wait()
+	channelID := ""
+	for i, response := range responses {
+		if response.Code != http.StatusCreated {
+			t.Fatalf("same-key request %d: %d %s", i, response.Code, response.Body.String())
+		}
+		body := decodeChannelCreate(t, response)
+		if channelID == "" {
+			channelID = body.ID
+		} else if channelID != body.ID {
+			t.Fatalf("same idempotency key created multiple channels: %s vs %s", channelID, body.ID)
+		}
+	}
+	newID, err := channels.NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response := channelCreateRequest(router, newID, nil); response.Code != http.StatusTooManyRequests {
+		t.Fatalf("new request after exactly 30 unique creates = %d, want 429", response.Code)
 	}
 }

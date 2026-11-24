@@ -17,6 +17,8 @@ import (
 
 const senderCookieName = "nclip_sender_key"
 
+var errChannelCreateThrottled = errors.New("channel_create_throttled")
+
 const (
 	createLimitPerMinute = 30
 	createWindow         = time.Minute
@@ -162,13 +164,6 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 		return
 	}
 
-	scope := channelCreateScope(c, h.config)
-	if !h.manager.HasCreate(scope, requestID) && !h.allowCreate(c.ClientIP()) {
-		c.Header("Retry-After", "60")
-		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "channel_create_throttled"})
-		return
-	}
-
 	visibility := channels.VisibilityAuthenticated
 	value := c.GetHeader("X-Nclip-Visibility")
 	if value == string(channels.VisibilityPublic) {
@@ -181,7 +176,12 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 		visibility = channels.VisibilityPublic
 	}
 
-	record, senderKey, _, err := h.manager.Create(scope, requestID, visibility)
+	record, senderKey, _, err := h.createChannel(channelCreateScope(c, h.config), requestID, c.ClientIP(), visibility)
+	if errors.Is(err, errChannelCreateThrottled) {
+		c.Header("Retry-After", "60")
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": err.Error()})
+		return
+	}
 	if errors.Is(err, channels.ErrInvalidVisibility) {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -222,11 +222,26 @@ func (h *ChannelHandler) Create(c *gin.Context) {
 	})
 }
 
-func (h *ChannelHandler) allowCreate(ip string) bool {
-	now := time.Now()
-	cutoff := now.Add(-createWindow)
+func (h *ChannelHandler) createChannel(scope, requestID, ip string, visibility channels.Visibility) (channels.Record, string, bool, error) {
+	if !channels.ValidRequestID(requestID) {
+		return channels.Record{}, "", false, channels.ErrInvalidRequestID
+	}
 	h.createMu.Lock()
 	defer h.createMu.Unlock()
+	now := time.Now()
+	firstRequest := !h.manager.HasCreate(scope, requestID)
+	if firstRequest && !h.allowCreateLocked(ip, now) {
+		return channels.Record{}, "", false, errChannelCreateThrottled
+	}
+	record, senderKey, replayed, err := h.manager.Create(scope, requestID, visibility)
+	if err == nil && !replayed {
+		h.recordCreateLocked(ip, now)
+	}
+	return record, senderKey, replayed, err
+}
+
+func (h *ChannelHandler) allowCreateLocked(ip string, now time.Time) bool {
+	cutoff := now.Add(-createWindow)
 	for trackedIP, window := range h.createWindows {
 		live := window.attempts[:0]
 		for _, attemptedAt := range window.attempts {
@@ -243,17 +258,15 @@ func (h *ChannelHandler) allowCreate(ip string) bool {
 	}
 	window, ok := h.createWindows[ip]
 	if !ok {
-		if len(h.createWindows) >= maxTrackedCreateIPs {
-			return false
-		}
-		window = createWindowState{}
+		return len(h.createWindows) < maxTrackedCreateIPs
 	}
-	if len(window.attempts) >= createLimitPerMinute {
-		return false
-	}
+	return len(window.attempts) < createLimitPerMinute
+}
+
+func (h *ChannelHandler) recordCreateLocked(ip string, now time.Time) {
+	window := h.createWindows[ip]
 	window.attempts = append(window.attempts, now)
 	h.createWindows[ip] = window
-	return true
 }
 
 func (h *ChannelHandler) Close(c *gin.Context) {
