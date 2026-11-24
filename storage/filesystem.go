@@ -258,7 +258,19 @@ func (fs *FilesystemStore) StoreContent(id string, content []byte) error {
 // StoreContentStream writes to a private temporary file and renames it only
 // after the full payload and size have been verified.
 func (fs *FilesystemStore) StoreContentStream(id string, content io.Reader, size int64) error {
-	return fs.storeContentStream(id, content, size, "."+id+".upload-*", "")
+	if !utils.IsValidSlug(id) {
+		return fs.storeContentStream(id, content, size, "."+id+".upload-*", "")
+	}
+	token, release, err := fs.ReservePasteSlug(id)
+	if err != nil {
+		return err
+	}
+	storeErr := fs.StorePasteContentStream(id, token, content, size)
+	releaseErr := release()
+	if storeErr != nil {
+		return storeErr
+	}
+	return releaseErr
 }
 
 func (fs *FilesystemStore) StorePasteContentStream(id, token string, content io.Reader, size int64) error {

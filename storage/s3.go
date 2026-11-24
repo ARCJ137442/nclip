@@ -406,7 +406,19 @@ func (s *S3Store) StoreContent(id string, content []byte) error {
 // StoreContentStream sends seekable streams directly to S3 and stages other
 // readers in a bounded temporary file so the SDK can safely replay them.
 func (s *S3Store) StoreContentStream(id string, content io.Reader, size int64) error {
-	return s.storeContentStreamWithSlugReservation(id, "", content, size)
+	if !utils.IsValidSlug(id) {
+		return s.storeContentStreamWithSlugReservation(id, "", content, size)
+	}
+	token, release, err := s.ReservePasteSlug(id)
+	if err != nil {
+		return err
+	}
+	storeErr := s.StorePasteContentStream(id, token, content, size)
+	releaseErr := release()
+	if storeErr != nil {
+		return storeErr
+	}
+	return releaseErr
 }
 
 func (s *S3Store) StorePasteContentStream(id, token string, content io.Reader, size int64) error {
