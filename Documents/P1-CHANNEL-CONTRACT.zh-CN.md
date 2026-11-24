@@ -96,7 +96,7 @@
 ## G1 addendum：创建资源边界与接收页角色
 
 - `/c/:id` 是接收方页面。私有信道页面要求登录和 `download`；sender 不能用 `sender_key` 打开 `/c/:id`，因为该 cookie 的 Path 只匹配 `/api/v1/channels/<id>`。sender 控制台使用站点主页面和信道 API。
-- G1 尚无 sender heartbeat/reaper 时，Manager 最多保留 1024 条 live channel；另有最多 61,440 个、保留 60 秒的 closed-create key tombstone。每来源 IP 每滚动 60 秒最多创建 30 条新信道，limiter 最多跟踪 2048 个 IP。幂等重试不重复计数；超限返回 429，达到记录上限返回 503，不自动删除仍存活的信道。
+- G1 尚无 sender heartbeat/reaper 时，Manager 最多保留 1024 条 live channel；live channel 与 closed-create key tombstone 合计最多 61,440 条，tombstone 保留 60 秒。每来源 IP 每滚动 60 秒最多创建 30 条新信道，limiter 最多跟踪 2048 个 IP。幂等重试不重复计数；超限返回 429，达到记录上限返回 503，不自动删除仍存活的信道。
 - G1 的 `DELETE /api/v1/channels/:id` 只关闭空信道：要求该信道的 `sender_key`、同源校验和幂等键；create admission 与 close 共用串行锁。成功后删除信道及 create replay 结果、写入短期 closed-key tombstone 并清除 cookie。关闭重试返回 204；同一 create key 在 tombstone 有效期内返回 409，过期后才作为新建请求。
 - Create 限额只在新 channel 成功提交后计数；同 key 并发重试只计一次，创建失败不消耗额度。Manager 将 live channel 数与 closed-key tombstone 数合计限制在 `MaxChannelRecords` 内存边界内。
 - G2/G6 按 D6 增加仅清扫无内容、无占用且 sender 已离线/信道已终态的规则；不为腾位置驱逐活跃信道。
