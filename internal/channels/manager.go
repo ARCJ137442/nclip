@@ -259,6 +259,11 @@ func (m *Manager) CloseWithContent(id, senderKey string) (ContentRelease, error)
 	}
 	now := time.Now()
 	release := m.detachContentLocked(&record)
+	if release.Slug == "" {
+		if pending, exists := m.pendingContentReleases[id]; exists {
+			release = pending
+		}
+	}
 	if release.Slug != "" {
 		m.pendingContentReleases[id] = release
 	}

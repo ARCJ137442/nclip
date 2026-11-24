@@ -76,6 +76,76 @@ func TestContentReservationIsAtomicAndChecksCurrentFreeSpace(t *testing.T) {
 	}
 }
 
+func TestPendingDeleteBlocksRefillAndSurvivesLeaveReplayExpiry(t *testing.T) {
+	manager := NewManager()
+	if err := manager.InitializeContentCapacity(1<<20, 1); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	createID, _ := NewRequestID()
+	record, senderKey, _, err := manager.Create("sender:pending-cleanup", createID, VisibilityPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstJoinID, _ := NewRequestID()
+	firstSeat, err := manager.Join(record.ID, "account:first", firstJoinID, "first", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initID, _ := NewRequestID()
+	manifest := contentManifest(1)
+	sessionResult := beginContentForTest(t, manager, record, senderKey, initID, manifest, 10, 100, 1<<20)
+	chunk := []byte("x")
+	if _, err := manager.AppendContentChunk(record.ID, senderKey, sessionResult.UploadID, "part1", 0, chunk, sha256.Sum256(chunk)); err != nil {
+		t.Fatal(err)
+	}
+	finalizeID, _ := NewRequestID()
+	session, _, replayed, err := manager.BeginContentFinalize(record.ID, senderKey, sessionResult.UploadID, finalizeID)
+	if err != nil || replayed {
+		t.Fatalf("begin finalize: replayed=%t err=%v", replayed, err)
+	}
+	if err := session.RemoveStaging(); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.CompleteContentFinalize(record.ID, senderKey, session, "PEND1", 80); err != nil {
+		t.Fatal(err)
+	}
+
+	firstLeaveID, _ := NewRequestID()
+	failedDeleteRelease, err := manager.LeaveWithContent(record.ID, firstLeaveID, firstSeat.SeatToken, now.Add(time.Second))
+	if err != nil || failedDeleteRelease.Slug != "PEND1" {
+		t.Fatalf("leave release = %+v err=%v", failedDeleteRelease, err)
+	}
+	// Do not acknowledge ContentReleaseDeleted: this models a storage Delete failure.
+
+	secondJoinID, _ := NewRequestID()
+	secondSeat, err := manager.Join(record.ID, "account:second", secondJoinID, "second", now.Add(2*time.Second))
+	if err != nil {
+		t.Fatalf("new receiver could not occupy the seat: %v", err)
+	}
+	secondInitID, _ := NewRequestID()
+	manifestHash := sha256.Sum256([]byte("second manifest"))
+	_, err = manager.BeginContent(record.ID, senderKey, secondInitID, manifest, manifestHash, 1, 10, 100, 1<<20, t.TempDir(), now.Add(3*time.Second))
+	if err != ErrContentConflict {
+		t.Fatalf("new upload while prior paste deletion is pending = %v; want conflict", err)
+	}
+
+	later := now.Add(JoinReplayRetention + time.Minute)
+	secondLeaveID, _ := NewRequestID()
+	retriedRelease, err := manager.LeaveWithContent(record.ID, secondLeaveID, secondSeat.SeatToken, later)
+	if err != nil || retriedRelease.Slug != failedDeleteRelease.Slug {
+		t.Fatalf("leave after old replay expiry lost pending release: %+v err=%v", retriedRelease, err)
+	}
+	thirdInitID, _ := NewRequestID()
+	_, err = manager.BeginContent(record.ID, senderKey, thirdInitID, manifest, sha256.Sum256([]byte("third manifest")), 1, 10, 100, 1<<20, t.TempDir(), later.Add(time.Second))
+	if err != ErrContentConflict {
+		t.Fatalf("upload after old leave replay expired = %v; want pending-cleanup conflict", err)
+	}
+	if held := manager.content.heldBySlug[failedDeleteRelease.Slug]; held != 80 {
+		t.Fatalf("held reservation for pending slug changed: %d", held)
+	}
+}
+
 func TestContentInitAndChunkReplayKeepTheirOriginalSession(t *testing.T) {
 	manager := NewManager()
 	if err := manager.InitializeContentCapacity(1<<20, 1); err != nil {

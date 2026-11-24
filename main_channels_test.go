@@ -1339,3 +1339,68 @@ func TestStartupRemovesOrphanChannelContentAndChunkDirectories(t *testing.T) {
 		t.Fatalf("startup kept orphan finalization temp: %v", err)
 	}
 }
+
+func TestSecondInstanceSharingFilesystemFailsClosedBeforeChannelSweep(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg := &config.Config{DataDir: dataDir, URL: "https://clip.test", BufferSize: 4 << 20, DefaultTTL: 24 * time.Hour, MaxRenderSize: 1024}
+
+	firstStore, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstRouter, _ := setupRouterWithChannels(firstStore, cfg)
+	t.Cleanup(func() { _ = firstStore.Close() })
+	created := channelCreateRequest(firstRouter, "AQEBAQEBAQEBAQEBAQEBAQ", nil)
+	if created.Code != http.StatusCreated {
+		t.Fatalf("first instance channel create: %d %s", created.Code, created.Body.String())
+	}
+	channelID := decodeChannelCreate(t, created).ID
+	activePaste := &models.Paste{ID: "ACTV5", CreatedAt: time.Now(), Size: 6, ContentType: "text/plain", EphemeralChannelID: channelID}
+	if err := firstStore.StoreContent(activePaste.ID, []byte("active")); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstStore.Store(activePaste); err != nil {
+		t.Fatal(err)
+	}
+
+	secondStore, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRouter, _ := setupRouterWithChannels(secondStore, cfg)
+	t.Cleanup(func() { _ = secondStore.Close() })
+	if _, err := secondStore.Get(activePaste.ID); err != nil {
+		t.Fatalf("second startup deleted active ephemeral content: %v", err)
+	}
+	requestID, _ := channels.NewRequestID()
+	response := channelCreateRequest(secondRouter, requestID, nil)
+	if response.Code != http.StatusServiceUnavailable || !strings.Contains(response.Body.String(), "channel_unavailable") {
+		t.Fatalf("second instance channel route = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestStartupRemovesFinalizationContentWrittenBeforeMetadata(t *testing.T) {
+	dataDir := t.TempDir()
+	store, err := storage.NewFilesystemStore(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	const id = "ARPH5"
+	if err := store.StoreChannelContentStream(id, strings.NewReader("orphan"), int64(len("orphan"))); err != nil {
+		t.Fatal(err)
+	}
+	pending := filepath.Join(dataDir, storage.ChannelContentTempPrefix+id+".pending")
+	if _, err := os.Stat(pending); err != nil {
+		t.Fatalf("failed to create pre-metadata finalization object: %v", err)
+	}
+
+	cfg := &config.Config{DataDir: dataDir, URL: "https://clip.test", BufferSize: 4 << 20, DefaultTTL: 24 * time.Hour, MaxRenderSize: 1024}
+	_ = setupRouter(store, cfg)
+	if exists, _, err := store.StatContent(id); err != nil || exists {
+		t.Fatalf("startup kept orphan final content: exists=%t err=%v", exists, err)
+	}
+	if _, err := os.Stat(pending); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup kept pending finalization object: %v", err)
+	}
+}

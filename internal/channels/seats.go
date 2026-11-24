@@ -311,6 +311,11 @@ func (m *Manager) LeaveWithContent(id, requestID, seatToken string, now time.Tim
 		return ContentRelease{}, ErrCapacity
 	}
 	release := m.detachContentLocked(&record)
+	if release.Slug == "" {
+		if pending, exists := m.pendingContentReleases[id]; exists {
+			release = pending
+		}
+	}
 	m.releaseSeatLocked(&record, "left", now)
 	m.channels[id] = record
 	if release.Slug != "" {

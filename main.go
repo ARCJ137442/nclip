@@ -91,7 +91,7 @@ func main() {
 
 	if isLambdaEnvironment() {
 		// Lambda mode: Use S3
-		store, err = storage.NewS3Store(cfg.S3Bucket, cfg.S3Prefix)
+		store, err = storage.NewS3Store(cfg.S3Bucket, cfg.S3Prefix, cfg.DataDir)
 		if err != nil {
 			log.Fatalf("Failed to initialize S3 storage for Lambda: %v", err)
 		}
@@ -245,6 +245,7 @@ func setupRouterWithChannels(store storage.PasteStore, cfg *config.Config) (*gin
 		channelHandler.Disable("channel state requires a single process")
 	} else if err := channelHandler.InitializeContent(store); err != nil {
 		log.Printf("[WARN] Channel content uploads disabled: %v", err)
+		channelHandler.Disable("exclusive channel storage ownership unavailable")
 	}
 
 	// Create Gin router
@@ -574,6 +575,9 @@ func (w *bodyCaptureWriter) Write(b []byte) (int, error) {
 func runHTTPServer(router *gin.Engine, cfg *config.Config, store storage.PasteStore, channelHandler *handlers.ChannelHandler) {
 	// Ensure cleanup on exit
 	defer func() {
+		if err := channelHandler.ReleaseContentWriter(); err != nil {
+			log.Printf("Error releasing channel writer lock: %v", err)
+		}
 		if err := store.Close(); err != nil {
 			log.Printf("Error closing storage: %v", err)
 		}

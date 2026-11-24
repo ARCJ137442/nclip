@@ -3,13 +3,16 @@ package storage
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -21,13 +24,17 @@ import (
 )
 
 type S3Store struct {
-	bucket string
-	prefix string
-	client *s3.Client
+	bucket     string
+	prefix     string
+	tempDir    string
+	client     *s3.Client
+	writerMu   sync.Mutex
+	writerHeld bool
+	writerETag *string
 }
 
 // NewS3Store creates a new S3Store instance
-func NewS3Store(bucket, prefix string) (*S3Store, error) {
+func NewS3Store(bucket, prefix string, tempDir ...string) (*S3Store, error) {
 	if bucket == "" {
 		return nil, fmt.Errorf("s3 bucket name must not be empty")
 	}
@@ -36,7 +43,11 @@ func NewS3Store(bucket, prefix string) (*S3Store, error) {
 		return nil, fmt.Errorf("failed to load AWS config: %w", err)
 	}
 	client := s3.NewFromConfig(cfg)
-	return &S3Store{bucket: bucket, prefix: prefix, client: client}, nil
+	directory := os.TempDir()
+	if len(tempDir) > 0 && tempDir[0] != "" {
+		directory = tempDir[0]
+	}
+	return &S3Store{bucket: bucket, prefix: prefix, tempDir: directory, client: client}, nil
 }
 
 func (s *S3Store) Store(paste *models.Paste) error {
@@ -260,6 +271,12 @@ func (s *S3Store) Delete(id string) error {
 		log.Printf("[ERROR] S3 Delete: failed to delete metadata for %s: %v", id, err)
 		return fmt.Errorf("failed to delete metadata for %s: %w", id, err)
 	}
+	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket: aws.String(s.bucket),
+		Key:    aws.String(applyS3Prefix(s.prefix, ChannelContentTempPrefix+id+".pending")),
+	}); err != nil {
+		return fmt.Errorf("failed to delete pending channel content for %s: %w", id, err)
+	}
 	return nil
 }
 
@@ -306,7 +323,150 @@ func (s *S3Store) StoreContentStream(id string, content io.Reader, size int64) e
 }
 
 func (s *S3Store) StoreChannelContentStream(id string, content io.Reader, size int64) error {
-	return s.StoreContentStream(id, content, size)
+	if !utils.IsValidSlug(id) {
+		return fmt.Errorf("invalid channel content id")
+	}
+	body, cleanup, err := s.channelUploadBody(content, size)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err = s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(applyS3Prefix(s.prefix, ChannelContentTempPrefix+id+".pending")),
+		Body:          body,
+		ContentLength: aws.Int64(size),
+	})
+	return err
+}
+
+func (s *S3Store) channelUploadBody(content io.Reader, size int64) (io.Reader, func(), error) {
+	if size < 0 {
+		return nil, func() {}, fmt.Errorf("invalid channel content size")
+	}
+	if readerAt, ok := content.(io.ReaderAt); ok {
+		return io.NewSectionReader(readerAt, 0, size), func() {}, nil
+	}
+	tmp, err := os.CreateTemp(s.tempDir, ChannelContentTempPrefix+"s3-upload-*")
+	if err != nil {
+		return nil, func() {}, fmt.Errorf("create bounded S3 channel staging file: %w", err)
+	}
+	cleanup := func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmp.Name())
+	}
+	written, err := io.Copy(tmp, io.LimitReader(content, size+1))
+	if err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	if written != size {
+		cleanup()
+		return nil, func() {}, fmt.Errorf("channel content size mismatch: expected %d bytes, got %d", size, written)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	return tmp, cleanup, nil
+}
+
+func (s *S3Store) CommitChannelContent(id string) error {
+	if !utils.IsValidSlug(id) {
+		return fmt.Errorf("invalid channel content id")
+	}
+	stageKey := applyS3Prefix(s.prefix, ChannelContentTempPrefix+id+".pending")
+	contentKey := applyS3Prefix(s.prefix, id)
+	copySource := url.PathEscape(s.bucket) + "/" + strings.ReplaceAll(url.PathEscape(stageKey), "%2F", "/")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := s.client.CopyObject(ctx, &s3.CopyObjectInput{
+		Bucket:     aws.String(s.bucket),
+		Key:        aws.String(contentKey),
+		CopySource: aws.String(copySource),
+	}); err != nil {
+		return fmt.Errorf("publish channel content in S3: %w", err)
+	}
+	if _, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: aws.String(stageKey)}); err != nil {
+		return fmt.Errorf("remove published channel staging object: %w", err)
+	}
+	return nil
+}
+
+func (s *S3Store) SweepPendingChannelContent() error {
+	prefix := applyS3Prefix(s.prefix, ChannelContentTempPrefix)
+	var token *string
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		page, err := s.client.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(s.bucket), Prefix: aws.String(prefix), ContinuationToken: token})
+		cancel()
+		if err != nil {
+			return fmt.Errorf("list pending channel content in S3: %w", err)
+		}
+		for _, object := range page.Contents {
+			if object.Key == nil {
+				continue
+			}
+			key := strings.TrimPrefix(*object.Key, applyS3Prefix(s.prefix, ""))
+			if !strings.HasPrefix(key, ChannelContentTempPrefix) {
+				continue
+			}
+			name := strings.TrimPrefix(key, ChannelContentTempPrefix)
+			if !strings.HasSuffix(name, ".pending") {
+				if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: object.Key}); err != nil {
+					return fmt.Errorf("remove orphan channel staging object from S3: %w", err)
+				}
+				continue
+			}
+			id := strings.TrimSuffix(name, ".pending")
+			if !utils.IsValidSlug(id) {
+				if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: object.Key}); err != nil {
+					return err
+				}
+				continue
+			}
+			if err := s.Delete(id); err != nil {
+				return fmt.Errorf("remove orphan channel content %s from S3: %w", id, err)
+			}
+			if _, err := s.client.DeleteObject(context.Background(), &s3.DeleteObjectInput{Bucket: aws.String(s.bucket), Key: object.Key}); err != nil {
+				return fmt.Errorf("remove channel content marker from S3: %w", err)
+			}
+		}
+		if page.IsTruncated == nil || !*page.IsTruncated || page.NextContinuationToken == nil {
+			break
+		}
+		token = page.NextContinuationToken
+	}
+	return nil
+}
+
+func (s *S3Store) AcquireChannelWriter() error {
+	s.writerMu.Lock()
+	defer s.writerMu.Unlock()
+	if s.writerHeld {
+		return fmt.Errorf("channel writer lock already held by this store")
+	}
+	token := make([]byte, 32)
+	if _, err := rand.Read(token); err != nil {
+		return fmt.Errorf("create channel writer token: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	response, err := s.client.PutObject(ctx, &s3.PutObjectInput{
+		Bucket:        aws.String(s.bucket),
+		Key:           aws.String(applyS3Prefix(s.prefix, ChannelWriterLockKey)),
+		Body:          bytes.NewReader(token),
+		ContentLength: aws.Int64(int64(len(token))),
+		IfNoneMatch:   aws.String("*"),
+	})
+	if err != nil {
+		return fmt.Errorf("acquire S3 channel writer lock: %w", err)
+	}
+	s.writerHeld = true
+	s.writerETag = response.ETag
+	return nil
 }
 
 func (s *S3Store) GetContent(id string) ([]byte, error) {
@@ -426,5 +586,26 @@ func (s *S3Store) GetContentPrefix(id string, n int64) ([]byte, error) {
 }
 
 func (s *S3Store) Close() error {
+	return s.ReleaseChannelWriter()
+}
+
+func (s *S3Store) ReleaseChannelWriter() error {
+	s.writerMu.Lock()
+	defer s.writerMu.Unlock()
+	if !s.writerHeld {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
+		Bucket:  aws.String(s.bucket),
+		Key:     aws.String(applyS3Prefix(s.prefix, ChannelWriterLockKey)),
+		IfMatch: s.writerETag,
+	})
+	if err != nil {
+		return fmt.Errorf("release S3 channel writer lock: %w", err)
+	}
+	s.writerHeld = false
+	s.writerETag = nil
 	return nil
 }

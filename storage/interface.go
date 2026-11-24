@@ -13,6 +13,7 @@ import (
 var ErrNotFound = errors.New("paste not found")
 
 const ChannelContentTempPrefix = ".nclip-channel-content-"
+const ChannelWriterLockKey = ".nclip-channel-writer.lock"
 
 // PasteStore defines the interface for paste storage backends
 type PasteStore interface {
@@ -69,4 +70,13 @@ type EphemeralPasteLister interface {
 // temporary prefix so startup cleanup can remove them without touching normal shares.
 type ChannelContentStore interface {
 	StoreChannelContentStream(id string, content io.Reader, size int64) error
+	CommitChannelContent(id string) error
+	SweepPendingChannelContent() error
+}
+
+// ChannelWriterStore gives the channel manager an exclusive backend-wide
+// writer lease. Failure to prove exclusivity must disable channel routes.
+type ChannelWriterStore interface {
+	AcquireChannelWriter() error
+	ReleaseChannelWriter() error
 }

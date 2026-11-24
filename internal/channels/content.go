@@ -195,6 +195,9 @@ func (m *Manager) BeginContent(channelID, senderKey, requestID string, manifest 
 	if record.ContentState != "" && record.ContentState != ContentEmpty {
 		return ContentInitResult{}, ErrContentConflict
 	}
+	if _, cleanupPending := m.pendingContentReleases[channelID]; cleanupPending {
+		return ContentInitResult{}, ErrContentConflict
+	}
 	if len(m.contentInits) >= MaxContentInitRecords {
 		return ContentInitResult{}, ErrCapacity
 	}
@@ -520,6 +523,16 @@ func (m *Manager) ReleaseHeldContent(slug string) {
 			delete(m.pendingContentReleases, channelID)
 		}
 	}
+}
+
+func (m *Manager) PendingContentReleases() []ContentRelease {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	releases := make([]ContentRelease, 0, len(m.pendingContentReleases))
+	for _, release := range m.pendingContentReleases {
+		releases = append(releases, release)
+	}
+	return releases
 }
 
 func (m *Manager) pruneContentInitsLocked(now time.Time) {

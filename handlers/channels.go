@@ -39,6 +39,7 @@ type ChannelHandler struct {
 	accounts           *AccountHandler
 	shares             *SharesHandler
 	store              storage.PasteStore
+	channelWriter      storage.ChannelWriterStore
 	disabledReason     string
 	cleanupMu          sync.Mutex
 	nextCleanup        time.Time
@@ -56,6 +57,17 @@ func (h *ChannelHandler) SetSharesHandler(shares *SharesHandler) {
 
 func (h *ChannelHandler) Disable(reason string) {
 	h.disabledReason = reason
+}
+
+func (h *ChannelHandler) ReleaseContentWriter() error {
+	if h.channelWriter == nil {
+		return nil
+	}
+	err := h.channelWriter.ReleaseChannelWriter()
+	if err == nil {
+		h.channelWriter = nil
+	}
+	return err
 }
 
 func NewChannelHandler(manager *channels.Manager, cfg *config.Config, accounts *AccountHandler) *ChannelHandler {

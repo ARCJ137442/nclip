@@ -2,6 +2,8 @@ package storage
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,9 +43,11 @@ func safePath(baseDir, id string) (string, error) {
 
 // FilesystemStore stores paste metadata and content on the local filesystem.
 type FilesystemStore struct {
-	dataDir    string
-	bufferSize int
-	mu         sync.Mutex
+	dataDir     string
+	bufferSize  int
+	mu          sync.Mutex
+	writerMu    sync.Mutex
+	writerToken string
 }
 
 // NewFilesystemStore creates a FilesystemStore for the given data directory.
@@ -148,6 +152,10 @@ func (fs *FilesystemStore) Delete(id string) error {
 	if err != nil {
 		return err
 	}
+	pendingPath, err := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
+	if err != nil {
+		return err
+	}
 	fs.mu.Lock()
 	defer fs.mu.Unlock()
 	if err := os.Remove(contentPath); err != nil && !os.IsNotExist(err) {
@@ -155,6 +163,9 @@ func (fs *FilesystemStore) Delete(id string) error {
 	}
 	if err := os.Remove(metaPath); err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("delete metadata: %w", err)
+	}
+	if err := os.Remove(pendingPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("delete pending channel content: %w", err)
 	}
 	return nil
 }
@@ -199,7 +210,65 @@ func (fs *FilesystemStore) StoreContentStream(id string, content io.Reader, size
 }
 
 func (fs *FilesystemStore) StoreChannelContentStream(id string, content io.Reader, size int64) error {
-	return fs.storeContentStream(id, content, size, ChannelContentTempPrefix+"*")
+	if !utils.IsValidSlug(id) {
+		return errUnsafeID
+	}
+	stageID := ChannelContentTempPrefix + id + ".pending"
+	return fs.storeContentStream(stageID, content, size, ChannelContentTempPrefix+id+".tmp-*")
+}
+
+func (fs *FilesystemStore) CommitChannelContent(id string) error {
+	if !utils.IsValidSlug(id) {
+		return errUnsafeID
+	}
+	stagePath, err := safePath(fs.dataDir, ChannelContentTempPrefix+id+".pending")
+	if err != nil {
+		return err
+	}
+	contentPath, err := safePath(fs.dataDir, id)
+	if err != nil {
+		return err
+	}
+	if err := os.Rename(stagePath, contentPath); err != nil {
+		return fmt.Errorf("publish channel content: %w", err)
+	}
+	return nil
+}
+
+// SweepPendingChannelContent removes finalization states that did not finish.
+// Pending markers remain until content and metadata are deleted, making a
+// crash during cleanup safe to retry on the next startup.
+func (fs *FilesystemStore) SweepPendingChannelContent() error {
+	entries, err := os.ReadDir(fs.dataDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if !strings.HasPrefix(name, ChannelContentTempPrefix) {
+			continue
+		}
+		if !strings.HasSuffix(name, ".pending") {
+			if err := os.RemoveAll(filepath.Join(fs.dataDir, name)); err != nil {
+				return fmt.Errorf("remove orphan channel staging object: %w", err)
+			}
+			continue
+		}
+		id := strings.TrimSuffix(strings.TrimPrefix(name, ChannelContentTempPrefix), ".pending")
+		if !utils.IsValidSlug(id) {
+			if err := os.RemoveAll(filepath.Join(fs.dataDir, name)); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := fs.Delete(id); err != nil {
+			return fmt.Errorf("remove orphan channel content %s: %w", id, err)
+		}
+		if err := os.Remove(filepath.Join(fs.dataDir, name)); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove orphan channel content marker: %w", err)
+		}
+	}
+	return nil
 }
 
 func (fs *FilesystemStore) storeContentStream(id string, content io.Reader, size int64, tempPattern string) error {
@@ -339,6 +408,67 @@ func (fs *FilesystemStore) GetContentPrefix(id string, n int64) ([]byte, error) 
 }
 
 func (fs *FilesystemStore) Close() error {
+	return fs.ReleaseChannelWriter()
+}
+
+func (fs *FilesystemStore) ReleaseChannelWriter() error {
+	fs.writerMu.Lock()
+	defer fs.writerMu.Unlock()
+	if fs.writerToken == "" {
+		return nil
+	}
+	lockPath := filepath.Join(fs.dataDir, ChannelWriterLockKey)
+	contents, err := os.ReadFile(lockPath)
+	if err != nil {
+		fs.writerToken = ""
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	if string(contents) != fs.writerToken {
+		fs.writerToken = ""
+		return nil
+	}
+	err = os.Remove(lockPath)
+	fs.writerToken = ""
+	return err
+}
+
+// AcquireChannelWriter uses an exclusive marker in the shared data directory.
+// A marker left by a crash intentionally keeps later instances fail closed;
+// operators must verify no writer is alive before removing a stale marker.
+func (fs *FilesystemStore) AcquireChannelWriter() error {
+	fs.writerMu.Lock()
+	defer fs.writerMu.Unlock()
+	if fs.writerToken != "" {
+		return fmt.Errorf("channel writer lock already held by this store")
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return fmt.Errorf("create channel writer token: %w", err)
+	}
+	token := hex.EncodeToString(tokenBytes)
+	path := filepath.Join(fs.dataDir, ChannelWriterLockKey)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("acquire channel writer lock: %w", err)
+	}
+	if _, err := file.WriteString(token); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("write channel writer lock: %w", err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("sync channel writer lock: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("close channel writer lock: %w", err)
+	}
+	fs.writerToken = token
 	return nil
 }
 

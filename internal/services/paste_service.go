@@ -203,9 +203,11 @@ func (s *PasteService) CreatePasteStream(req CreatePasteStreamRequest) (*CreateP
 	}
 
 	var storeErr error
+	var channelContentStore storage.ChannelContentStore
 	if req.EphemeralChannelID != "" {
 		if channelStore, ok := s.store.(storage.ChannelContentStore); ok {
-			storeErr = channelStore.StoreChannelContentStream(slug, req.Content, req.Size)
+			channelContentStore = channelStore
+			storeErr = channelContentStore.StoreChannelContentStream(slug, req.Content, req.Size)
 		} else {
 			storeErr = s.store.StoreContentStream(slug, req.Content, req.Size)
 		}
@@ -220,6 +222,14 @@ func (s *PasteService) CreatePasteStream(req CreatePasteStreamRequest) (*CreateP
 			return nil, fmt.Errorf("failed to store metadata: %w; cleanup failed: %v", err, cleanupErr)
 		}
 		return nil, fmt.Errorf("failed to store metadata: %w", err)
+	}
+	if channelContentStore != nil {
+		if err := channelContentStore.CommitChannelContent(slug); err != nil {
+			if cleanupErr := s.store.Delete(slug); cleanupErr != nil {
+				return nil, fmt.Errorf("failed to publish channel content: %w; cleanup failed: %v", err, cleanupErr)
+			}
+			return nil, fmt.Errorf("failed to publish channel content: %w", err)
+		}
 	}
 
 	return &CreatePasteResponse{

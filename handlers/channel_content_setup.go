@@ -16,6 +16,27 @@ const channelUploadTempPrefix = ".nclip-channel-upload-"
 
 func (h *ChannelHandler) InitializeContent(store storage.PasteStore) error {
 	h.store = store
+	writer, ok := store.(storage.ChannelWriterStore)
+	if !ok {
+		return fmt.Errorf("storage backend cannot prove exclusive channel ownership")
+	}
+	if err := writer.AcquireChannelWriter(); err != nil {
+		return fmt.Errorf("acquire exclusive channel writer: %w", err)
+	}
+	h.channelWriter = writer
+	initialized := false
+	defer func() {
+		if !initialized {
+			_ = h.ReleaseContentWriter()
+		}
+	}()
+	channelStore, ok := store.(storage.ChannelContentStore)
+	if !ok {
+		return fmt.Errorf("storage backend cannot sweep pending channel finalizations")
+	}
+	if err := channelStore.SweepPendingChannelContent(); err != nil {
+		return fmt.Errorf("sweep pending channel finalizations: %w", err)
+	}
 	if err := removeChannelUploadTemps(h.config.DataDir); err != nil {
 		return err
 	}
@@ -42,6 +63,7 @@ func (h *ChannelHandler) InitializeContent(store storage.PasteStore) error {
 	h.cleanupMu.Lock()
 	h.nextCleanup = time.Now().Add(channelOrphanSweepInterval)
 	h.cleanupMu.Unlock()
+	initialized = true
 	return nil
 }
 
@@ -53,7 +75,7 @@ func removeChannelUploadTemps(dataDir string) error {
 		return err
 	}
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), channelUploadTempPrefix) && !strings.HasPrefix(entry.Name(), storage.ChannelContentTempPrefix) {
+		if !strings.HasPrefix(entry.Name(), channelUploadTempPrefix) {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dataDir, entry.Name())); err != nil {
@@ -71,6 +93,13 @@ func (h *ChannelHandler) cleanupExpiredEphemeral(now time.Time) {
 	}
 	h.nextCleanup = now.Add(channelOrphanSweepInterval)
 	h.cleanupMu.Unlock()
+	if h.shares != nil {
+		for _, release := range h.manager.PendingContentReleases() {
+			if err := h.deleteReleasedContent(release); err != nil {
+				log.Printf("[WARN] channel pending-content cleanup retry failed: %v", err)
+			}
+		}
+	}
 
 	lister, ok := h.store.(storage.EphemeralPasteLister)
 	if !ok {
