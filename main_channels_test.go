@@ -522,9 +522,14 @@ func TestAnonymousJoinAdmitStatusAndLeave(t *testing.T) {
 	if senderSeat["identity"] != "anonymous" || senderSeat["state"] != "pending_admit" {
 		t.Fatalf("sender identity snapshot: %v", senderState)
 	}
+	seatID, _ := senderSeat["seat_id"].(string)
+	if seatID == "" {
+		t.Fatalf("sender pending snapshot omitted seat generation: %v", senderSeat)
+	}
 
 	decisionID, _ := channels.NewRequestID()
-	admitBody := strings.NewReader("{\"decision\":\"admit\"}")
+	decisionBody, _ := json.Marshal(map[string]string{"seat_id": seatID, "decision": "admit"})
+	admitBody := strings.NewReader(string(decisionBody))
 	admit := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", admitBody)
 	admit.Header.Set("Content-Type", "application/json")
 	admit.Header.Set("Idempotency-Key", decisionID)
@@ -536,7 +541,7 @@ func TestAnonymousJoinAdmitStatusAndLeave(t *testing.T) {
 	if admitted.Code != http.StatusOK || !strings.Contains(admitted.Body.String(), "\"state\":\"paired\"") {
 		t.Fatalf("admit: %d %s", admitted.Code, admitted.Body.String())
 	}
-	replayAdmit := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", strings.NewReader("{\"decision\":\"admit\"}"))
+	replayAdmit := httptest.NewRequest(http.MethodPost, "/api/v1/channels/"+channel.ID+"/admit", strings.NewReader(string(decisionBody)))
 	replayAdmit.Header = admit.Header.Clone()
 	replayAdmit.AddCookie(created.Result().Cookies()[0])
 	replayed := httptest.NewRecorder()

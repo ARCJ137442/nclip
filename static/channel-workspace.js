@@ -20,6 +20,8 @@ if (mode) {
   let createRequestId = "";
   let decisionRequestId = "";
   let decisionKind = "";
+  let decisionSeatID = "";
+  const decisionInFlightSeatIDs = new Set();
   let closeRequestId = "";
   let polling = false;
 
@@ -51,9 +53,17 @@ if (mode) {
   }
 
   function renderSeat(seat) {
+    const seatID = seat?.seat_id || "";
+    if (seatID !== decisionSeatID) {
+      decisionSeatID = seatID;
+      decisionRequestId = "";
+      decisionKind = "";
+    }
     if (!seat) {
       identity.hidden = true;
       decisions.hidden = true;
+      admitButton.disabled = false;
+      rejectButton.disabled = false;
       statusLine.textContent = t("channelSenderWaiting");
       return;
     }
@@ -65,6 +75,8 @@ if (mode) {
     if (seat.state === "pending_admit") {
       statusLine.textContent = t("channelPendingTitle");
       decisions.hidden = false;
+      admitButton.disabled = decisionInFlightSeatIDs.has(seatID);
+      rejectButton.disabled = decisionInFlightSeatIDs.has(seatID);
     } else {
       decisions.hidden = true;
       statusLine.textContent = t("channelConnected");
@@ -98,30 +110,45 @@ if (mode) {
   }
 
   async function decide(decision) {
-    if (!channelId) return;
+    const targetSeatID = decisionSeatID;
+    if (!channelId || !targetSeatID || decisionInFlightSeatIDs.has(targetSeatID)) return;
     if (decisionKind !== decision) {
       decisionKind = decision;
       decisionRequestId = requestId();
     }
+    const targetRequestID = decisionRequestId;
+    decisionInFlightSeatIDs.add(targetSeatID);
     admitButton.disabled = true;
     rejectButton.disabled = true;
     try {
       const response = await fetch("/api/v1/channels/" + encodeURIComponent(channelId) + "/admit", {
         method: "POST",
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json", "Idempotency-Key": decisionRequestId },
-        body: JSON.stringify({ decision }),
+        headers: { "Content-Type": "application/json", "Idempotency-Key": targetRequestID },
+        body: JSON.stringify({ seat_id: targetSeatID, decision }),
       });
-      if (!response.ok) throw new Error("HTTP " + response.status);
-      decisionRequestId = "";
-      decisionKind = "";
+      if (!response.ok) {
+        const result = await response.json().catch(() => ({}));
+        await refresh();
+        if (!decisionSeatID || decisionSeatID === targetSeatID) {
+          showError(result.error === "pending_expired" ? t("channelSenderPendingExpired") : t("channelError"));
+        }
+        return;
+      }
+      if (decisionSeatID === targetSeatID && decisionRequestId === targetRequestID) {
+        decisionRequestId = "";
+        decisionKind = "";
+      }
       await refresh();
-      if (decision === "reject") statusLine.textContent = t("channelRejected");
+      if (decision === "reject" && !decisionSeatID) statusLine.textContent = t("channelRejected");
     } catch {
-      showError(t("channelError"));
+      if (decisionSeatID === targetSeatID) showError(t("channelError"));
     } finally {
-      admitButton.disabled = false;
-      rejectButton.disabled = false;
+      decisionInFlightSeatIDs.delete(targetSeatID);
+      if (decisionSeatID === targetSeatID) {
+        admitButton.disabled = false;
+        rejectButton.disabled = false;
+      }
     }
   }
 

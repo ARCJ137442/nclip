@@ -45,6 +45,7 @@ type joinOutcome struct {
 
 type decisionResult struct {
 	decision  string
+	errorCode string
 	state     string
 	identity  string
 	joinedAt  time.Time
@@ -79,7 +80,11 @@ func joinKey(channelID, scope, requestID string) string {
 	return channelID + "|" + scope + "|" + requestID
 }
 
-func decisionKey(channelID, requestID string) string {
+func decisionKey(channelID, seatID, requestID string) string {
+	return channelID + "|" + seatID + "|" + requestID
+}
+
+func leaveKey(channelID, requestID string) string {
 	return channelID + "|" + requestID
 }
 
@@ -163,6 +168,7 @@ func (m *Manager) Join(channelID, scope, requestID, username string, now time.Ti
 		seatHash:  sha256.Sum256([]byte(seatToken)),
 		claimHash: sha256.Sum256([]byte(claimToken)),
 		info: SeatInfo{
+			SeatID:       seatID,
 			State:        state,
 			Identity:     identity,
 			Anonymous:    anonymous,
@@ -271,7 +277,7 @@ func (m *Manager) Leave(id, requestID, seatToken string, now time.Time) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pruneSeatRecordsLocked(now)
-	key := decisionKey(id, requestID)
+	key := leaveKey(id, requestID)
 	tokenHash := sha256.Sum256([]byte(seatToken))
 	if prior, ok := m.leaves[key]; ok {
 		if subtle.ConstantTimeCompare(prior.seatHash[:], tokenHash[:]) != 1 {
@@ -298,14 +304,17 @@ func (m *Manager) Leave(id, requestID, seatToken string, now time.Time) error {
 	return nil
 }
 
-func (m *Manager) Decide(id, senderKey, requestID, decision string, now time.Time) (DecisionResult, error) {
+func (m *Manager) Decide(id, senderKey, seatID, requestID, decision string, now time.Time) (DecisionResult, error) {
 	if !ValidRequestID(requestID) {
 		return DecisionResult{}, ErrInvalidRequestID
+	}
+	if !ValidSeatID(seatID) {
+		return DecisionResult{}, ErrInvalidSeatID
 	}
 	if decision != "admit" && decision != "reject" {
 		return DecisionResult{}, ErrInvalidDecision
 	}
-	key := decisionKey(id, requestID)
+	key := decisionKey(id, seatID, requestID)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.pruneSeatRecordsLocked(now)
@@ -320,17 +329,29 @@ func (m *Manager) Decide(id, senderKey, requestID, decision string, now time.Tim
 		if prior.decision != decision {
 			return DecisionResult{}, ErrIdempotencyConflict
 		}
+		if prior.errorCode != "" {
+			return DecisionResult{}, decisionError(prior.errorCode)
+		}
 		return DecisionResult{Decision: prior.decision, State: prior.state, Identity: prior.identity, JoinedAt: prior.joinedAt, Replayed: true}, nil
 	}
 	if len(m.decisions) >= MaxJoinRecords {
 		return DecisionResult{}, ErrCapacity
 	}
-	if record.seat == nil || record.seat.info.State != "pending_admit" {
+	if record.seat == nil || record.seat.id != seatID {
+		closure, closed := m.closedSeatIDs[seatKey(id, seatID)]
+		if closed && closure.reason == "pending_expired" {
+			m.cacheDecisionErrorLocked(key, decision, ErrPendingExpired, now)
+			return DecisionResult{}, ErrPendingExpired
+		}
+		return DecisionResult{}, ErrDecisionConflict
+	}
+	if record.seat.info.State != "pending_admit" {
 		return DecisionResult{}, ErrDecisionConflict
 	}
 	if !record.seat.info.PendingUntil.After(now) {
 		m.releaseSeatLocked(&record, "pending_expired", now)
 		m.channels[id] = record
+		m.cacheDecisionErrorLocked(key, decision, ErrPendingExpired, now)
 		return DecisionResult{}, ErrPendingExpired
 	}
 	info := record.seat.info
@@ -350,6 +371,21 @@ func (m *Manager) Decide(id, senderKey, requestID, decision string, now time.Tim
 	return DecisionResult{Decision: decision, State: state, Identity: info.Identity, JoinedAt: info.JoinedAt}, nil
 }
 
+func (m *Manager) cacheDecisionErrorLocked(key, decision string, err error, now time.Time) {
+	m.decisions[key] = decisionResult{
+		decision:  decision,
+		errorCode: err.Error(),
+		expiresAt: now.Add(JoinReplayRetention),
+	}
+}
+
+func decisionError(code string) error {
+	if code == ErrPendingExpired.Error() {
+		return ErrPendingExpired
+	}
+	return ErrDecisionConflict
+}
+
 func (m *Manager) expirePendingLocked(record *Record, now time.Time) {
 	if record.seat != nil && record.seat.info.State == "pending_admit" && !record.seat.info.PendingUntil.After(now) {
 		m.releaseSeatLocked(record, "pending_expired", now)
@@ -362,9 +398,18 @@ func (m *Manager) releaseSeatLocked(record *Record, reason string, now time.Time
 	}
 	seat := record.seat
 	m.closedJoins[seat.joinKey] = now.Add(JoinReplayRetention)
-	m.closedSeats[seat.seatHash] = seatClosure{reason: reason, expiresAt: now.Add(JoinReplayRetention)}
+	closure := seatClosure{
+		reason:    reason,
+		expiresAt: now.Add(JoinReplayRetention),
+	}
+	m.closedSeats[seat.seatHash] = closure
+	m.closedSeatIDs[seatKey(record.ID, seat.id)] = closure
 	record.seat = nil
 	record.Seat = nil
+}
+
+func seatKey(channelID, seatID string) string {
+	return channelID + "|" + seatID
 }
 
 func (m *Manager) closedSeatErrorLocked(seatToken string, now time.Time) error {
@@ -403,6 +448,11 @@ func (m *Manager) pruneSeatRecordsLocked(now time.Time) {
 	for key, closure := range m.closedSeats {
 		if !closure.expiresAt.After(now) {
 			delete(m.closedSeats, key)
+		}
+	}
+	for key, closure := range m.closedSeatIDs {
+		if !closure.expiresAt.After(now) {
+			delete(m.closedSeatIDs, key)
 		}
 	}
 }

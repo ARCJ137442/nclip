@@ -117,14 +117,15 @@ func (h *ChannelHandler) Admit(c *gin.Context) {
 	}
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 2048)
 	var input struct {
-		Decision string
+		SeatID   string `json:"seat_id"`
+		Decision string `json:"decision"`
 	}
 	if c.ShouldBindJSON(&input) != nil {
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
 		return
 	}
 	senderKey, _ := c.Cookie(senderCookieName)
-	result, err := h.manager.Decide(c.Param("id"), senderKey, requestID, input.Decision, time.Now())
+	result, err := h.manager.Decide(c.Param("id"), senderKey, input.SeatID, requestID, input.Decision, time.Now())
 	if err != nil {
 		h.channelError(c, err)
 		return
@@ -170,7 +171,7 @@ func (h *ChannelHandler) Leave(c *gin.Context) {
 
 func (h *ChannelHandler) channelError(c *gin.Context, err error) {
 	switch {
-	case errors.Is(err, channels.ErrInvalidDecision):
+	case errors.Is(err, channels.ErrInvalidDecision), errors.Is(err, channels.ErrInvalidSeatID):
 		c.AbortWithStatusJSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 	case errors.Is(err, channels.ErrChannelNotFound):
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": err.Error()})

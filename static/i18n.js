@@ -23,6 +23,7 @@ const messages = {
   channelRetryJoin: ["重试加入", "Retry joining"],
   channelOffline: ["发送者已离线，暂时不能加入。", "The sender is offline; this channel cannot accept joins."],
   channelPendingExpired: ["等待放行已超时，请重新加入。", "Approval timed out. Join again to retry."],
+  channelSenderPendingExpired: ["这次接收请求已超时；等待对方重新加入。", "This recipient request expired. Wait for them to join again."],
   channelRejected: ["发送者拒绝了本次加入。", "The sender rejected this join."],
   channelLeft: ["你已离开信道。", "You left the channel."],
   channelError: ["操作未完成，请检查连接后重试。", "The action did not complete. Check the connection and retry."],

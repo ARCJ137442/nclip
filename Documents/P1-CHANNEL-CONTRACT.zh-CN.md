@@ -40,7 +40,8 @@
 | 上传内容 init/chunk/finalize | 账号上传策略 + 信道 `sender_key` | `sender_key` + 已启用时的 UploadAuth | 信道域端点；内部复用现有分享创建服务；不接受 `X-Channel` 作为授权 |
 | 加入信道 | 显式公开可匿名；非公开需登录和 download 权限；身份只从会话解析 | 匿名加入 | 已登录会话的写操作校验 CSRF |
 | 查看状态 | 按明确 sender/receiver 角色验证 | 同左 | sender-only 只认 `sender_key`；receiver-only 只认 `seat_token` |
-| 放行、拒绝、踢出、关闭 | sender-only | sender-only | `sender_key` + 同源/防 CSRF 校验 |
+| 放行、拒绝 | sender-only | sender-only | `sender_key` + 同源/防 CSRF 校验；请求绑定当前 `seat_id` |
+| 踢出、关闭 | sender-only | sender-only | `sender_key` + 同源/防 CSRF 校验 |
 | 心跳、内容读取、leave | receiver-only | receiver-only | `seat_token` 专用 header；`claim_token` 专用 header；令牌不进 URL 或浏览器持久存储 |
 | 页面 | 信道感知 access middleware；先解析会话，再按 visibility 判定 | 公开页面可匿名 | 不整体豁免 Gate；`/c/:id` 在 `/:slug` 前注册 |
 
@@ -55,6 +56,7 @@
 
 - 信道 ID 使用 CSPRNG 至少 128 bit；默认一席。发送端预置后，首个获准接收方加入触发发送；双方在线是发送前提。
 - 席位轴：`open → pending_admit → paired`；拒绝/同意超时回到 open；leave、kick、撤回、页面关闭释放席位。
+- sender 状态为当前接收方提供非秘密 `seat_id`。`admit/reject` 必须携带用户实际看到的 seat ID；服务端在同一锁内校验它仍指向当前 pending 席位。决策幂等键按 channel + seat ID + request ID 绑定；席位过期的终态也要在重放期内固定，旧决策不能作用于后续接收方。
 - 内容轴：`empty → uploading → held`。槽位必须在 init 收到任何分块字节前原子占用；上传失败清理临时文件并回到 empty；`pending_admit` 阶段服务端没有内容文件。
 - create/join/admit/leave/content init/content finalize/kick/close 均有 request id 或等价 idempotency key。相同 key 重试返回相同会话或决策，不重复 side effect；相反的 admit 决策返回冲突。
 - 同信道不同 content-init key 在 `uploading` 或 `held` 状态返回 409。相同 init key 返回相同 upload session；finalize 重试返回同一结果。kick 重试保持已释放的 open 状态；close 重试保持 closed。channel lock 串行化 kick 与 close，close 是终态。

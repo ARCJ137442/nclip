@@ -39,9 +39,11 @@ var (
 	ErrJoinClosed          = errors.New("join_closed")
 	ErrDecisionConflict    = errors.New("decision_conflict")
 	ErrInvalidDecision     = errors.New("invalid_decision")
+	ErrInvalidSeatID       = errors.New("invalid_seat_id")
 )
 
 type SeatInfo struct {
+	SeatID       string    `json:"seat_id"`
 	State        string    `json:"state"`
 	Identity     string    `json:"identity"`
 	Anonymous    bool      `json:"anonymous"`
@@ -75,6 +77,8 @@ type Manager struct {
 	closedJoins   map[string]time.Time
 	joinResults   map[string]joinOutcome
 	closedSeats   map[[sha256.Size]byte]seatClosure
+	// closedSeatIDs lets a delayed sender decision resolve the old seat's terminal state.
+	closedSeatIDs map[string]seatClosure
 	decisions     map[string]decisionResult
 	leaves        map[string]leaveResult
 	masterKey     [sha256.Size]byte
@@ -89,12 +93,21 @@ func NewManager() *Manager {
 		closedJoins:   make(map[string]time.Time),
 		joinResults:   make(map[string]joinOutcome),
 		closedSeats:   make(map[[sha256.Size]byte]seatClosure),
+		closedSeatIDs: make(map[string]seatClosure),
 		decisions:     make(map[string]decisionResult),
 		leaves:        make(map[string]leaveResult),
 	}
 }
 
 func ValidRequestID(value string) bool {
+	return validOpaqueID(value)
+}
+
+func ValidSeatID(value string) bool {
+	return validOpaqueID(value)
+}
+
+func validOpaqueID(value string) bool {
 	raw, err := base64.RawURLEncoding.DecodeString(value)
 	return err == nil && len(raw) == 16
 }

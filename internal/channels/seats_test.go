@@ -57,19 +57,21 @@ func TestAnonymousJoinRequiresSenderDecisionAndLeaveIsIdempotent(t *testing.T) {
 	if joined.State != "pending_admit" || joined.Identity != "anonymous" || !joined.Anonymous || joined.PendingUntil.Sub(now) != PendingAdmissionWindow {
 		t.Fatalf("unexpected anonymous join: %+v", joined)
 	}
+	current, _ := manager.Get(record.ID)
+	seatID := current.Seat.SeatID
 	decisionID, _ := NewRequestID()
-	admitted, err := manager.Decide(record.ID, senderKey, decisionID, "admit", now.Add(time.Second))
+	admitted, err := manager.Decide(record.ID, senderKey, seatID, decisionID, "admit", now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if admitted.State != "paired" || admitted.Identity != "anonymous" {
 		t.Fatalf("unexpected admission result: %+v", admitted)
 	}
-	replay, err := manager.Decide(record.ID, senderKey, decisionID, "admit", now.Add(2*time.Second))
+	replay, err := manager.Decide(record.ID, senderKey, seatID, decisionID, "admit", now.Add(2*time.Second))
 	if err != nil || !replay.Replayed {
 		t.Fatalf("admit retry = %+v, %v", replay, err)
 	}
-	if _, err := manager.Decide(record.ID, senderKey, decisionID, "reject", now.Add(2*time.Second)); err != ErrIdempotencyConflict {
+	if _, err := manager.Decide(record.ID, senderKey, seatID, decisionID, "reject", now.Add(2*time.Second)); err != ErrIdempotencyConflict {
 		t.Fatalf("opposite retry error = %v", err)
 	}
 	leaveID, _ := NewRequestID()
@@ -106,12 +108,14 @@ func TestAnonymousRejectReleasesSeatAndReplaysDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	current, _ := manager.Get(record.ID)
+	seatID := current.Seat.SeatID
 	decisionID, _ := NewRequestID()
-	rejected, err := manager.Decide(record.ID, senderKey, decisionID, "reject", now.Add(time.Second))
+	rejected, err := manager.Decide(record.ID, senderKey, seatID, decisionID, "reject", now.Add(time.Second))
 	if err != nil || rejected.State != "open" {
 		t.Fatalf("reject = %+v, %v", rejected, err)
 	}
-	replay, err := manager.Decide(record.ID, senderKey, decisionID, "reject", now.Add(2*time.Second))
+	replay, err := manager.Decide(record.ID, senderKey, seatID, decisionID, "reject", now.Add(2*time.Second))
 	if err != nil || !replay.Replayed {
 		t.Fatalf("reject retry = %+v, %v", replay, err)
 	}
@@ -143,6 +147,78 @@ func TestPendingAdmissionExpiresAndSenderHeartbeatCanRestoreJoinability(t *testi
 	next, err := manager.Join(record.ID, "ip:203.0.113.5", nextJoinID, "", expiredAt)
 	if err != nil || next.State != "pending_admit" {
 		t.Fatalf("new join after timeout = %+v, %v", next, err)
+	}
+}
+
+func TestLateDecisionForExpiredSeatCannotAdmitNextSeat(t *testing.T) {
+	manager, record, senderKey := createChannelForJoinTest(t)
+	now := time.Now()
+	joinAID, _ := NewRequestID()
+	joinA, err := manager.Join(record.ID, "ip:203.0.113.20", joinAID, "", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateA, _ := manager.Get(record.ID)
+	seatAID := stateA.Seat.SeatID
+
+	expiredAt := now.Add(PendingAdmissionWindow + time.Second)
+	if err := manager.SenderHeartbeat(record.ID, senderKey, expiredAt); err != nil {
+		t.Fatal(err)
+	}
+	joinBID, _ := NewRequestID()
+	joinB, err := manager.Join(record.ID, "ip:203.0.113.21", joinBID, "", expiredAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stateB, _ := manager.Get(record.ID)
+	seatBID := stateB.Seat.SeatID
+	if seatBID == seatAID || stateB.Seat.State != "pending_admit" {
+		t.Fatalf("new receiver did not receive a fresh pending seat: %+v", stateB.Seat)
+	}
+
+	decisionID, _ := NewRequestID()
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := manager.Decide(record.ID, senderKey, seatAID, decisionID, "admit", expiredAt.Add(time.Duration(attempt)*time.Second)); err != ErrPendingExpired {
+			t.Fatalf("late A decision attempt %d = %v, want pending_expired", attempt, err)
+		}
+		current, _ := manager.Get(record.ID)
+		if current.Seat == nil || current.Seat.SeatID != seatBID || current.Seat.State != "pending_admit" {
+			t.Fatalf("late A decision changed B's seat on attempt %d: %+v", attempt, current.Seat)
+		}
+	}
+	if joinA.SeatToken == joinB.SeatToken {
+		t.Fatal("different seat generations reused a receiver token")
+	}
+}
+
+func TestExpiredDecisionErrorReplaysAfterNextSeatJoins(t *testing.T) {
+	manager, record, senderKey := createChannelForJoinTest(t)
+	now := time.Now()
+	joinAID, _ := NewRequestID()
+	if _, err := manager.Join(record.ID, "ip:203.0.113.22", joinAID, "", now); err != nil {
+		t.Fatal(err)
+	}
+	stateA, _ := manager.Get(record.ID)
+	seatAID := stateA.Seat.SeatID
+	decisionID, _ := NewRequestID()
+	expiredAt := now.Add(PendingAdmissionWindow)
+	if _, err := manager.Decide(record.ID, senderKey, seatAID, decisionID, "admit", expiredAt); err != ErrPendingExpired {
+		t.Fatalf("first expired decision = %v, want pending_expired", err)
+	}
+	if err := manager.SenderHeartbeat(record.ID, senderKey, expiredAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	joinBID, _ := NewRequestID()
+	_, err := manager.Join(record.ID, "ip:203.0.113.23", joinBID, "", expiredAt.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Decide(record.ID, senderKey, seatAID, decisionID, "admit", expiredAt.Add(2*time.Second)); err != ErrPendingExpired {
+		t.Fatalf("replayed expired decision = %v, want original pending_expired", err)
+	}
+	current, _ := manager.Get(record.ID)
+	if current.Seat == nil || current.Seat.SeatID == seatAID || current.Seat.State != "pending_admit" {
+		t.Fatalf("expired decision replay changed the next seat: %+v", current.Seat)
 	}
 }
 
