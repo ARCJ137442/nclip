@@ -150,6 +150,15 @@ export async function abortChannelContent(channelID, upload, headers = {}) {
   });
 }
 
+export async function cleanupCanceledChannelUpload(channelID, upload, headers = {}) {
+  try {
+    await abortChannelContent(channelID, upload, headers);
+    return true;
+  } catch (error) {
+    return ["channel_not_found", "content_closed"].includes(error?.message);
+  }
+}
+
 export class RequestError extends Error {
   constructor(status, code) {
     super(code);
@@ -173,7 +182,8 @@ export async function request(url, options = {}) {
       ...options,
       headers,
     });
-  } catch {
+  } catch (error) {
+    if (error?.name === "AbortError") throw new RequestError(0, "aborted");
     throw new RequestError(0, "network");
   }
   if (!response.ok) {

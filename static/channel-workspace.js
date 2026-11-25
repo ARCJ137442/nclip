@@ -2,6 +2,8 @@ import { getChannelSession, setChannelArmed, setChannelSendTarget, subscribeChan
 import { t } from "./i18n.js";
 import { preferences, savePreferences } from "./preferences.js";
 import { authHeaders } from "./ui.js";
+import { captureSeatTarget, isSameSeatTarget } from "./channel-workspace-state.js";
+import { resolveChannelSession } from "./channel-session-state.js";
 
 function requestID() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -19,6 +21,7 @@ function elapsedLabel(joinedAt) {
 const mode = document.querySelector("#channel-mode");
 if (mode) {
   const openButton = document.querySelector("#channel-open");
+  const sessionRetryButton = document.querySelector("#channel-session-retry");
   const publicToggle = document.querySelector("#channel-public");
   const publicOnly = document.querySelector("#channel-public-only");
   const panel = document.querySelector("#channel-sender");
@@ -56,6 +59,7 @@ if (mode) {
   let closeRequestId = "";
   let kickRequestId = "";
   let action = "";
+  let actionTarget = null;
   let currentRecord = null;
   let currentSeat = null;
   let polling = false;
@@ -65,11 +69,23 @@ if (mode) {
   let deferredApprovalSeatID = "";
   let approvalDialogSeatID = "";
   let decisionInFlightSeatID = "";
-  let sessionState = { enabled: false, csrf_token: "" };
+  let sessionState = { status: "loading", enabled: false, csrf_token: "" };
+  openButton.disabled = true;
 
-  const sessionPromise = fetch("/api/v1/session", { cache: "no-store", credentials: "same-origin" })
-    .then((response) => (response.ok ? response.json() : { enabled: false }))
-    .then((session) => {
+  async function loadSession() {
+    sessionState = { status: "loading", enabled: false, csrf_token: "" };
+    openButton.disabled = true;
+    sessionRetryButton.hidden = true;
+    publicToggle.closest("label").hidden = true;
+    publicOnly.hidden = true;
+    try {
+      const session = await resolveChannelSession();
+      if (session.status !== "ready") {
+        sessionState = session;
+        showError(session.error);
+        sessionRetryButton.hidden = false;
+        return null;
+      }
       sessionState = session;
       if (!session.enabled) {
         publicToggle.closest("label").hidden = true;
@@ -77,13 +93,16 @@ if (mode) {
       } else {
         publicToggle.checked = !!preferences.public;
       }
+      openButton.disabled = false;
       return session;
-    })
-    .catch(() => {
-      publicToggle.closest("label").hidden = true;
-      publicOnly.hidden = false;
-      return sessionState;
-    });
+    } catch {
+      sessionState = { status: "error", enabled: false, csrf_token: "" };
+      showError("channelSessionUnavailable");
+      sessionRetryButton.hidden = false;
+      return null;
+    }
+  }
+  void loadSession();
 
   function publish(transportError = "") {
     if (!channelId) {
@@ -117,7 +136,7 @@ if (mode) {
     const known = new Set([
       "channelError", "channelOffline", "channelSenderReconnecting", "channelSenderPendingExpired",
       "channelPendingExpired", "channelClosed", "channelGone", "channelCopyFailed", "channelRateLimited",
-      "channelUnavailable", "loginRequired", "permissionDenied",
+      "channelUnavailable", "loginRequired", "permissionDenied", "channelSessionUnavailable", "channelRecipientChanged",
     ]);
     const message = messages[key] || (known.has(key) ? key : "channelError");
     errorLine.textContent = t(message);
@@ -312,8 +331,11 @@ if (mode) {
   }
 
   function openAction(actionName) {
-    action = actionName;
     const kick = actionName === "kick";
+    if (kick && currentSeat?.state !== "paired") return;
+    action = actionName;
+    if (kick) actionTarget = captureSeatTarget(currentSeat);
+    else actionTarget = null;
     actionTitle.textContent = t(kick ? "channelActionKickTitle" : "channelActionCloseTitle");
     actionDescription.textContent = t(kick ? "channelActionKickDescription" : "channelActionCloseDescription");
     actionConfirmButton.textContent = t(kick ? "channelActionKickConfirm" : "channelActionCloseConfirm");
@@ -323,7 +345,13 @@ if (mode) {
   async function confirmAction() {
     if (!channelId || !action) return;
     const actionName = action;
-    const seatID = currentSeat?.seat_id || "";
+    const seatID = actionTarget?.seat_id || "";
+    if (actionName === "kick" && !isSameSeatTarget(currentSeat, actionTarget)) {
+      actionDialog.close("target-changed");
+      actionTarget = null;
+      showError("channelRecipientChanged");
+      return;
+    }
     const request = actionName === "kick" ? (kickRequestId ||= requestID()) : (closeRequestId ||= requestID());
     actionConfirmButton.disabled = true;
     try {
@@ -345,6 +373,7 @@ if (mode) {
       }
       actionDialog.close("confirmed");
       action = "";
+      actionTarget = null;
       if (actionName === "kick") {
         kickRequestId = "";
         await refresh();
@@ -397,7 +426,7 @@ if (mode) {
   refreshButton.addEventListener("click", () => { refreshDelay = 5000; void refresh(); });
   closeButton.addEventListener("click", () => openAction("close"));
   actionCancelButton.addEventListener("click", () => actionDialog.close("cancelled"));
-  actionDialog.addEventListener("close", () => { action = ""; actionConfirmButton.disabled = false; });
+  actionDialog.addEventListener("close", () => { action = ""; actionTarget = null; actionConfirmButton.disabled = false; });
   actionConfirmButton.addEventListener("click", () => { void confirmAction(); });
   useForSendButton.addEventListener("click", () => setChannelSendTarget("channel"));
   useShareButton.addEventListener("click", () => setChannelSendTarget("share"));
@@ -430,7 +459,8 @@ if (mode) {
     openButton.disabled = true;
     errorLine.hidden = true;
     try {
-      const session = await sessionPromise;
+      const session = sessionState.status === "ready" ? sessionState : await loadSession();
+      if (!session || sessionState.status !== "ready") return;
       const headers = { "Idempotency-Key": createRequestId, ...sessionCSRFHeaders() };
       if (!session.enabled || publicToggle.checked) headers["X-Nclip-Visibility"] = "public";
       Object.assign(headers, authHeaders());
@@ -467,6 +497,7 @@ if (mode) {
       openButton.disabled = false;
     }
   });
+  sessionRetryButton.addEventListener("click", () => { void loadSession(); });
 
   if (channelId) {
     mode.open = true;

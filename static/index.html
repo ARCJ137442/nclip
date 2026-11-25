@@ -231,8 +231,10 @@
             </label>
             <p id="channel-public-only" class="hint" data-i18n="channelPublicOnly" hidden>此实例不启用账号，信道为公开并需要发送者放行。</p>
             <button id="channel-open" class="button secondary" type="button" data-i18n="channelOpen">打开临时信道</button>
+            <button id="channel-session-retry" class="button quiet" type="button" data-i18n="channelSessionRetry" hidden>重试账号状态检查</button>
             <section id="channel-sender" class="channel-sender" hidden aria-live="polite">
               <p id="channel-sender-state" class="channel-state"></p>
+              <p class="hint" data-i18n="channelBrowserSessionHint">刷新页面会尝试恢复发送端控制；关闭整个浏览器会话后将失去此信道的控制权。</p>
               <a id="channel-link" class="channel-link" href=""></a>
               <p id="channel-identity" class="channel-identity" hidden></p>
               <section id="channel-snapshot" class="channel-snapshot" hidden aria-live="polite">

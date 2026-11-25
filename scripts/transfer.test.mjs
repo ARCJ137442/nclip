@@ -14,7 +14,10 @@ import {
   CHANNEL_UPLOAD_CHUNK_BYTES,
   createChannelUploadState,
   uploadChannelContent,
+  cleanupCanceledChannelUpload,
 } from "../static/share-api.js";
+import { captureSeatTarget, isSameSeatTarget } from "../static/channel-workspace-state.js";
+import { resolveChannelSession } from "../static/channel-session-state.js";
 import { clampTTLHours, previewForItem, safePreview } from "../static/handoff.js";
 import { normalizePreferences } from "../static/preferences.js";
 
@@ -159,6 +162,56 @@ test("channel chunk retries replay the same offset and digest without duplicate 
   } finally {
     globalThis.XMLHttpRequest = originalXHR;
   }
+});
+
+test("channel init and finalize fetch cancellation keep the aborted result", async () => {
+  const initState = createChannelUploadState([], () => "init-key");
+  await withFetch(async () => { throw new DOMException("cancelled", "AbortError"); }, async () => {
+    await assert.rejects(uploadChannelContent("c", initState), (error) => error instanceof RequestError && error.message === "aborted");
+  });
+
+  const finalizeState = createChannelUploadState([], (() => { let i = 0; return () => `key-${++i}`; })());
+  await withFetch(async (url) => {
+    if (url.endsWith("/finalize")) throw new DOMException("cancelled", "AbortError");
+    return new Response(JSON.stringify({ upload_id: "upload-1" }), { status: 201, headers: { "Content-Type": "application/json" } });
+  }, async () => {
+    await assert.rejects(uploadChannelContent("c", finalizeState), (error) => error instanceof RequestError && error.message === "aborted");
+  });
+  assert.equal(finalizeState.uploadID, "upload-1");
+});
+
+test("cancel cleanup confirms deletion only after a terminal server response", async () => {
+  const state = createChannelUploadState([], () => "same-init-key");
+  let deletes = 0;
+  await withFetch(async (url, options = {}) => {
+    if (options.method === "DELETE") { deletes++; return new Response(null, { status: 204 }); }
+    return new Response(JSON.stringify({ upload_id: "session-1" }), { status: 201, headers: { "Content-Type": "application/json" } });
+  }, async () => assert.equal(await cleanupCanceledChannelUpload("c", state), true));
+  assert.equal(deletes, 1);
+
+  await withFetch(async (url, options = {}) => {
+    if (options.method === "DELETE") return new Response(JSON.stringify({ error: "network" }), { status: 503, headers: { "Content-Type": "application/json" } });
+    return new Response(JSON.stringify({ upload_id: "session-2" }), { status: 201, headers: { "Content-Type": "application/json" } });
+  }, async () => assert.equal(await cleanupCanceledChannelUpload("c", { ...state, uploadID: "session-2" }), false));
+});
+
+test("kick confirmation target cannot transfer to a replacement seat", () => {
+  const first = { state: "paired", seat_id: "seat-a", identity: "alice", joined_at: "2026-11-25T00:00:00Z" };
+  const target = captureSeatTarget(first);
+  assert.equal(isSameSeatTarget(first, target), true);
+  assert.equal(isSameSeatTarget({ ...first, seat_id: "seat-b", identity: "bob" }, target), false);
+  assert.equal(captureSeatTarget({ ...first, state: "pending_admit" }), null);
+});
+
+test("failed session checks stay unknown and successful retry restores the ready state", async () => {
+  for (const failure of [new TypeError("offline"), new Response("unauthorized", { status: 401 }), new Response("unavailable", { status: 503 })]) {
+    const state = await resolveChannelSession(async () => { if (failure instanceof Error) throw failure; return failure; });
+    assert.equal(state.status, "error");
+    assert.equal(state.enabled, false);
+    assert.equal(state.error, failure instanceof Response && failure.status === 401 ? "loginRequired" : "channelSessionUnavailable");
+  }
+  const recovered = await resolveChannelSession(async () => new Response(JSON.stringify({ enabled: true, csrf_token: "csrf" }), { status: 200, headers: { "Content-Type": "application/json" } }));
+  assert.deepEqual(recovered, { enabled: true, csrf_token: "csrf", status: "ready" });
 });
 
 test("sender preview normalizes lines, truncates by rune, and suppresses secrets", () => {

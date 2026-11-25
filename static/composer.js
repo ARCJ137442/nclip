@@ -11,7 +11,7 @@ import {
   draggedLinks,
 } from "./clipboard.js";
 import {
-  abortChannelContent,
+  cleanupCanceledChannelUpload,
   createChannelUploadState,
   request,
   uploadChannelContent,
@@ -754,11 +754,8 @@ export async function startComposer() {
         if (destination.type === "channel" && channelUploadState) {
           let cleanupConfirmed = false;
           try {
-            await abortChannelContent(destination.channelId, channelUploadState, authHeaders());
-            cleanupConfirmed = true;
-          } catch {
-            if (["channel_not_found", "content_closed"].includes(error.message)) cleanupConfirmed = true;
-          }
+            cleanupConfirmed = await cleanupCanceledChannelUpload(destination.channelId, channelUploadState, authHeaders());
+          } catch { /* Keep cancellation unconfirmed when cleanup itself cannot be confirmed. */ }
           if (!cleanupConfirmed) {
             transferFailure = new Error("channel_cancel_unconfirmed");
             setTransferPhase("error", transferFailure);
