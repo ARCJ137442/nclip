@@ -18,7 +18,7 @@ import {
 } from "../static/share-api.js";
 import { canKickSeat, recipientHint, captureSeatTarget, isSameSeatTarget } from "../static/channel-workspace-state.js";
 import { resolveChannelSession } from "../static/channel-session-state.js";
-import { CHANNEL_BROWSER_DOWNLOAD_THRESHOLD_BYTES, shouldUseBrowserDownload, validateChannelDownloadURL } from "../static/channel-transfer-path.js";
+import { CHANNEL_BROWSER_DOWNLOAD_THRESHOLD_BYTES, shouldUseBrowserDownload, validateChannelDownloadURL, dispatchBrowserDownload } from "../static/channel-transfer-path.js";
 import { clampTTLHours, previewForItem, safePreview } from "../static/handoff.js";
 import { normalizePreferences, preferences } from "../static/preferences.js";
 import { receiverTerminalMessage } from "../static/channel-receiver-state.js";
@@ -652,4 +652,19 @@ test("requestBytes rejects mismatched ranges and truncated bodies", async () => 
       );
     },
   );
+});
+
+test("native download uses download intent and leaves the receiver page loaded", () => {
+  const calls = [];
+  const link = { click() { calls.push("click"); }, remove() { calls.push("remove"); } };
+  const document = { createElement(tag) { assert.equal(tag, "a"); return link; }, body: { append(value) { assert.equal(value, link); calls.push("append"); } } };
+  dispatchBrowserDownload("https://example.com/api/v1/channels/test/content/download/ticket", document);
+  assert.equal(link.download, "");
+  assert.equal(link.target, "_blank");
+  assert.equal(link.rel, "noopener noreferrer");
+  assert.deepEqual(calls, ["append", "click", "remove"]);
+  calls.length = 0;
+  link.click = () => { calls.push("click"); throw Error("host failure"); };
+  assert.throws(() => dispatchBrowserDownload("https://example.com/download", document), /host failure/);
+  assert.deepEqual(calls, ["append", "click", "remove"]);
 });

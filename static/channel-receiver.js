@@ -4,7 +4,7 @@ import { decodeShare, requestBytes } from "./share-api.js";
 import { createProgress, timeParts } from "./transfer.js";
 import { renderItems, status } from "./ui.js";
 import { sizeLabel, t } from "./i18n.js";
-import { shouldUseBrowserDownload, validateChannelDownloadURL } from "./channel-transfer-path.js";
+import { shouldUseBrowserDownload, validateChannelDownloadURL, dispatchBrowserDownload } from "./channel-transfer-path.js";
 import { receiverTerminalMessage } from "./channel-receiver-state.js";
 
 const page = document.querySelector("#channel-page");
@@ -332,31 +332,13 @@ if (page) {
   async function startBrowserDownload() {
     if (!seatToken || browserTicketIssuing || leaving || completed) return;
     if (!browserTicketURL) {
-      const popup = window.open("about:blank", "_blank");
-      if (!popup) {
-        setError("channelBrowserDownloadPopupBlocked");
-        return;
-      }
-      const generation = seatGeneration;
+      // Preparing a ticket is asynchronous. The ready button supplies a fresh
+      // user gesture rather than opening a placeholder popup across the await.
       await prepareBrowserTicket();
-      if (!browserTicketURL || generation !== seatGeneration) {
-        popup.close();
-        return;
-      }
-      popup.opener = null;
-      popup.location.replace(browserTicketURL);
-      browserDownloadStarted = true;
-      document.querySelector("#channel-browser-download-status").textContent = t("channelBrowserDownloadNote");
-      document.querySelector("#channel-browser-download-status").hidden = false;
-      browserDownloadButton.textContent = t("channelBrowserDownloadAgain");
       return;
     }
-    const popup = window.open(browserTicketURL, "_blank");
-    if (!popup) {
-      setError("channelBrowserDownloadPopupBlocked");
-      return;
-    }
-    popup.opener = null;
+    dispatchBrowserDownload(browserTicketURL, document);
+    errorLine.hidden = true;
     browserDownloadStarted = true;
     browserDownloadButton.disabled = false;
     browserDownloadButton.textContent = t("channelBrowserDownloadAgain");
