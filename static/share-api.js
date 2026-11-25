@@ -164,7 +164,7 @@ export async function cleanupCanceledChannelUpload(channelID, upload, headers = 
     await abortChannelContent(channelID, upload, headers);
     return true;
   } catch (error) {
-    return ["channel_not_found", "content_closed"].includes(error?.message);
+    return ["channel_not_found", "content_upload_closed"].includes(error?.message);
   }
 }
 

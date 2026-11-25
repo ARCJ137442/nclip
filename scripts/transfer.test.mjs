@@ -235,6 +235,22 @@ test("cancel cleanup confirms deletion only after a terminal server response", a
     if (options.method === "DELETE") return new Response(JSON.stringify({ error: "network" }), { status: 503, headers: { "Content-Type": "application/json" } });
     return new Response(JSON.stringify({ upload_id: "session-2" }), { status: 201, headers: { "Content-Type": "application/json" } });
   }, async () => assert.equal(await cleanupCanceledChannelUpload("c", { ...state, uploadID: "session-2" }), false));
+
+  const initCanceledState = createChannelUploadState([], () => "closed-init-key");
+  await withFetch(async () => new Response(JSON.stringify({ error: "content_upload_closed" }), {
+    status: 410,
+    headers: { "Content-Type": "application/json" },
+  }), async () => assert.equal(await cleanupCanceledChannelUpload("c", initCanceledState), true));
+
+  await withFetch(async () => new Response(JSON.stringify({ error: "channel_not_found" }), {
+    status: 404,
+    headers: { "Content-Type": "application/json" },
+  }), async () => assert.equal(await cleanupCanceledChannelUpload("c", initCanceledState), true));
+
+  await withFetch(async () => new Response(JSON.stringify({ error: "content_closed" }), {
+    status: 410,
+    headers: { "Content-Type": "application/json" },
+  }), async () => assert.equal(await cleanupCanceledChannelUpload("c", initCanceledState), false));
 });
 
 test("kick confirmation target cannot transfer to a replacement seat", () => {
