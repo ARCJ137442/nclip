@@ -91,6 +91,8 @@ if (mode) {
         publicToggle.closest("label").hidden = true;
         publicOnly.hidden = false;
       } else {
+        publicToggle.closest("label").hidden = false;
+        publicOnly.hidden = true;
         publicToggle.checked = !!preferences.public;
       }
       openButton.disabled = false;

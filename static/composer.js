@@ -11,6 +11,7 @@ import {
   draggedLinks,
 } from "./clipboard.js";
 import {
+  abortChannelContent,
   cleanupCanceledChannelUpload,
   createChannelUploadState,
   request,
