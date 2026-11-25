@@ -23,6 +23,23 @@ import { clampTTLHours, previewForItem, safePreview } from "../static/handoff.js
 import { normalizePreferences, preferences } from "../static/preferences.js";
 import { receiverTerminalMessage } from "../static/channel-receiver-state.js";
 import { t } from "../static/i18n.js";
+import { uploadAuthMessage } from "../static/upload-auth-state.js";
+
+test("upload authentication feedback requires an actual upload-key challenge", () => {
+  assert.equal(uploadAuthMessage(401, "missing api key", true), "uploadKeyRequired");
+  assert.equal(uploadAuthMessage(401, "unauthorized", true), "uploadKeyInvalid");
+  for (const [status, code, field] of [[503, "unauthorized", true], [403, "missing api key", true], [401, "unauthorized", false], [401, "login_required", true]])
+    assert.equal(uploadAuthMessage(status, code, field), null);
+  const previous = preferences.language;
+  try {
+    preferences.language = "zh";
+    assert.match(t("uploadKeyRequired"), /API Key/);
+    assert.match(t("uploadKeyInvalid"), /更正/);
+    preferences.language = "en";
+    assert.match(t("uploadKeyRequired"), /Enter/);
+    assert.match(t("uploadKeyInvalid"), /invalid/);
+  } finally { preferences.language = previous; }
+});
 
 test("receiver rejection requires the exact terminal status, code and reason", () => {
   for (const [status, body, expected] of [

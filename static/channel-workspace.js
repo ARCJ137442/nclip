@@ -4,6 +4,7 @@ import { preferences, savePreferences } from "./preferences.js";
 import { authHeaders } from "./ui.js";
 import { captureSeatTarget, isSameSeatTarget } from "./channel-workspace-state.js";
 import { resolveChannelSession } from "./channel-session-state.js";
+import { uploadAuthMessage } from "./upload-auth-state.js";
 
 function requestID() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -123,7 +124,7 @@ if (mode) {
     });
   }
 
-  function showError(key) {
+  function showError(key, status) {
     const messages = {
       sender_offline: "channelOffline",
       seats_full: "channelSeatFull",
@@ -140,9 +141,11 @@ if (mode) {
       "channelPendingExpired", "channelClosed", "channelGone", "channelCopyFailed", "channelRateLimited",
       "channelUnavailable", "loginRequired", "permissionDenied", "channelSessionUnavailable", "channelRecipientChanged",
     ]);
-    const message = messages[key] || (known.has(key) ? key : "channelError");
+    const keyMessage = uploadAuthMessage(status, key, !!document.querySelector("#api-key"));
+    const message = keyMessage || messages[key] || (known.has(key) ? key : "channelError");
     errorLine.textContent = t(message);
     errorLine.hidden = false;
+    if (keyMessage) document.querySelector("#api-key").focus();
   }
 
   function sessionCSRFHeaders() {
@@ -473,7 +476,9 @@ if (mode) {
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({}));
-        throw new Error(body.error || `HTTP ${response.status}`);
+        const error = new Error(body.error || `HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
       }
       const channel = await response.json();
       createRequestId = "";
@@ -495,7 +500,7 @@ if (mode) {
       setChannelSendTarget("channel");
       scheduleRefresh();
     } catch (error) {
-      showError(error.message || "channelError");
+      showError(error.message || "channelError", error.status);
       openButton.disabled = false;
     }
   });

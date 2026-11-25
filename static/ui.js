@@ -1,6 +1,7 @@
 import { preferences, savePreferences } from "./preferences.js";
 import { t, translate, sizeLabel } from "./i18n.js";
 import { accountMessage } from "./account-messages.js";
+import { uploadAuthMessage } from "./upload-auth-state.js";
 
 export const $ = (id) => document.getElementById(id);
 const paths = {
@@ -42,6 +43,12 @@ export function status(key, tone = "", values = {}) {
   }
 }
 export function failure(error, config = {}) {
+  const keyMessage = uploadAuthMessage(error.status, error.message, !!$("api-key"));
+  if (keyMessage) {
+    status(keyMessage, "error");
+    $("api-key").focus();
+    return;
+  }
   if (
     [
       "login_required",
