@@ -117,10 +117,21 @@ func (h *ChannelHandler) ContentTicketDownload(c *gin.Context) {
 	controller := http.NewResponseController(c.Writer)
 	complete, streamErr := h.streamTicketAttachment(c, lease, paste, plan, byteRange, length, partial, controller)
 	if streamErr != nil && !c.Writer.Written() {
-		channelDeliveryError(c, streamErr)
+		writeAttachmentReadError(c, streamErr)
+		h.finishTicketDelivery(lease, plan.size, false, streamErr)
+		return
 	}
 	finishChannelResponseIO(c, lease, controller, streamErr)
 	h.finishTicketDelivery(lease, plan.size, complete, streamErr)
+}
+
+func writeAttachmentReadError(c *gin.Context, err error) {
+	// A source can open successfully but fail on its first Read. No attachment
+	// bytes have been committed, so replace all representation headers with JSON.
+	for _, header := range []string{"Content-Disposition", "Content-Length", "Content-Range", "Content-Type", "Accept-Ranges", "ETag", "X-Accel-Buffering"} {
+		c.Writer.Header().Del(header)
+	}
+	channelDeliveryError(c, err)
 }
 
 func (h *ChannelHandler) streamTicketAttachment(c *gin.Context, lease *channels.DeliveryLease, paste *models.Paste, plan channelAttachment, byteRange byteRange, length int64, partial bool, controller *http.ResponseController) (bool, error) {
