@@ -35,6 +35,8 @@ type seatState struct {
 	lastSeen         time.Time
 	releaseUntil     time.Time
 	deliveredThrough int64
+	deliveryMode     DeliveryMode
+	ticketHash       [sha256.Size]byte
 	delivery         *DeliveryLease
 	decisionID       string
 	decision         string

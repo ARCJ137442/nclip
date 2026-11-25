@@ -2,6 +2,9 @@ package channels
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
 	"errors"
 	"io"
 	"math"
@@ -11,16 +14,26 @@ import (
 )
 
 var (
-	ErrDeliveryNotReady = errors.New("delivery_not_ready")
-	ErrDeliveryBusy     = errors.New("delivery_busy")
-	ErrDeliveryGap      = errors.New("range_gap")
-	ErrDeliveryComplete = errors.New("delivery_complete")
-	ErrSeatKicked       = errors.New("receiver_kicked")
+	ErrDeliveryNotReady     = errors.New("delivery_not_ready")
+	ErrDeliveryBusy         = errors.New("delivery_busy")
+	ErrDeliveryGap          = errors.New("range_gap")
+	ErrDeliveryComplete     = errors.New("delivery_complete")
+	ErrSeatKicked           = errors.New("receiver_kicked")
+	ErrDeliveryModeConflict = errors.New("delivery_mode_conflict")
+)
+
+type DeliveryMode string
+
+const (
+	DeliveryModeUnset             DeliveryMode = ""
+	DeliveryModeAppMultipart      DeliveryMode = "app-multipart"
+	DeliveryModeBrowserAttachment DeliveryMode = "browser-attachment"
 )
 
 type DeliveryLease struct {
 	ChannelID string
 	SeatID    string
+	Mode      DeliveryMode
 	ctx       context.Context
 	cancel    context.CancelFunc
 	canceled  atomic.Bool
@@ -94,27 +107,102 @@ func (m *Manager) BeginDelivery(channelID, seatToken, claimToken string, now tim
 	if seat == nil || !matchHash(seat.seatHash, seatToken) || !matchHash(seat.claimHash, claimToken) {
 		return DeliveryStart{}, ErrUnauthorized
 	}
+	return m.beginDeliveryLocked(&record, DeliveryModeAppMultipart, now, true, true)
+}
+
+// IssueDeliveryTicket mints a page-scoped capability for one browser attachment
+// delivery. It does not lock the delivery representation or refresh liveness.
+func (m *Manager) IssueDeliveryTicket(channelID, seatToken, claimToken string, now time.Time) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.channels[channelID]
+	if !ok {
+		return "", ErrChannelNotFound
+	}
+	seat := record.seat
+	if seat == nil || !matchHash(seat.seatHash, seatToken) || !matchHash(seat.claimHash, claimToken) {
+		return "", ErrUnauthorized
+	}
+	if seat.info.State != "paired" || record.ContentState != ContentHeld || record.contentSlug == "" {
+		return "", ErrDeliveryNotReady
+	}
+	if seat.deliveryMode == DeliveryModeAppMultipart {
+		return "", ErrDeliveryModeConflict
+	}
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", err
+	}
+	ticket := base64.RawURLEncoding.EncodeToString(tokenBytes)
+	if seat.delivery != nil {
+		if seat.delivery.Mode != DeliveryModeBrowserAttachment {
+			return "", ErrDeliveryModeConflict
+		}
+		seat.delivery.Cancel()
+	}
+	seat.ticketHash = sha256.Sum256([]byte(ticket))
+	m.channels[channelID] = record
+	return ticket, nil
+}
+
+// BeginTicketDelivery validates the current seat-bound ticket and starts the
+// same exclusive delivery lease used by app multipart reads. Unlike page
+// status/heartbeat, a ticket request never restores a released seat.
+func (m *Manager) BeginTicketDelivery(channelID, ticket string, now time.Time) (DeliveryStart, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	record, ok := m.channels[channelID]
+	if !ok {
+		return DeliveryStart{}, ErrChannelNotFound
+	}
+	seat := record.seat
+	if seat == nil || !matchHash(seat.ticketHash, ticket) {
+		return DeliveryStart{}, ErrUnauthorized
+	}
 	if seat.info.State == "released" {
+		return DeliveryStart{}, ErrDeliveryNotReady
+	}
+	if seat.info.State != "paired" || record.ContentState != ContentHeld || record.contentSlug == "" {
+		return DeliveryStart{}, ErrDeliveryNotReady
+	}
+	return m.beginDeliveryLocked(&record, DeliveryModeBrowserAttachment, now, false, false)
+}
+
+func (m *Manager) beginDeliveryLocked(record *Record, mode DeliveryMode, now time.Time, recoverReleased, refreshLiveness bool) (DeliveryStart, error) {
+	seat := record.seat
+	if seat == nil {
+		return DeliveryStart{}, ErrDeliveryNotReady
+	}
+	if seat.info.State == "released" {
+		if !recoverReleased {
+			return DeliveryStart{}, ErrDeliveryNotReady
+		}
 		if !seat.releaseUntil.After(now) {
 			return DeliveryStart{}, ErrJoinClosed
 		}
 		seat.info.State = "paired"
 		seat.releaseUntil = time.Time{}
-		record.Seat = copySeatInfo(&seat.info)
 	}
 	if seat.info.State != "paired" || record.ContentState != ContentHeld || record.contentSlug == "" {
 		return DeliveryStart{}, ErrDeliveryNotReady
+	}
+	if seat.deliveryMode != DeliveryModeUnset && seat.deliveryMode != mode {
+		return DeliveryStart{}, ErrDeliveryModeConflict
 	}
 	if seat.delivery != nil {
 		return DeliveryStart{}, ErrDeliveryBusy
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	lease := &DeliveryLease{ChannelID: channelID, SeatID: seat.id, ctx: ctx, cancel: cancel}
+	lease := &DeliveryLease{ChannelID: record.ID, SeatID: seat.id, Mode: mode, ctx: ctx, cancel: cancel}
+	if seat.deliveryMode == DeliveryModeUnset {
+		seat.deliveryMode = mode
+	}
 	seat.delivery = lease
-	seat.lastSeen = now
-	seat.info.State = "paired"
+	if refreshLiveness {
+		seat.lastSeen = now
+	}
 	record.Seat = copySeatInfo(&seat.info)
-	m.channels[channelID] = record
+	m.channels[record.ID] = *record
 	return DeliveryStart{Lease: lease, Slug: record.contentSlug, ContentBytes: record.contentBytes, DeliveredThrough: seat.deliveredThrough}, nil
 }
 
@@ -125,7 +213,7 @@ func (m *Manager) SetDeliveryRange(lease *DeliveryLease, start int64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	record, ok := m.channels[lease.ChannelID]
-	if !ok || record.seat == nil || record.seat.delivery != lease || lease.canceled.Load() {
+	if !ok || record.seat == nil || record.seat.delivery != lease || record.seat.deliveryMode != lease.Mode || lease.canceled.Load() {
 		return ErrContentClosed
 	}
 	if start > record.seat.deliveredThrough {
@@ -146,7 +234,7 @@ func (m *Manager) RecordDeliveryBytes(lease *DeliveryLease, bytes int64, now tim
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	record, ok := m.channels[lease.ChannelID]
-	if !ok || record.seat == nil || record.seat.delivery != lease || lease.canceled.Load() {
+	if !ok || record.seat == nil || record.seat.delivery != lease || record.seat.deliveryMode != lease.Mode || lease.canceled.Load() {
 		return ErrContentClosed
 	}
 	if bytes > math.MaxInt64-lease.start-lease.written {
@@ -169,11 +257,16 @@ func (m *Manager) FinishDelivery(lease *DeliveryLease, total int64, complete boo
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	record, ok := m.channels[lease.ChannelID]
-	if !ok || record.seat == nil || record.seat.delivery != lease {
+	if !ok || record.seat == nil || record.seat.delivery != lease || record.seat.deliveryMode != lease.Mode {
 		return ContentRelease{}, false, ErrContentClosed
 	}
 	seat := record.seat
 	seat.delivery = nil
+	if lease.canceled.Load() {
+		record.Seat = copySeatInfo(&seat.info)
+		m.channels[lease.ChannelID] = record
+		return ContentRelease{}, false, ErrContentClosed
+	}
 	if lease.written > 0 {
 		seat.lastSeen = now
 	}
@@ -198,7 +291,7 @@ func (m *Manager) ReserveDeliverySpace(lease *DeliveryLease, reservation, freeBy
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	record, ok := m.channels[lease.ChannelID]
-	if !ok || record.seat == nil || record.seat.delivery != lease || lease.canceled.Load() {
+	if !ok || record.seat == nil || record.seat.delivery != lease || record.seat.deliveryMode != lease.Mode || lease.canceled.Load() {
 		return ErrContentClosed
 	}
 	if !m.content.ready || lease.reserved != 0 {
@@ -298,5 +391,5 @@ func (m *Manager) deliveryCurrentLocked(lease *DeliveryLease) bool {
 		return false
 	}
 	record, ok := m.channels[lease.ChannelID]
-	return ok && record.seat != nil && record.seat.delivery == lease && !lease.canceled.Load()
+	return ok && record.seat != nil && record.seat.delivery == lease && record.seat.deliveryMode == lease.Mode && !lease.canceled.Load()
 }

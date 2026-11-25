@@ -426,7 +426,7 @@ func channelDeliveryError(c *gin.Context, err error) {
 		channelContentError(c, http.StatusGone, err)
 	case errors.Is(err, channels.ErrJoinClosed), errors.Is(err, channels.ErrContentClosed):
 		channelContentError(c, http.StatusGone, channels.ErrContentClosed)
-	case errors.Is(err, channels.ErrContentBusy), errors.Is(err, channels.ErrDeliveryBusy), errors.Is(err, channels.ErrDeliveryGap), errors.Is(err, channels.ErrContentConflict):
+	case errors.Is(err, channels.ErrContentBusy), errors.Is(err, channels.ErrDeliveryBusy), errors.Is(err, channels.ErrDeliveryGap), errors.Is(err, channels.ErrDeliveryModeConflict), errors.Is(err, channels.ErrContentConflict):
 		channelContentError(c, http.StatusConflict, err)
 	case errors.Is(err, channels.ErrDeliveryNotReady):
 		channelContentError(c, http.StatusConflict, err)

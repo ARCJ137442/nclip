@@ -66,6 +66,140 @@ func TestClaimBoundRangeDeliveryResumesAndDeletesAfterCompleteBody(t *testing.T)
 	}
 }
 
+func TestDeliveryRepresentationLocksOnFirstSuccessfulLease(t *testing.T) {
+	now := time.Now()
+	manager, record, _, joined := heldDeliveryFixture(t, now)
+	initial, _ := manager.Get(record.ID)
+	lastSeen := initial.seat.lastSeen
+	ticket, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(time.Second))
+	if err != nil || ticket == "" {
+		t.Fatalf("issue ticket = %q, %v", ticket, err)
+	}
+	issued, _ := manager.Get(record.ID)
+	if issued.seat.deliveryMode != DeliveryModeUnset || !issued.seat.lastSeen.Equal(lastSeen) {
+		t.Fatalf("ticket issuance changed mode or liveness: mode=%q lastSeen=%v", issued.seat.deliveryMode, issued.seat.lastSeen)
+	}
+
+	first, err := manager.BeginTicketDelivery(record.ID, ticket, now.Add(2*time.Second))
+	if err != nil || first.Lease.Mode != DeliveryModeBrowserAttachment {
+		t.Fatalf("first ticket lease = %+v, %v", first, err)
+	}
+	if _, err := manager.BeginDelivery(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(3*time.Second)); err != ErrDeliveryModeConflict {
+		t.Fatalf("cross-representation app GET should conflict: %v", err)
+	}
+	if _, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(3*time.Second)); err != nil {
+		t.Fatalf("rotate active ticket: %v", err)
+	}
+	_, _, finishErr := manager.FinishDelivery(first.Lease, first.ContentBytes, true, now.Add(4*time.Second))
+	if finishErr != ErrContentClosed {
+		t.Fatalf("cancelled lease finished as success: %v", finishErr)
+	}
+	state, _ := manager.Get(record.ID)
+	if state.seat == nil || state.ContentState != ContentHeld || state.seat.deliveryMode != DeliveryModeBrowserAttachment {
+		t.Fatalf("late cancelled finish changed ticket seat/content state: %+v", state)
+	}
+
+	rotated, err := manager.BeginTicketDelivery(record.ID, ticket, now.Add(5*time.Second))
+	if err != ErrUnauthorized || rotated.Lease != nil {
+		t.Fatalf("old rotated ticket remained usable: start=%+v err=%v", rotated, err)
+	}
+	newTicket, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(5*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resumed, err := manager.BeginTicketDelivery(record.ID, newTicket, now.Add(6*time.Second))
+	if err != nil || resumed.Lease.Mode != DeliveryModeBrowserAttachment {
+		t.Fatalf("rotated ticket did not resume in same representation: %+v, %v", resumed, err)
+	}
+	if _, err := manager.BeginDelivery(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(7*time.Second)); err != ErrDeliveryModeConflict {
+		t.Fatalf("app representation switched after ticket lock: %v", err)
+	}
+}
+
+func TestTicketIssueDoesNotCancelOrReplaceAnAppLease(t *testing.T) {
+	now := time.Now()
+	manager, record, _, joined := heldDeliveryFixture(t, now)
+	app, err := manager.BeginDelivery(record.ID, joined.SeatToken, joined.ClaimToken, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(time.Second)); err != ErrDeliveryModeConflict {
+		t.Fatalf("ticket issuance over an app lease = %v", err)
+	}
+	if app.Lease.Context().Err() != nil {
+		t.Fatal("failed ticket issuance cancelled the app lease")
+	}
+}
+
+func TestTicketDoesNotRecoverReleasedSeatButSurvivesPageHeartbeatRecovery(t *testing.T) {
+	now := time.Now()
+	manager, record, _, joined := heldDeliveryFixture(t, now)
+	ticket, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager.SweepReceiverLiveness(now.Add(ReceiverHeartbeatTimeout + time.Second))
+	if _, err := manager.BeginTicketDelivery(record.ID, ticket, now.Add(ReceiverHeartbeatTimeout+2*time.Second)); err != ErrDeliveryNotReady {
+		t.Fatalf("ticket GET recovered inactive seat: %v", err)
+	}
+	released, _ := manager.Get(record.ID)
+	if released.Seat == nil || released.Seat.State != "released" || released.seat.ticketHash == ([sha256.Size]byte{}) {
+		t.Fatalf("released recovery window lost ticket binding: %+v", released)
+	}
+	if _, err := manager.ReceiverStatus(record.ID, joined.SeatToken, now.Add(ReceiverHeartbeatTimeout+3*time.Second)); err != nil {
+		t.Fatalf("page status did not restore the seat: %v", err)
+	}
+	start, err := manager.BeginTicketDelivery(record.ID, ticket, now.Add(ReceiverHeartbeatTimeout+4*time.Second))
+	if err != nil || start.Lease == nil {
+		t.Fatalf("same page ticket did not work after page recovery: %+v, %v", start, err)
+	}
+}
+
+func TestTicketRotationAndPageReleaseInvalidateOldTicket(t *testing.T) {
+	now := time.Now()
+	manager, record, _, joined := heldDeliveryFixture(t, now)
+	oldTicket, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	start, err := manager.BeginTicketDelivery(record.ID, oldTicket, now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	interrupted := make(chan struct{})
+	start.Lease.SetInterrupt(func() { close(interrupted) })
+	newTicket, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(2*time.Second))
+	if err != nil || newTicket == oldTicket {
+		t.Fatalf("ticket rotation = %q, %v", newTicket, err)
+	}
+	select {
+	case <-start.Lease.Context().Done():
+	case <-time.After(time.Second):
+		t.Fatal("ticket rotation did not cancel the old native response")
+	}
+	select {
+	case <-interrupted:
+	case <-time.After(time.Second):
+		t.Fatal("ticket rotation did not interrupt the old response writer")
+	}
+	if _, err := manager.BeginTicketDelivery(record.ID, newTicket, now.Add(3*time.Second)); err != ErrDeliveryBusy {
+		t.Fatalf("new ticket bypassed the unwinding old lease: %v", err)
+	}
+	if _, _, err := manager.FinishDelivery(start.Lease, start.ContentBytes, true, now.Add(4*time.Second)); err != ErrContentClosed {
+		t.Fatalf("cancelled old lease settled delivery: %v", err)
+	}
+	leaveID, err := NewRequestID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Leave(record.ID, leaveID, joined.SeatToken, now.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BeginTicketDelivery(record.ID, newTicket, now.Add(6*time.Second)); err != ErrUnauthorized {
+		t.Fatalf("ticket remained valid after page leave: %v", err)
+	}
+}
+
 func assertDeliveryClaimAndConcurrency(t *testing.T, manager *Manager, record Record, joined JoinResult, now time.Time) *DeliveryLease {
 	t.Helper()
 	if _, err := manager.BeginDelivery(record.ID, joined.SeatToken, "wrong-claim", now); err != ErrUnauthorized {
@@ -153,8 +287,21 @@ func TestKickCancelsActiveDeliveryAndIsBoundToItsSeat(t *testing.T) {
 		t.Fatalf("same kick retry did not replay: %v", err)
 	}
 	newJoinID, _ := NewRequestID()
-	if _, err := manager.Join(record.ID, "account:next", newJoinID, "next", now.Add(3*time.Second)); err != nil {
+	_, err = manager.Join(record.ID, "account:next", newJoinID, "next", now.Add(3*time.Second))
+	if err != nil {
 		t.Fatalf("kick did not release the seat: %v", err)
+	}
+	replacement, _ := manager.Get(record.ID)
+	if replacement.Seat == nil {
+		t.Fatal("replacement seat was not created")
+	}
+	replacementSeatID := replacement.Seat.SeatID
+	if _, _, err := manager.FinishDelivery(start.Lease, start.ContentBytes, true, now.Add(4*time.Second)); err != ErrContentClosed {
+		t.Fatalf("late kicked delivery settled after replacement seat joined: %v", err)
+	}
+	current, _ := manager.Get(record.ID)
+	if current.Seat == nil || current.Seat.SeatID != replacementSeatID || current.ContentState != ContentEmpty {
+		t.Fatalf("late old lease changed replacement seat/content: %+v", current)
 	}
 }
 

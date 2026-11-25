@@ -108,3 +108,16 @@
 - G1 的 `DELETE /api/v1/channels/:id` 只关闭空信道：要求该信道的 `sender_key`、同源校验和幂等键；create admission 与 close 共用串行锁。成功后删除信道及 create replay 结果、写入短期 closed-key tombstone 并清除 cookie。关闭重试返回 204；同一 create key 在 tombstone 有效期内返回 409，过期后才作为新建请求。
 - Create 限额只在新 channel 成功提交后计数；同 key 并发重试只计一次，创建失败不消耗额度。Manager 将 live channel 数与 closed-key tombstone 数合计限制在 `MaxChannelRecords` 内存边界内。
 - G2/G6 按 D6 增加仅清扫无内容、无占用且 sender 已离线/信道已终态的规则；不为腾位置驱逐活跃信道。
+
+## G5b：浏览器下载 ticket 与表示锁
+
+- `POST /api/v1/channels/:id/content/ticket` 使用 `seat_token` 与 `claim_token` header 签发当前 seat 的 browser-download ticket；同源校验与私有信道账号/download 权限逐请求复用内容下载规则。公开信道允许匿名，但仍须有效 seat/claim。每 seat 只保留一个有效 ticket；重签撤销旧 ticket。ticket 为 256-bit 随机 URL path capability；Manager 只保存 ticket hash 与 channel/seat generation 绑定，不持久化票据明文。
+- `GET /api/v1/channels/:id/content/download/:ticket` 只接受 ticket capability，不从 `sender_key`、普通 seat/claim header 或 `X-Channel` 降级授权。私有信道仍在每个 GET 校验登录与 download 权限；公开信道允许匿名，但 ticket 必须绑定当前 seat generation。响应设 `Cache-Control: no-store` 与 `Referrer-Policy: no-referrer`。访问日志使用路由模板，不记录实际 ticket 路径。
+- native attachment 输出为单文件原始内容，或现有 `zip-v1` ZIP；不得把 app 使用的 `multipart/form-data` 原样保存成下载文件。App 路径的 Range 字节空间仍是完整 multipart 响应；browser-attachment 路径以原始文件/ZIP 的实际字节为准。
+- Seat 的 delivery representation 初始为 unset；只有首个 GET 成功取得独占 `DeliveryLease` 时，Manager 才在同一锁内将它原子锁定为 `app-multipart` 或 `browser-attachment`。签票不锁模式。鉴权失败、内容未就绪、已有 lease 或模式冲突均不得改变模式/offset。首个 GET 一旦取得 lease，即使零字节失败也保留模式；重试、重签和暂态恢复不得清 offset 或改变同一内容版本的 ETag。跨表示请求返回 409 `delivery_mode_conflict`。
+- 每个表示分别遵守自身固定 total/ETag/Range 字节空间；Range 起点不得跳过尚未写出的前缀，delivery high-water 只按连续成功写出的字节推进。相同 seat 上 app GET 与 ticket GET 竞争同一个 `seat.delivery`，不允许并发写出。被取消的旧 lease 迟到 `FinishDelivery(complete=true)` 不得结算成功、删除当前内容、撤销新票或清除后续 lease。
+- 暂态 `released` 是 90 秒失活后的两分钟恢复窗口：保留 ticket、generation、representation 与 offset。ticket GET 返回 409 `delivery_not_ready`，不恢复 seat、不刷新活证据；同一接收页的 status/heartbeat 恢复到 paired 后，同一 URL 可按原表示继续。票据签发、验证、轮换都不刷新活证据；成功写出的字节沿用既有活证据规则。
+- 轮换 ticket 与 GET/lease 获取共享 Manager 串行化边界。若旧 ticket 正持有 native lease，先撤销旧票并 Cancel 在途 lease，但保留 mode/offset；旧 lease unwind 前，新 GET 返回 409 `delivery_busy`。若在途 lease 为 app-multipart，签票返回模式冲突且不得取消 app lease。leave/kick/close、交付完成与最终 seat 释放均撤票并取消在途响应；页面关闭/刷新通过非 bfcache pagehide 的 leave 立即触发此行为。ticket 不设置独立 heartbeat/lease。
+- `released` 暂态票据仍须通过当前 seat/claim/released 窗口与账号权限验证；实际已送达 `leave` 后旧票即失效。Pagehide 未送达时仍只走既定 90 秒活证据与两分钟释放兜底。公开票据是 bearer capability；P1a 不承诺通过 URL 识别具体浏览器标签页。
+- 撤票、取消响应、临时副本删除与 held 预算是不同结果。source/prepared 临时副本的预算仅在实际清理完成后释放；最终内容 Delete 失败时必须保留 pending release、held 预算并阻止重新装填，不能把 Cancel 当作 Delete 成功。
+- native GET 路由必须加入 `canonicalErrors` 流式旁路，不得缓冲完整响应。浏览器路径在接收页首次 GET 前选定；选定后不得跨表示切换。UI 明示“已交给浏览器，保持本页打开”；pagehide/leave 撤票并中断下载。桌面/移动下载、慢速 Range、轮换中断、pagehide 与反代 URI/referrer 日志作为 G5/G6 验收项。
