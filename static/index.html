@@ -208,6 +208,13 @@
                   >
                     <span data-i18n="send">生成链接</span>
                   </button>
+                  <button
+                    id="channel-armed-cancel"
+                    class="button quiet"
+                    type="button"
+                    data-i18n="channelCancelArmed"
+                    hidden
+                  >取消待发送</button>
                   <span class="shortcut" data-i18n="shortcut"
                     >Ctrl / ⌘ + Enter 发送</span
                   >
@@ -228,12 +235,20 @@
               <p id="channel-sender-state" class="channel-state"></p>
               <a id="channel-link" class="channel-link" href=""></a>
               <p id="channel-identity" class="channel-identity" hidden></p>
-              <div id="channel-decisions" class="channel-decisions" hidden>
-                <button id="channel-admit" class="button primary" type="button" data-i18n="channelAdmit">放行并发送</button>
-                <button id="channel-reject" class="button danger" type="button" data-i18n="channelReject">拒绝</button>
+              <section id="channel-snapshot" class="channel-snapshot" hidden aria-live="polite">
+                <p id="channel-snapshot-state" class="channel-snapshot-state"></p>
+                <p id="channel-snapshot-facts" class="channel-snapshot-facts"></p>
+                <p id="channel-snapshot-preview" class="channel-snapshot-preview"></p>
+              </section>
+              <div id="channel-actions" class="channel-actions">
+                <button id="channel-review" class="button primary" type="button" data-i18n="channelReviewRecipient" hidden>查看并决定</button>
+                <button id="channel-kick" class="button danger" type="button" data-i18n="channelKick" hidden>踢出并撤回本次</button>
+                <button id="channel-use-send" class="button secondary" type="button" data-i18n="channelUseForSend" hidden>使用此信道发送</button>
+                <button id="channel-use-share" class="button secondary" type="button" data-i18n="channelUseShare" hidden>切回普通分享</button>
+                <button id="channel-refresh" class="button quiet" type="button" data-i18n="channelRefresh" hidden>重试连接</button>
+                <button id="channel-copy" class="button secondary" type="button" data-i18n="channelCopy">复制接收链接</button>
+                <button id="channel-close" class="button danger" type="button" data-i18n="channelClose">撤回并关闭信道</button>
               </div>
-              <button id="channel-copy" class="button secondary" type="button" data-i18n="channelCopy">复制接收链接</button>
-              <button id="channel-close" class="button danger" type="button" data-i18n="channelClose">关闭信道</button>
             </section>
             <p id="channel-error" class="form-error" role="alert" hidden></p>
           </details>
@@ -357,6 +372,43 @@
       <span data-icon="attach"></span
       ><span data-i18n="drop">放下文件，添加到本次发送</span>
     </div>
+    <dialog id="channel-approval-dialog" class="channel-dialog" aria-labelledby="channel-approval-title">
+      <h2 id="channel-approval-title" data-i18n="channelApprovalTitle">确认接收方</h2>
+      <p id="channel-approval-identity" class="channel-identity"></p>
+      <p id="channel-approval-effect" class="hint" data-i18n="channelApprovalEffect">放行后，若内容已准备就会立即开始上传；否则会等待你发送。</p>
+      <div id="channel-approval-snapshot" class="channel-snapshot" hidden>
+        <p id="channel-approval-snapshot-state" class="channel-snapshot-state"></p>
+        <p id="channel-approval-snapshot-facts" class="channel-snapshot-facts"></p>
+        <p id="channel-approval-snapshot-preview" class="channel-snapshot-preview"></p>
+      </div>
+      <div class="channel-dialog-actions">
+        <button id="channel-approval-later" class="button quiet" type="button" data-i18n="channelApprovalLater">稍后</button>
+        <button id="channel-reject" class="button danger" type="button" data-i18n="channelReject">拒绝</button>
+        <button id="channel-admit" class="button primary" type="button" data-i18n="channelAdmit">放行</button>
+      </div>
+    </dialog>
+    <dialog id="channel-send-confirm-dialog" class="channel-dialog" aria-labelledby="channel-send-confirm-title">
+      <h2 id="channel-send-confirm-title" data-i18n="channelSendConfirmTitle">确认向匿名接收端发送</h2>
+      <p id="channel-send-confirm-identity" class="channel-identity"></p>
+      <p class="hint" data-i18n="channelSendConfirmEffect">信道已放行此接收方；确认后，下面这份内容会立即上传并交给当前接收方。</p>
+      <div id="channel-send-confirm-snapshot" class="channel-snapshot">
+        <p id="channel-send-confirm-snapshot-state" class="channel-snapshot-state"></p>
+        <p id="channel-send-confirm-facts" class="channel-snapshot-facts"></p>
+        <p id="channel-send-confirm-preview" class="channel-snapshot-preview"></p>
+      </div>
+      <div class="channel-dialog-actions">
+        <button id="channel-send-confirm-cancel" class="button quiet" type="button" data-i18n="channelSendConfirmCancel">取消本次发送</button>
+        <button id="channel-send-confirm-submit" class="button primary" type="button" data-i18n="channelSendConfirmSubmit">确认发送</button>
+      </div>
+    </dialog>
+    <dialog id="channel-action-dialog" class="channel-dialog" aria-labelledby="channel-action-title">
+      <h2 id="channel-action-title"></h2>
+      <p id="channel-action-description" class="hint"></p>
+      <div class="channel-dialog-actions">
+        <button id="channel-action-cancel" class="button quiet" type="button" data-i18n="cancel">取消</button>
+        <button id="channel-action-confirm" class="button danger" type="button"></button>
+      </div>
+    </dialog>
     <script type="module" src="/static/script.js?v={{.Version}}"></script>
     <script type="module" src="/static/channel-workspace.js?v={{.Version}}"></script>
   </body>

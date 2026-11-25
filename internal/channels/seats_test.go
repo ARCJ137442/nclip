@@ -150,6 +150,22 @@ func TestPendingAdmissionExpiresAndSenderHeartbeatCanRestoreJoinability(t *testi
 	}
 }
 
+func TestSenderBackgroundThrottleDoesNotMarkSenderOfflineEarly(t *testing.T) {
+	manager, record, _ := createChannelForJoinTest(t)
+	now := time.Now()
+
+	requestID, _ := NewRequestID()
+	if _, err := manager.Join(record.ID, "account:receiver", requestID, "receiver", now.Add(time.Minute)); err != nil {
+		t.Fatalf("sender should remain available across a one-minute background poll: %v", err)
+	}
+
+	manager, record, _ = createChannelForJoinTest(t)
+	requestID, _ = NewRequestID()
+	if _, err := manager.Join(record.ID, "account:receiver", requestID, "receiver", now.Add(SenderHeartbeatTimeout+time.Second)); err != ErrSenderOffline {
+		t.Fatalf("sender beyond heartbeat window = %v, want sender offline", err)
+	}
+}
+
 func TestLateDecisionForExpiredSeatCannotAdmitNextSeat(t *testing.T) {
 	manager, record, senderKey := createChannelForJoinTest(t)
 	now := time.Now()

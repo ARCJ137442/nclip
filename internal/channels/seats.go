@@ -10,7 +10,10 @@ import (
 )
 
 const (
-	SenderHeartbeatTimeout   = 30 * time.Second
+	// Background browser tabs may throttle timers to about once per minute.
+	// Keep the sender window above that cadence so a live sender is not
+	// declared offline between hidden-tab status polls.
+	SenderHeartbeatTimeout   = 90 * time.Second
 	ReceiverHeartbeatTimeout = 90 * time.Second
 	ChannelReleaseWindow     = 2 * time.Minute
 	PendingAdmissionWindow   = 2 * time.Minute

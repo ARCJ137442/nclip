@@ -62,6 +62,7 @@
 - 同信道不同 content-init key 在 `uploading` 或 `held` 状态返回 409。相同 init key 返回相同 upload session；finalize 重试返回同一结果。kick 重试保持已释放的 open 状态；close 重试保持 closed。channel lock 串行化 kick 与 close，close 是终态。
 - 信道没有产品 TTL。发送者离开后不接受新加入、不再上传；已有活跃占用继续由接收页和释放规则管理。重启清理所有孤儿信道文件，UI 明示信道不跨进程重启。
 - 接收页前台心跳 5 秒、隐藏页 30 秒；超过 90 秒无活证据才按崩溃/断网处理。存活页长暂停不自动释放，发送者可随时 kick。
+- 发送端状态读取超时为 90 秒，以容纳后台标签约每分钟一次的定时器节流；后台冻结更久仍可能被标记离线，页面恢复后状态轮询会重新确认。
 - 匿名放行窗 2 分钟；过期后释放 pending 席位。发送端离线时需其确认的 join 返回 410。
 - 页面关闭/刷新走非 bfcache `pagehide` 的 keepalive/beacon `leave`，立即释放并销毁临时内容。下载管理器随接收页终止，不允许 ticket lease 独立续命。同页网络中断恢复最多 2 分钟；leave、刷新或关闭后旧令牌失效。
 - 对相同幂等 key 的重试不重复计入 join rate limit。

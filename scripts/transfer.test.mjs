@@ -11,8 +11,11 @@ import {
   requestStream,
   requestBytes,
   RequestError,
+  CHANNEL_UPLOAD_CHUNK_BYTES,
+  createChannelUploadState,
+  uploadChannelContent,
 } from "../static/share-api.js";
-import { clampTTLHours, safePreview } from "../static/handoff.js";
+import { clampTTLHours, previewForItem, safePreview } from "../static/handoff.js";
 import { normalizePreferences } from "../static/preferences.js";
 
 test("percentOf needs a total and clamps the range", () => {
@@ -51,6 +54,113 @@ test("preferences validate sticky share settings without persisting content", ()
   );
 });
 
+test("channel upload manifest records stable part keys and declared byte sizes", () => {
+  let nextID = 0;
+  const state = createChannelUploadState([
+    {
+      kind: "clipboard",
+      name: "note",
+      parts: [
+        { mime: "text/plain", blob: new Blob(["hello"]) },
+        { mime: "text/html", blob: new Blob(["<b>hello</b>"]) },
+      ],
+    },
+  ], () => `request-${++nextID}`);
+  assert.deepEqual(state.manifest, {
+    version: 1,
+    items: [{
+      kind: "clipboard",
+      name: "note",
+      parts: [
+        { key: "p0", mime: "text/plain", size: 5 },
+        { key: "p1", mime: "text/html", size: 12 },
+      ],
+    }],
+  });
+  assert.equal(state.totalBytes, 17);
+  assert.equal(state.initRequestID, "request-1");
+  assert.equal(state.finalizeRequestID, "request-2");
+  assert.equal(CHANNEL_UPLOAD_CHUNK_BYTES, 4 * 1024 * 1024);
+});
+
+test("channel chunk retries replay the same offset and digest without duplicate bytes", async () => {
+  const originalXHR = globalThis.XMLHttpRequest;
+  const accepted = new Set();
+  const chunkRequests = [];
+  let lostResponse = true;
+  const fetchCalls = [];
+
+  class FakeXMLHttpRequest {
+    constructor() {
+      this.listeners = new Map();
+      this.upload = { listeners: new Map(), addEventListener: (name, listener) => this.upload.listeners.set(name, listener) };
+      this.requestHeaders = new Headers();
+      this.responseHeaders = new Headers();
+      this.status = 0;
+      this.responseText = "";
+    }
+    open(method, url) { this.method = method; this.url = url; }
+    setRequestHeader(name, value) { this.requestHeaders.set(name, value); }
+    addEventListener(name, listener) { this.listeners.set(name, listener); }
+    getResponseHeader(name) { return this.responseHeaders.get(name); }
+    dispatch(target, name, event = {}) { target.get(name)?.(event); }
+    send(blob) {
+      const offset = this.requestHeaders.get("Upload-Offset");
+      const hash = this.requestHeaders.get("X-Chunk-SHA256");
+      const replayKey = `${offset}:${hash}`;
+      const replayed = accepted.has(replayKey);
+      accepted.add(replayKey);
+      chunkRequests.push({ offset, hash, replayed, size: blob.size });
+      queueMicrotask(() => {
+        this.dispatch(this.upload.listeners, "progress", { loaded: blob.size, lengthComputable: true });
+        if (lostResponse) {
+          lostResponse = false;
+          this.dispatch(this.listeners, "error");
+          return;
+        }
+        this.status = 204;
+        this.responseHeaders.set("X-Chunk-Replayed", String(replayed));
+        this.dispatch(this.listeners, "load");
+      });
+    }
+    abort() { this.dispatch(this.listeners, "abort"); }
+  }
+
+  globalThis.XMLHttpRequest = FakeXMLHttpRequest;
+  try {
+    const state = createChannelUploadState([
+      { kind: "file", name: "payload.bin", parts: [{ mime: "application/octet-stream", blob: new Blob(["payload"]) }] },
+    ], (() => { let id = 0; return () => `request-${++id}`; })());
+    await withFetch(async (url, options = {}) => {
+      fetchCalls.push({ url, method: options.method || "GET", headers: new Headers(options.headers || {}) });
+      if (url.endsWith("/finalize"))
+        return new Response(JSON.stringify({ state: "held" }), { status: 201, headers: { "Content-Type": "application/json" } });
+      return new Response(JSON.stringify({ upload_id: "upload-session" }), { status: 201, headers: { "Content-Type": "application/json" } });
+    }, async () => {
+      await assert.rejects(
+        uploadChannelContent("channel-id", state, { "X-Api-Key": "test" }),
+        (error) => error instanceof RequestError && error.message === "network",
+      );
+      assert.equal(state.uploadID, "upload-session");
+      assert.equal(state.offsets.get("p0"), 0);
+      const completed = await uploadChannelContent("channel-id", state, { "X-Api-Key": "test" });
+      assert.deepEqual(completed, { state: "held" });
+    });
+
+    assert.equal(fetchCalls.filter((call) => call.method === "POST" && call.url.endsWith("/content")).length, 1);
+    assert.equal(fetchCalls.filter((call) => call.url.endsWith("/finalize")).length, 1);
+    assert.equal(chunkRequests.length, 2);
+    assert.equal(chunkRequests[0].offset, "0");
+    assert.equal(chunkRequests[1].offset, "0");
+    assert.equal(chunkRequests[0].hash, chunkRequests[1].hash);
+    assert.equal(chunkRequests[0].replayed, false);
+    assert.equal(chunkRequests[1].replayed, true);
+    assert.equal(state.offsets.get("p0"), 7);
+  } finally {
+    globalThis.XMLHttpRequest = originalXHR;
+  }
+});
+
 test("sender preview normalizes lines, truncates by rune, and suppresses secrets", () => {
   const preview = safePreview("第一行\r\n第二行\t还有内容和尾部");
   assert.equal(preview, "第一行 第二行 还有内容和尾部");
@@ -64,6 +174,13 @@ test("sender preview normalizes lines, truncates by rune, and suppresses secrets
     "-----BEGIN " + "PRIVATE KEY-----",
     "AbCdEf0123456789AbCdEf0123456789",
   ]) assert.equal(safePreview(secret), "");
+});
+
+test("sender preview matches the server clipboard-only rule", async () => {
+  const plain = { mime: "text/plain", blob: new Blob(["hello\nrecipient"]) };
+  assert.equal(await previewForItem({ kind: "clipboard", parts: [plain] }), "hello recipient");
+  assert.equal(await previewForItem({ kind: "file", parts: [plain] }), "");
+  assert.equal(await previewForItem({ kind: "clipboard", parts: [{ mime: "text/html", blob: new Blob(["<b>secret</b>"]) }] }), "");
 });
 
 test("createProgress samples the rate and estimates the remainder", () => {

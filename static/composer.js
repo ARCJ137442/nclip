@@ -10,9 +10,17 @@ import {
   copyText,
   draggedLinks,
 } from "./clipboard.js";
-import { request, uploadShare, encodeShare } from "./share-api.js";
+import {
+  abortChannelContent,
+  createChannelUploadState,
+  request,
+  uploadChannelContent,
+  uploadShare,
+  encodeShare,
+} from "./share-api.js";
 import { createProgress, timeParts, transferStages } from "./transfer.js";
-import { clampTTLHours, safePreview } from "./handoff.js";
+import { clampTTLHours, previewForItem } from "./handoff.js";
+import { getChannelSession, setChannelArmed, subscribeChannelSession, updateChannelSession } from "./channel-session.js";
 
 export async function startComposer() {
   const editor = $("message");
@@ -34,7 +42,11 @@ export async function startComposer() {
     sentLedger = [],
     configFailure = null,
     summaryRevision = 0,
-    lastCopiedURL = "";
+    lastCopiedURL = "",
+    channelState = getChannelSession(),
+    armedChannelAttempt = null,
+    sendConfirmationSeatID = "",
+    channelSnapshotRevision = 0;
   function draft() {
     return [
       ...(editor.value.length ? [rich || textItem(editor.value)] : []),
@@ -173,13 +185,16 @@ export async function startComposer() {
             : "transferUnconfirmed"
           : "transferFailed",
       );
-      $("transfer-note").textContent = t(
-        fullySent
-          ? error?.status
-            ? "transferRejectedNote"
-            : "transferUnconfirmedNote"
-          : "transferFailedNote",
-      );
+      const channelTransfer = lastAttempt?.destination?.type === "channel";
+      $("transfer-note").textContent = channelTransfer
+        ? t(fullySent && !error?.status ? "channelFinalizeRetryNote" : "channelUploadRetry")
+        : t(
+          fullySent
+            ? error?.status
+              ? "transferRejectedNote"
+              : "transferUnconfirmedNote"
+            : "transferFailedNote",
+        );
     }
     // Only a fully handed-off body can have reached the server.
     if (phase === "canceled") {
@@ -297,15 +312,151 @@ export async function startComposer() {
     if (item.parts.some((part) => part.mime === "text/html")) return t("rich");
     return t("text");
   }
-  async function itemPreview(item) {
-    const plain = item.parts.find((part) => part.mime === "text/plain");
-    if (!plain) return "";
-    try {
-      // Match the server's bounded preview source exactly (spool head = 512 bytes).
-      return safePreview(await plain.blob.slice(0, 512).text());
-    } catch {
-      return "";
+  function channelTargetActive() {
+    return !!channelState.channelId && channelState.sendTarget === "channel";
+  }
+  function updateSendDestination() {
+    const inChannel = channelTargetActive();
+    document.body.dataset.sendDestination = inChannel ? "channel" : "share";
+    const label = $("send").querySelector("span[data-i18n]");
+    const sendKey = inChannel
+      ? channelState.seat?.state === "paired" ? "channelSend" : "channelArmWait"
+      : "send";
+    label.dataset.i18n = sendKey;
+    label.textContent = t(sendKey);
+    $("channel-armed-cancel").hidden = !armedChannelAttempt || sending;
+    if (inChannel && channelState.contentState === "held") {
+      $("send").disabled = true;
+      label.dataset.i18n = "channelSendComplete";
+      label.textContent = t("channelSendComplete");
+    } else if (inChannel && channelState.contentState === "uploading" && !sending) {
+      $("send").disabled = true;
+      label.dataset.i18n = "channelContentUploading";
+      label.textContent = t("channelContentUploading");
+    } else if (inChannel && channelState.armed && !sending) {
+      $("send").disabled = true;
+      label.dataset.i18n = "channelArmWait";
+      label.textContent = t("channelArmWait");
+    } else if (!sending && config) {
+      $("send").disabled = false;
     }
+    void updateSendSummary();
+  }
+  async function renderChannelSnapshot(items, armed = true) {
+    const revision = ++channelSnapshotRevision;
+    const facts = t("channelSnapshotFacts", {
+      count: items.length,
+      size: sizeLabel(draftBytes(items)),
+    });
+    const previews = await Promise.all(items.map(previewForItem));
+    if (revision !== channelSnapshotRevision) return;
+    const preview = previews.map((value) => value
+      ? `${t("receiverPreviewLabel")}: ${value}`
+      : t("previewOmitted")).join(" · ");
+    for (const id of ["channel-snapshot", "channel-approval-snapshot", "channel-send-confirm-snapshot"]) {
+      const root = $(id);
+      if (!root) continue;
+      root.hidden = !armed;
+      root.querySelector(".channel-snapshot-state").textContent = t("channelSnapshotArmed");
+      root.querySelector(".channel-snapshot-facts").textContent = facts;
+      root.querySelector(".channel-snapshot-preview").textContent = preview;
+    }
+  }
+  function setChannelSnapshotState(key) {
+    for (const id of ["channel-snapshot", "channel-approval-snapshot", "channel-send-confirm-snapshot"]) {
+      const node = $(`${id}-state`);
+      if (node) node.textContent = key ? t(key) : "";
+    }
+  }
+  function clearChannelSnapshot() {
+    channelSnapshotRevision++;
+    for (const id of ["channel-snapshot", "channel-approval-snapshot", "channel-send-confirm-snapshot"]) {
+      const root = $(id);
+      if (!root) continue;
+      root.hidden = true;
+      root.querySelector(".channel-snapshot-state").textContent = "";
+      root.querySelector(".channel-snapshot-facts").textContent = "";
+      root.querySelector(".channel-snapshot-preview").textContent = "";
+    }
+  }
+  function clearArmedChannelAttempt(messageKey = "") {
+    armedChannelAttempt = null;
+    setChannelArmed(false);
+    clearChannelSnapshot();
+    if (messageKey) status(messageKey, "error");
+  }
+  function maybeStartArmedChannelUpload() {
+    const current = channelState;
+    const armed = armedChannelAttempt;
+    const seatID = current.seat?.seat_id || "";
+    if (
+      !armed || !channelTargetActive() || sending || !seatID ||
+      current.channelId !== armed.channelId ||
+      current.seat.state !== "paired" || current.contentState !== "empty" ||
+      armed.startedSeatIDs.has(seatID)
+    ) return;
+    if (current.seat.anonymous && !armed.confirmedSeatIDs.has(seatID)) return;
+    armed.startedSeatIDs.add(seatID);
+    armed.destination = { type: "channel", channelId: current.channelId, seatID };
+    armed.channelUploadState ||= createChannelUploadState(armed.items);
+    void runUpload(armed.items, armed.revision, armed);
+  }
+  function handleChannelSession(next) {
+    const previousSeatID = channelState.seat?.seat_id || "";
+    const previousSeatState = channelState.seat?.state || "";
+    const previousContentState = channelState.contentState;
+    const nextSeatID = next.seat?.seat_id || "";
+    const previousChannelID = channelState.channelId;
+    channelState = next;
+    if (
+      armedChannelAttempt && previousSeatState === "pending_admit" &&
+      next.seat?.state === "paired" && nextSeatID === previousSeatID &&
+      next.sendTarget === "channel"
+    ) armedChannelAttempt.confirmedSeatIDs.add(nextSeatID);
+    if (sendConfirmationSeatID && (next.sendTarget !== "channel" || nextSeatID !== sendConfirmationSeatID || next.seat?.state !== "paired")) {
+      $("channel-send-confirm-dialog").close("recipient-changed");
+      sendConfirmationSeatID = "";
+      clearArmedChannelAttempt("channelRecipientChanged");
+    }
+    updateSendDestination();
+    if (
+      armedChannelAttempt && previousSeatID && previousSeatID !== nextSeatID &&
+      armedChannelAttempt.startedSeatIDs.has(previousSeatID)
+    ) {
+      if (sending) transferController?.abort();
+      if (lastAttempt?.destination?.type === "channel") lastAttempt = null;
+      clearArmedChannelAttempt("channelRecipientChanged");
+    }
+    if (armedChannelAttempt && (!next.channelId || next.channelId !== armedChannelAttempt.channelId || next.channelState === "closed")) {
+      if (sending) transferController?.abort();
+      if (lastAttempt?.destination?.type === "channel") lastAttempt = null;
+      clearArmedChannelAttempt(next.channelId ? "channelArmedLost" : "channelSendCanceled");
+      return;
+    }
+    if (!next.channelId && previousChannelID && lastAttempt?.destination?.type === "channel" && lastAttempt.destination.channelId === previousChannelID) {
+      if (sending) transferController?.abort();
+      lastAttempt = null;
+      if (!sending) $("transfer").hidden = true;
+    }
+    if (!next.channelId) clearChannelSnapshot();
+    else if (!$("channel-snapshot").hidden && next.contentState === "held") setChannelSnapshotState("channelSnapshotHeld");
+    else if (!$("channel-snapshot").hidden && next.contentState === "uploading") setChannelSnapshotState("channelSnapshotUploading");
+    else if (!$("channel-snapshot").hidden && previousContentState === "held" && next.contentState === "empty") setChannelSnapshotState("channelSnapshotReleased");
+    else if (!$("channel-snapshot").hidden && previousContentState === "uploading" && next.contentState === "empty") setChannelSnapshotState("channelUploadRetry");
+    maybeStartArmedChannelUpload();
+  }
+  function openChannelSendConfirmation(attempt, seat) {
+    sendConfirmationSeatID = seat.seat_id;
+    $("channel-send-confirm-identity").textContent = recipientLabel(seat);
+    const dialog = $("channel-send-confirm-dialog");
+    if (!dialog.open) dialog.showModal();
+    void renderChannelSnapshot(attempt.items);
+  }
+  function recipientLabel(seat) {
+    const joined = new Date(seat.joined_at).toLocaleTimeString(document.documentElement.lang);
+    return seat.anonymous
+      ? t("channelPendingAnonymous", { time: joined })
+      : t("channelPendingUser", { name: "@" + seat.identity, time: joined });
   }
   function currentTTL() {
     const min = Math.ceil((config?.ttl_min_seconds ?? 3600) / 3600);
@@ -314,20 +465,25 @@ export async function startComposer() {
   }
   async function updateSendSummary(items = draft(), size = draftBytes(items), max = config?.upload_max_bytes || 0) {
     const previewVersion = ++summaryRevision;
-    const hours = currentTTL() ?? preferences.ttlHours ?? 24;
-    const accessText = $("public-share").checked ? t("summaryPublic") : t("summaryPrivate");
-    const facts = [
-      t(items.length === 1 ? "draftItemsOne" : "draftItemsMany", { count: items.length }),
-      sizeLabel(size),
-      t("ttlAfter", { hours }),
-      accessText,
-      ...($("burn").checked ? [t("summaryBurn")] : []),
-    ];
+    const facts = channelTargetActive()
+      ? [
+        t(items.length === 1 ? "draftItemsOne" : "draftItemsMany", { count: items.length }),
+        sizeLabel(size),
+        t(channelState.visibility === "public" ? "channelPublic" : "summaryPrivate"),
+        channelState.seat?.state === "paired" ? t("channelSendReady") : t("channelSnapshotWaiting"),
+      ]
+      : [
+        t(items.length === 1 ? "draftItemsOne" : "draftItemsMany", { count: items.length }),
+        sizeLabel(size),
+        t("ttlAfter", { hours: currentTTL() ?? preferences.ttlHours ?? 24 }),
+        $("public-share").checked ? t("summaryPublic") : t("summaryPrivate"),
+        ...($("burn").checked ? [t("summaryBurn")] : []),
+      ];
     if (max > 0 && size > max) facts.push(t("draftOverBy", { size: sizeLabel(size - max) }));
     const summary = $("send-summary");
     if (!summary) return;
     summary.textContent = facts.join(" · ");
-    const previews = await Promise.all(items.map(itemPreview));
+    const previews = await Promise.all(items.map(previewForItem));
     if (previewVersion !== summaryRevision) return;
     $("send-summary-preview").textContent = previews
       .map((preview) => preview
@@ -420,7 +576,7 @@ export async function startComposer() {
     resultMessage = key;
     $("result-message").textContent = t(key);
   }
-  async function runUpload(items, revision = draftRevision) {
+  async function runUpload(items, revision = draftRevision, previousAttempt = null) {
     if (sending) return;
     if (!items.length) {
       status("empty", "error");
@@ -435,8 +591,14 @@ export async function startComposer() {
       status("tooMany", "error", { count: config.max_items });
       return;
     }
-    const ttlHours = currentTTL();
-    if (ttlHours == null) {
+    const destination = previousAttempt?.destination || (channelTargetActive()
+      ? { type: "channel", channelId: channelState.channelId, seatID: channelState.seat?.seat_id || "" }
+      : { type: "share" });
+    const channelUploadState = previousAttempt?.channelUploadState || (destination.type === "channel"
+      ? createChannelUploadState(items)
+      : null);
+    const ttlHours = destination.type === "channel" ? null : currentTTL();
+    if (destination.type === "share" && ttlHours == null) {
       $("ttl-error").textContent = t("ttlInvalid");
       $("ttl-error").hidden = false;
       $("ttl-hours").focus();
@@ -453,10 +615,10 @@ export async function startComposer() {
       status("tooLarge", "error", { size: sizeLabel(config.upload_max_bytes) });
       return;
     }
-    const form = encodeShare(items);
+    const form = destination.type === "share" ? encodeShare(items) : null;
     // The revision travels with the snapshot so a retry can tell whether the
     // draft still holds exactly the content being sent.
-    lastAttempt = { items, revision };
+    lastAttempt = { items, revision, destination, channelUploadState };
     fullySent = false;
     transferFailure = null;
     attempt++;
@@ -488,7 +650,44 @@ export async function startComposer() {
     transferController = controller;
     let painted = 0;
     try {
-      const result = await uploadShare(
+      const onProgress = ({ loaded, total }) => {
+        const at = performance.now();
+        if (loaded < total && at - painted < 100) return;
+        painted = at;
+        paintTransfer(clock.update(loaded, total));
+        if (total > 0 && loaded >= total && !fullySent) {
+          fullySent = true;
+          setTransferPhase("saving");
+        }
+      };
+      let result;
+      if (destination.type === "channel") {
+        const state = getChannelSession();
+        if (state.channelId !== destination.channelId || state.seat?.state !== "paired" || state.seat.seat_id !== destination.seatID) {
+          throw new Error("channel_recipient_changed");
+        }
+        if (state.contentState === "held") throw new Error("channel_content_held");
+        if (state.contentState === "uploading" && !channelUploadState.uploadID) throw new Error("channel_upload_in_progress");
+        result = await uploadChannelContent(destination.channelId, channelUploadState, authHeaders(), {
+          signal: controller.signal,
+          onProgress,
+          onSaving: () => {
+            if (!fullySent) fullySent = true;
+            setTransferPhase("saving");
+          },
+        });
+        if (result?.state !== "held") throw new Error("channel_finalize_unconfirmed");
+        setChannelArmed(false);
+        armedChannelAttempt = null;
+        lastAttempt = null;
+        updateChannelSession({ contentState: "held" });
+        $("transfer").hidden = true;
+        status("channelSendComplete", "success");
+        window.dispatchEvent(new Event("channelrefresh"));
+        return;
+      }
+
+      result = await uploadShare(
         form,
         {
           ...authHeaders(),
@@ -500,19 +699,7 @@ export async function startComposer() {
             ? { "X-TTL": `${ttlHours}h` }
             : {}),
         },
-        {
-          signal: controller.signal,
-          onProgress: ({ loaded, total }) => {
-            const at = performance.now();
-            if (loaded < total && at - painted < 100) return;
-            painted = at;
-            paintTransfer(clock.update(loaded, total));
-            if (total > 0 && loaded >= total && !fullySent) {
-              fullySent = true;
-              setTransferPhase("saving");
-            }
-          },
-        },
+        { signal: controller.signal, onProgress },
       );
       if (!result?.url) throw new Error("failed");
       const resultSlug = result.slug || new URL(result.url, location.href).pathname.slice(1);
@@ -554,34 +741,103 @@ export async function startComposer() {
         setResultMessage("sentBackground");
         status("sent", "success");
       } else {
-        $("composer").hidden = true;
+        const keepChannelControls = !!channelState.channelId;
+        $("composer").hidden = !keepChannelControls;
+        if (keepChannelControls) $("new-share").hidden = false;
         setResultMessage("sentManual");
-        $("result").focus({ preventScroll: true });
+        if (!keepChannelControls) $("result").focus({ preventScroll: true });
         status("sent", "success");
         await copyLink();
       }
     } catch (error) {
       if (error.message === "aborted") {
+        if (destination.type === "channel" && channelUploadState) {
+          let cleanupConfirmed = false;
+          try {
+            await abortChannelContent(destination.channelId, channelUploadState, authHeaders());
+            cleanupConfirmed = true;
+          } catch {
+            if (["channel_not_found", "content_closed"].includes(error.message)) cleanupConfirmed = true;
+          }
+          if (!cleanupConfirmed) {
+            transferFailure = new Error("channel_cancel_unconfirmed");
+            setTransferPhase("error", transferFailure);
+            status("channelCancelFailed", "error");
+            return;
+          }
+          armedChannelAttempt = null;
+          lastAttempt = null;
+          setChannelArmed(false);
+          clearChannelSnapshot();
+          updateChannelSession({ contentState: "empty" });
+          window.dispatchEvent(new Event("channelrefresh"));
+        }
         setTransferPhase("canceled");
         status("transferCanceled", "error");
+      } else if (["channel_recipient_changed", "channel_content_held", "channel_upload_in_progress", "channel_finalize_unconfirmed"].includes(error.message)) {
+        transferFailure = error;
+        setTransferPhase("error", error);
+        status(error.message, "error");
       } else {
         transferFailure = error;
+        if (destination.type === "channel") setChannelSnapshotState("channelUploadRetry");
         setTransferPhase("error", error);
         failure(error, config);
       }
     } finally {
       transferController = null;
       sending = false;
-      $("send").disabled = false;
       $("send-candidate").disabled = false;
       $("send").removeAttribute("aria-busy");
+      updateSendDestination();
     }
   }
   async function send(useCandidate = false) {
     if (sending) return;
-    await runUpload(
-      useCandidate ? candidate : draft().length ? draft() : candidate,
-    );
+    const items = useCandidate ? candidate : draft().length ? draft() : candidate;
+    if (channelTargetActive()) {
+      if (!items.length) {
+        status("empty", "error");
+        editor.focus();
+        return;
+      }
+      if (!config) {
+        status("receiveConfigUnavailable", "error");
+        return;
+      }
+      if (items.length > config.max_items) {
+        status("tooMany", "error", { count: config.max_items });
+        return;
+      }
+      const contentBytes = draftBytes(items);
+      if (contentBytes > config.upload_max_bytes) {
+        status("tooLarge", "error", { size: sizeLabel(config.upload_max_bytes) });
+        return;
+      }
+      if (channelState.contentState === "held" || channelState.contentState === "uploading") {
+        status(channelState.contentState === "held" ? "channelContentHeld" : "channelContentUploading", "error");
+        return;
+      }
+      if (!armedChannelAttempt) {
+        armedChannelAttempt = {
+          items,
+          revision: draftRevision,
+          channelId: channelState.channelId,
+          startedSeatIDs: new Set(),
+          confirmedSeatIDs: new Set(),
+        };
+        setChannelArmed(true);
+        void renderChannelSnapshot(items);
+      }
+      if (
+        channelState.seat?.state === "paired" && channelState.seat.anonymous &&
+        !armedChannelAttempt.confirmedSeatIDs.has(channelState.seat.seat_id)
+      ) openChannelSendConfirmation(armedChannelAttempt, channelState.seat);
+      else maybeStartArmedChannelUpload();
+      if (!channelState.seat) status("channelArmed", "success");
+      return;
+    }
+    await runUpload(items);
   }
   editor.addEventListener("input", () => {
     rich = null;
@@ -609,12 +865,62 @@ export async function startComposer() {
   });
   $("send").addEventListener("click", () => send());
   $("send-candidate").addEventListener("click", () => send(true));
+  $("channel-send-confirm-cancel").addEventListener("click", () => {
+    $("channel-send-confirm-dialog").close("cancelled");
+    sendConfirmationSeatID = "";
+    clearArmedChannelAttempt();
+    status("channelSendCanceled", "error");
+  });
+  $("channel-send-confirm-dialog").addEventListener("cancel", () => {
+    sendConfirmationSeatID = "";
+    clearArmedChannelAttempt();
+  });
+  $("channel-send-confirm-submit").addEventListener("click", () => {
+    const session = getChannelSession();
+    const seat = session.seat;
+    if (
+      !armedChannelAttempt || session.channelId !== armedChannelAttempt.channelId ||
+      session.sendTarget !== "channel" || seat?.state !== "paired" ||
+      seat.seat_id !== sendConfirmationSeatID
+    ) {
+      $("channel-send-confirm-dialog").close("recipient-changed");
+      sendConfirmationSeatID = "";
+      clearArmedChannelAttempt("channelRecipientChanged");
+      return;
+    }
+    armedChannelAttempt.confirmedSeatIDs.add(seat.seat_id);
+    $("channel-send-confirm-dialog").close("confirmed");
+    sendConfirmationSeatID = "";
+    maybeStartArmedChannelUpload();
+  });
+  $("channel-armed-cancel").addEventListener("click", async () => {
+    if (sending) {
+      transferController?.abort();
+      return;
+    }
+    if (lastAttempt?.destination?.type === "channel") {
+      try {
+        await abortChannelContent(
+          lastAttempt.destination.channelId,
+          lastAttempt.channelUploadState,
+          authHeaders(),
+        );
+      } catch {
+        status("channelCancelFailed", "error");
+        return;
+      }
+      lastAttempt = null;
+    }
+    clearArmedChannelAttempt();
+    status("channelSendCanceled", "error");
+    window.dispatchEvent(new Event("channelrefresh"));
+  });
   $("transfer-cancel").addEventListener("click", () =>
     transferController?.abort(),
   );
   $("transfer-retry").addEventListener("click", () => {
     if (!sending && lastAttempt)
-      void runUpload(lastAttempt.items, lastAttempt.revision);
+      void runUpload(lastAttempt.items, lastAttempt.revision, lastAttempt);
   });
   $("transfer-dismiss").addEventListener("click", () => {
     $("transfer").hidden = true;
@@ -830,6 +1136,8 @@ export async function startComposer() {
         transferFailure,
       );
   });
+  subscribeChannelSession(handleChannelSession);
+  updateSendDestination();
   async function loadConfig() {
     $("config-retry").disabled = true;
     try {
@@ -847,7 +1155,7 @@ export async function startComposer() {
       $("public-option").hidden = !access.enabled || !can("upload");
       $("public-share").checked = access.enabled && can("upload") && !!preferences.public;
       updateLimits();
-      $("send").disabled = false;
+      updateSendDestination();
       $("config-recovery").hidden = true;
       await probe(true);
     } catch (error) {

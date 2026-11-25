@@ -14,3 +14,16 @@ export function safePreview(text, limit = 24) {
   }
   return Array.from(text.replace(/[\p{Cc}\s]+/gu, " ").trim()).slice(0, limit).join("");
 }
+
+// The server derives previews only for clipboard objects with a plain-text part.
+// Keep the sender summary on the same rule and inspect the same bounded prefix.
+export async function previewForItem(item) {
+  if (item?.kind !== "clipboard") return "";
+  const plain = item.parts?.find((part) => part.mime === "text/plain");
+  if (!plain?.blob) return "";
+  try {
+    return safePreview(await plain.blob.slice(0, 512).text());
+  } catch {
+    return "";
+  }
+}

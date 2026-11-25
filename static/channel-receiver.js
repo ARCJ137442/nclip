@@ -198,7 +198,8 @@ if (page) {
       responseComplete = true;
       setStage("verifying");
       document.querySelector("#channel-receive-phase").textContent = t("channelVerifyResponse");
-      await new Promise((resolve) => requestAnimationFrame(resolve));
+      if (!document.hidden)
+        await new Promise((resolve) => requestAnimationFrame(resolve));
       const body = new Blob([...retained, ...chunks], { type: transfer.contentType });
       const decoded = await decodeShare(new Response(body, { headers: { "Content-Type": transfer.contentType } }));
       retained = [];
