@@ -86,7 +86,9 @@ func (h *ChannelHandler) ContentTicketDownload(c *gin.Context) {
 	defer stopRequestCancel()
 
 	paste, err := h.shares.service.GetPaste(start.Slug)
-	if err != nil || !paste.IsEphemeral() || paste.EphemeralChannelID != lease.ChannelID || paste.Size != start.ContentBytes {
+	// ContentBytes is the logical upload size. A zip-v1 attachment uses the
+	// immutable stored ZIP's size, including archive headers and compression.
+	if err != nil || !paste.IsEphemeral() || paste.EphemeralChannelID != lease.ChannelID {
 		_, _, _ = h.manager.FinishDelivery(lease, start.ContentBytes, false, time.Now())
 		if err == nil {
 			err = storage.ErrNotFound

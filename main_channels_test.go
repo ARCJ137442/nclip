@@ -1,6 +1,7 @@
 package main
 
 import (
+	"archive/zip"
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
@@ -24,6 +25,58 @@ import (
 	"github.com/johnwmail/nclip/models"
 	"github.com/johnwmail/nclip/storage"
 )
+
+func TestNativeZIPUsesStoredArchiveByteSpace(t *testing.T) {
+	router, store, _ := shareTestRouterWithStore(t, 8<<20, false)
+	f := createAdmittedChannelFixture(t, router)
+	f.router, f.store = router, store
+	f.contentPath = "/api/v1/channels/" + f.channelID + "/content"
+	uploadChannelFixtureContent(t, f, []byte("one"), []byte("two"))
+	ticket := channelRequestWithCookies(router, http.MethodPost, f.contentPath+"/ticket", nil, nil, map[string]string{"X-Nclip-Seat-Token": f.seatToken, "X-Nclip-Claim-Token": f.claimToken, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin"})
+	var body struct {
+		URL string `json:"download_url"`
+	}
+	if ticket.Code != http.StatusCreated || json.Unmarshal(ticket.Body.Bytes(), &body) != nil {
+		t.Fatalf("ticket: %d", ticket.Code)
+	}
+	response := channelRequestWithCookies(router, http.MethodGet, body.URL, nil, nil, nil)
+	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/zip" {
+		t.Fatalf("ZIP download: %d %s", response.Code, response.Body.String())
+	}
+	archive, err := zip.NewReader(bytes.NewReader(response.Body.Bytes()), int64(response.Body.Len()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(archive.File) != 3 {
+		t.Fatalf("ZIP entries: %d", len(archive.File))
+	}
+	var contents []string
+	for _, file := range archive.File {
+		if file.Name == "manifest.json" {
+			continue
+		}
+		r, err := file.Open()
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, err := io.ReadAll(r)
+		_ = r.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		contents = append(contents, string(data))
+	}
+	if strings.Join(contents, ",") != "one,two" {
+		t.Fatalf("ZIP payloads: %v", contents)
+	}
+	if response.Header().Get("Content-Length") != strconv.Itoa(response.Body.Len()) {
+		t.Fatal("ZIP length differs from actual bytes")
+	}
+	remaining, err := store.ListEphemeralPastes()
+	if err != nil || len(remaining) != 0 {
+		t.Fatal("completed ZIP retained content", err)
+	}
+}
 
 func channelCreateRequest(router http.Handler, requestID string, headers map[string]string) *httptest.ResponseRecorder {
 	if headers == nil {
@@ -1400,11 +1453,12 @@ func createAdmittedChannelFixture(t *testing.T, router http.Handler) channelDeli
 	return fixture
 }
 
-func uploadChannelFixtureContent(t *testing.T, fixture channelDeliveryFixture, payload []byte) {
+func uploadChannelFixtureContent(t *testing.T, fixture channelDeliveryFixture, payloads ...[]byte) {
 	t.Helper()
-	manifest := models.ShareManifest{Version: 1, Items: []models.ShareItem{{
-		Kind: "file", Name: "payload.txt", Parts: []models.SharePart{{Key: "part1", MIME: "application/octet-stream", Size: int64(len(payload))}},
-	}}}
+	manifest := models.ShareManifest{Version: 1}
+	for i, payload := range payloads {
+		manifest.Items = append(manifest.Items, models.ShareItem{Kind: "file", Name: fmt.Sprintf("payload%d.txt", i), Parts: []models.SharePart{{Key: fmt.Sprintf("part%d", i+1), MIME: "application/octet-stream", Size: int64(len(payload))}}})
+	}
 	manifestBody, _ := json.Marshal(gin.H{"manifest": manifest})
 	init := channelRequestWithCookie(fixture.router, http.MethodPost, fixture.contentPath, manifestBody, fixture.senderCookie, map[string]string{
 		"Content-Type": "application/json", "Idempotency-Key": channelRequestID(t), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
@@ -1415,12 +1469,14 @@ func uploadChannelFixtureContent(t *testing.T, fixture channelDeliveryFixture, p
 	if init.Code != http.StatusCreated || json.Unmarshal(init.Body.Bytes(), &initBody) != nil {
 		t.Fatalf("content init: %d %s", init.Code, init.Body.String())
 	}
-	hash := sha256.Sum256(payload)
-	chunk := channelRequestWithCookie(fixture.router, http.MethodPut, fixture.contentPath+"/"+initBody.UploadID+"/parts/part1", payload, fixture.senderCookie, map[string]string{
-		"Upload-Offset": "0", "X-Chunk-SHA256": hex.EncodeToString(hash[:]), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
-	})
-	if chunk.Code != http.StatusNoContent {
-		t.Fatalf("content chunk: %d %s", chunk.Code, chunk.Body.String())
+	for i, payload := range payloads {
+		hash := sha256.Sum256(payload)
+		chunk := channelRequestWithCookie(fixture.router, http.MethodPut, fixture.contentPath+"/"+initBody.UploadID+fmt.Sprintf("/parts/part%d", i+1), payload, fixture.senderCookie, map[string]string{
+			"Upload-Offset": "0", "X-Chunk-SHA256": hex.EncodeToString(hash[:]), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
+		})
+		if chunk.Code != http.StatusNoContent {
+			t.Fatalf("content chunk: %d %s", chunk.Code, chunk.Body.String())
+		}
 	}
 	finalize := channelRequestWithCookie(fixture.router, http.MethodPost, fixture.contentPath+"/"+initBody.UploadID+"/finalize", nil, fixture.senderCookie, map[string]string{
 		"Idempotency-Key": channelRequestID(t), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin",
