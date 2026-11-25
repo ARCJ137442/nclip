@@ -31,10 +31,11 @@ type channelResponsePlan struct {
 }
 
 type preparedChannelResponse struct {
-	directory string
-	source    *spool.File
-	response  *spool.File
-	plan      channelResponsePlan
+	directory       string
+	source          *spool.File
+	response        *spool.File
+	plan            channelResponsePlan
+	removeDirectory func(string) error
 }
 
 func (p *preparedChannelResponse) close() error {
@@ -48,7 +49,11 @@ func (p *preparedChannelResponse) close() error {
 		_ = p.response.Remove()
 	}
 	if p.directory != "" {
-		if err := os.RemoveAll(p.directory); err != nil {
+		remove := p.removeDirectory
+		if remove == nil {
+			remove = os.RemoveAll
+		}
+		if err := remove(p.directory); err != nil {
 			return err
 		}
 		if _, err := os.Stat(p.directory); !errors.Is(err, os.ErrNotExist) {
@@ -147,8 +152,8 @@ func (h *ChannelHandler) prepareChannelResponse(lease *channels.DeliveryLease, s
 	}()
 	prepared, err := h.materializeChannelResponse(lease, slug, paste, plan, reservation)
 	if err != nil {
-		if cleanupErr := prepared.close(); cleanupErr != nil {
-			reservationHeld = false
+		reservationHeld = false
+		if cleanupErr := h.releasePreparedResponse(lease, prepared); cleanupErr != nil {
 			log.Printf("[WARN] failed channel materialization left temporary data; retaining reservation: %v", cleanupErr)
 			return nil, fmt.Errorf("%w; temporary cleanup failed: %v", err, cleanupErr)
 		}
@@ -160,7 +165,7 @@ func (h *ChannelHandler) prepareChannelResponse(lease *channels.DeliveryLease, s
 }
 
 func (h *ChannelHandler) materializeChannelResponse(lease *channels.DeliveryLease, slug string, paste *models.Paste, plan channelResponsePlan, reservation int64) (*preparedChannelResponse, error) {
-	directory, err := h.shares.tempDir()
+	directory, err := os.MkdirTemp(h.config.DataDir, channelResponseTempPrefix)
 	if err != nil {
 		return nil, err
 	}
@@ -289,11 +294,10 @@ func (h *ChannelHandler) ContentDownload(c *gin.Context) {
 		return
 	}
 	defer func() {
-		if err := prepared.close(); err != nil {
+		if err := h.releasePreparedResponse(lease, prepared); err != nil {
 			log.Printf("[WARN] channel response temporary cleanup failed; retaining reservation: %v", err)
 			return
 		}
-		h.manager.ReleaseDeliverySpace(lease)
 	}()
 	if lease.Context().Err() != nil {
 		_, _, _ = h.manager.FinishDelivery(lease, prepared.response.Size, false, time.Now())

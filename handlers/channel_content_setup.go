@@ -82,7 +82,7 @@ func removeChannelUploadTemps(dataDir string) error {
 		return err
 	}
 	for _, entry := range entries {
-		if !strings.HasPrefix(entry.Name(), channelUploadTempPrefix) && !strings.HasPrefix(entry.Name(), storage.ChannelContentTempPrefix+"s3-upload-") {
+		if !isChannelTemp(entry.Name()) {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(dataDir, entry.Name())); err != nil {
@@ -90,6 +90,10 @@ func removeChannelUploadTemps(dataDir string) error {
 		}
 	}
 	return nil
+}
+
+func isChannelTemp(name string) bool {
+	return strings.HasPrefix(name, channelUploadTempPrefix) || strings.HasPrefix(name, channelResponseTempPrefix) || strings.HasPrefix(name, storage.ChannelContentTempPrefix+"s3-upload-")
 }
 
 func (h *ChannelHandler) cleanupExpiredEphemeral(now time.Time) {
@@ -163,6 +167,7 @@ func (h *ChannelHandler) maintainChannelLiveness(now time.Time) {
 	}
 	processed := make(map[string]struct{})
 	err := h.channelWriter.WithChannelWriter(func() error {
+		h.retryPreparedResponses()
 		for _, release := range h.manager.SweepReceiverLiveness(now) {
 			processed[release.ChannelID] = struct{}{}
 			h.manager.CleanupContentRelease(release)

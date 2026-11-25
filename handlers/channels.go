@@ -52,6 +52,8 @@ type ChannelHandler struct {
 	joinIPWindows      map[string]createWindowState
 	joinChannelWindows map[string]createWindowState
 	contentChunkSlots  chan struct{}
+	responseCleanupMu  sync.Mutex
+	pendingResponses   map[*channels.DeliveryLease]*preparedChannelResponse
 }
 
 func (h *ChannelHandler) SetSharesHandler(shares *SharesHandler) {

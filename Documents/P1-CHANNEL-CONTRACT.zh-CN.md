@@ -120,4 +120,5 @@
 - 轮换 ticket 与 GET/lease 获取共享 Manager 串行化边界。若旧 ticket 正持有 native lease，先撤销旧票并 Cancel 在途 lease，但保留 mode/offset；旧 lease unwind 前，新 GET 返回 409 `delivery_busy`。若在途 lease 为 app-multipart，签票返回模式冲突且不得取消 app lease。leave/kick/close、交付完成与最终 seat 释放均撤票并取消在途响应；页面关闭/刷新通过非 bfcache pagehide 的 leave 立即触发此行为。ticket 不设置独立 heartbeat/lease。
 - `released` 暂态票据仍须通过当前 seat/claim/released 窗口与账号权限验证；实际已送达 `leave` 后旧票即失效。Pagehide 未送达时仍只走既定 90 秒活证据与两分钟释放兜底。公开票据是 bearer capability；P1a 不承诺通过 URL 识别具体浏览器标签页。
 - 撤票、取消响应、临时副本删除与 held 预算是不同结果。source/prepared 临时副本的预算仅在实际清理完成后释放；最终内容 Delete 失败时必须保留 pending release、held 预算并阻止重新装填，不能把 Cancel 当作 Delete 成功。
+- 信道响应副本使用独立的 `.nclip-channel-response-` 目录前缀。请求结束时删除失败，由进程内清理队列继续拥有目录与对应 lease reservation，后台持 writer guard 重试，实际删除后才释放预算；重启先清扫该前缀残留再采集 `F0`。普通分享的 `.nclip-share-` 临时目录不属于信道清扫范围；旧版混用该前缀的残留不能靠前缀自动区分，须离线核验后人工处理。
 - native GET 路由必须加入 `canonicalErrors` 流式旁路，不得缓冲完整响应。浏览器路径在接收页首次 GET 前选定；选定后不得跨表示切换。UI 明示“已交给浏览器，保持本页打开”；pagehide/leave 撤票并中断下载。桌面/移动下载、慢速 Range、轮换中断、pagehide 与反代 URI/referrer 日志作为 G5/G6 验收项。
