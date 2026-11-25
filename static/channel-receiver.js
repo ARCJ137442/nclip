@@ -5,7 +5,7 @@ import { createProgress, timeParts } from "./transfer.js";
 import { renderItems, status } from "./ui.js";
 import { sizeLabel, t } from "./i18n.js";
 import { shouldUseBrowserDownload, validateChannelDownloadURL, dispatchBrowserDownload } from "./channel-transfer-path.js";
-import { receiverTerminalMessage } from "./channel-receiver-state.js";
+import { receiverTerminalMessage, isReceiverStatusTerminal } from "./channel-receiver-state.js";
 
 const page = document.querySelector("#channel-page");
 if (page) {
@@ -254,7 +254,6 @@ if (page) {
       if (!seatToken && !completed) {
         retained = [];
         chunks.length = 0;
-        setError("channelReceiveGone");
         return;
       }
       if (["receiver_kicked", "delivery_complete", "join_closed", "content_upload_closed"].includes(error?.message) || [403, 404, 410].includes(error?.status)) {
@@ -356,8 +355,10 @@ if (page) {
         headers: { "X-Nclip-Seat-Token": seatToken },
       });
       if (completed) return;
-      if (response.status === 410) {
-        const body = await response.json().catch(() => ({}));
+      const terminalBody = [404, 410].includes(response.status)
+        ? await response.json().catch(() => ({})) : {};
+      if (isReceiverStatusTerminal(response.status, terminalBody)) {
+        const body = terminalBody;
         if (receiving && body.error === "delivery_complete") return;
         if (browserDownloadStarted && body.error === "delivery_complete") {
           completed = true;
@@ -365,12 +366,14 @@ if (page) {
           setState("channelBrowserDownloadComplete");
           return;
         }
+        receiveController?.abort();
         hideLease();
-        const message = receiverTerminalMessage(response.status, body);
-        if (message === "channelRejected") {
-          setState(message);
-          errorLine.hidden = true;
-        } else setError(message);
+        retained = [];
+        progressPanel.hidden = true;
+        retryButton.hidden = true;
+        stages.hidden = true;
+        setState(receiverTerminalMessage(response.status, body));
+        errorLine.hidden = true;
         return;
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);

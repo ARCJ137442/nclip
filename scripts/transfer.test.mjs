@@ -21,7 +21,7 @@ import { resolveChannelSession } from "../static/channel-session-state.js";
 import { CHANNEL_BROWSER_DOWNLOAD_THRESHOLD_BYTES, shouldUseBrowserDownload, validateChannelDownloadURL, dispatchBrowserDownload } from "../static/channel-transfer-path.js";
 import { clampTTLHours, previewForItem, safePreview } from "../static/handoff.js";
 import { normalizePreferences, preferences } from "../static/preferences.js";
-import { receiverTerminalMessage } from "../static/channel-receiver-state.js";
+import { receiverTerminalMessage, isReceiverStatusTerminal } from "../static/channel-receiver-state.js";
 import { t } from "../static/i18n.js";
 import { uploadAuthMessage } from "../static/upload-auth-state.js";
 
@@ -667,4 +667,11 @@ test("native download uses download intent and leaves the receiver page loaded",
   link.click = () => { calls.push("click"); throw Error("host failure"); };
   assert.throws(() => dispatchBrowserDownload("https://example.com/download", document), /host failure/);
   assert.deepEqual(calls, ["append", "click", "remove"]);
+});
+
+test("closed channel status is terminal only for the exact missing-channel response", () => {
+  assert.equal(isReceiverStatusTerminal(404, { error: "channel_not_found" }), true);
+  assert.equal(isReceiverStatusTerminal(410, { error: "receiver_kicked" }), true);
+  for (const [status, body] of [[404, {}], [404, { error: "unknown" }], [503, { error: "channel_not_found" }], [403, { error: "channel_not_found" }]])
+    assert.equal(isReceiverStatusTerminal(status, body), false);
 });
