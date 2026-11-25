@@ -16,7 +16,7 @@ import {
   uploadChannelContent,
   cleanupCanceledChannelUpload,
 } from "../static/share-api.js";
-import { captureSeatTarget, isSameSeatTarget } from "../static/channel-workspace-state.js";
+import { canKickSeat, recipientHint, captureSeatTarget, isSameSeatTarget } from "../static/channel-workspace-state.js";
 import { resolveChannelSession } from "../static/channel-session-state.js";
 import { CHANNEL_BROWSER_DOWNLOAD_THRESHOLD_BYTES, shouldUseBrowserDownload, validateChannelDownloadURL } from "../static/channel-transfer-path.js";
 import { clampTTLHours, previewForItem, safePreview } from "../static/handoff.js";
@@ -24,6 +24,16 @@ import { normalizePreferences, preferences } from "../static/preferences.js";
 import { receiverTerminalMessage } from "../static/channel-receiver-state.js";
 import { t } from "../static/i18n.js";
 import { uploadAuthMessage } from "../static/upload-auth-state.js";
+
+test("released recipients retain visible sender control and their seat target", () => {
+  const seat = { seat_id: "seat-a", identity: "anonymous", joined_at: "2026-01-01", state: "released" };
+  assert.equal(canKickSeat(seat), true);
+  assert.equal(recipientHint(seat), "channelReceiverRecovering");
+  assert.equal(isSameSeatTarget({ ...seat, state: "paired" }, captureSeatTarget(seat)), true);
+  assert.equal(canKickSeat({ ...seat, state: "pending_admit" }), false);
+  assert.equal(canKickSeat(null), false);
+  assert.equal(isSameSeatTarget({ ...seat, seat_id: "seat-b" }, captureSeatTarget(seat)), false);
+});
 
 test("upload authentication feedback requires an actual upload-key challenge", () => {
   assert.equal(uploadAuthMessage(401, "missing api key", true), "uploadKeyRequired");

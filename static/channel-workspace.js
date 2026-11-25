@@ -2,7 +2,7 @@ import { getChannelSession, setChannelArmed, setChannelSendTarget, subscribeChan
 import { t } from "./i18n.js";
 import { preferences, savePreferences } from "./preferences.js";
 import { authHeaders } from "./ui.js";
-import { captureSeatTarget, isSameSeatTarget } from "./channel-workspace-state.js";
+import { canKickSeat, captureSeatTarget, isSameSeatTarget } from "./channel-workspace-state.js";
 import { resolveChannelSession } from "./channel-session-state.js";
 import { uploadAuthMessage } from "./upload-auth-state.js";
 
@@ -188,7 +188,7 @@ if (mode) {
     closeButton.hidden = !channelId;
     refreshButton.hidden = !channelId || !session.transportError;
     reviewButton.hidden = !currentSeat || currentSeat.state !== "pending_admit";
-    kickButton.hidden = !currentSeat || currentSeat.state !== "paired";
+    kickButton.hidden = !canKickSeat(currentSeat);
   }
 
   function renderRecord(record) {
@@ -203,6 +203,8 @@ if (mode) {
     } else if (currentSeat?.state === "pending_admit") {
       statusLine.textContent = t("channelPendingTitle");
       openApproval(currentSeat);
+    } else if (currentSeat?.state === "released") {
+      statusLine.textContent = t("channelReceiverRecovering");
     } else if (currentSeat?.state === "paired" && record.content_state === "held") {
       statusLine.textContent = t("channelOccupiedFor", { time: elapsedLabel(currentSeat.joined_at) });
     } else if (currentSeat?.state === "paired" && record.content_state === "uploading") {
@@ -337,7 +339,7 @@ if (mode) {
 
   function openAction(actionName) {
     const kick = actionName === "kick";
-    if (kick && currentSeat?.state !== "paired") return;
+    if (kick && !canKickSeat(currentSeat)) return;
     action = actionName;
     if (kick) actionTarget = captureSeatTarget(currentSeat);
     else actionTarget = null;

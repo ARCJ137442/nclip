@@ -88,3 +88,35 @@ func TestRegressionSuccessfulDeliveryDropsUploadRegistry(t *testing.T) {
 		t.Fatalf("success/delete leaves %d contentUploads record(s)", len(m.contentUploads))
 	}
 }
+
+func TestSenderCanKickReleasedSeatWithoutWaitingForRecovery(t *testing.T) {
+	now := time.Now()
+	m, record, sender, joined := heldDeliveryFixture(t, now)
+	start, err := m.BeginDelivery(record.ID, joined.SeatToken, joined.ClaimToken, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	later := now.Add(ReceiverHeartbeatTimeout + time.Second)
+	m.SweepReceiverLiveness(later)
+	state, _ := m.Get(record.ID)
+	if state.Seat.State != "released" {
+		t.Fatal("seat did not become released")
+	}
+	key, _ := NewRequestID()
+	release, err := m.KickWithContent(record.ID, sender, state.Seat.SeatID, key, later)
+	if err != nil || release.Slug == "" {
+		t.Fatalf("kick released seat: %v", err)
+	}
+	if start.Lease.Context().Err() == nil {
+		t.Fatal("released delivery was not canceled")
+	}
+	after, _ := m.Get(record.ID)
+	if after.Seat != nil || after.ContentState != ContentEmpty {
+		t.Fatal("kick retained released seat or content")
+	}
+	m.ContentReleaseDeleted(release)
+	_, _, _, held, _ := m.ContentSlotCapacity()
+	if held != 0 {
+		t.Fatal("successful deletion did not release held bytes")
+	}
+}

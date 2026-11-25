@@ -2,6 +2,7 @@ import { language } from "./preferences.js";
 const messages = {
   uploadKeyRequired: ["请填写上传 API Key 后重试。", "Enter the upload API key and retry."],
   uploadKeyInvalid: ["上传 API Key 无效，请更正后重试。", "The upload API key is invalid. Correct it and retry."],
+  channelReceiverRecovering: ["接收端暂时失联，席位仍保留；等待原接收页恢复，或踢出并撤回内容。", "The recipient is temporarily offline and its seat is retained. Wait for its page to reconnect, or kick it and withdraw the content."],
   channelMode: ["临时信道", "Live channel"],
   channelModeHint: ["双方连上后交付；临时内容只在接收方占用期间留在服务器。", "Content is delivered after both sides connect and stays on the server only while the recipient holds the seat."],
   channelPublic: ["允许持链接者加入（公开信道）", "Allow anyone with the link to join"],

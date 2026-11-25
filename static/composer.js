@@ -22,6 +22,7 @@ import {
 import { createProgress, timeParts, transferStages } from "./transfer.js";
 import { clampTTLHours, previewForItem } from "./handoff.js";
 import { getChannelSession, setChannelArmed, subscribeChannelSession, updateChannelSession } from "./channel-session.js";
+import { recipientHint } from "./channel-workspace-state.js";
 
 export async function startComposer() {
   const editor = $("message");
@@ -471,7 +472,7 @@ export async function startComposer() {
         t(items.length === 1 ? "draftItemsOne" : "draftItemsMany", { count: items.length }),
         sizeLabel(size),
         t(channelState.visibility === "public" ? "channelPublic" : "summaryPrivate"),
-        channelState.seat?.state === "paired" ? t("channelSendReady") : t("channelSnapshotWaiting"),
+        t(recipientHint(channelState.seat)),
       ]
       : [
         t(items.length === 1 ? "draftItemsOne" : "draftItemsMany", { count: items.length }),
