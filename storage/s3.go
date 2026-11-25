@@ -810,11 +810,15 @@ func (s *S3Store) GetContent(id string) ([]byte, error) {
 
 // OpenContent keeps the S3 response body open so callers can stream it.
 func (s *S3Store) OpenContent(id string) (io.ReadCloser, int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Bound request establishment, not the lifetime of a streaming body.
+	// Closing the returned reader still cancels the source immediately.
+	ctx, cancel := context.WithCancel(context.Background())
+	establishment := time.AfterFunc(10*time.Second, cancel)
 	obj, err := s.client.GetObject(ctx, &s3.GetObjectInput{
 		Bucket: aws.String(s.bucket),
 		Key:    aws.String(applyS3Prefix(s.prefix, id)),
 	})
+	establishment.Stop()
 	if err != nil {
 		cancel()
 		log.Printf("[ERROR] S3 OpenContent: failed to get content for %s: %v", id, err)
@@ -833,9 +837,8 @@ type cancelReadCloser struct {
 }
 
 func (c *cancelReadCloser) Close() error {
-	err := c.ReadCloser.Close()
 	c.cancel()
-	return err
+	return c.ReadCloser.Close()
 }
 
 // StatContent checks if the object exists in S3 and returns its size.
