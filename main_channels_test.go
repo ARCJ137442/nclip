@@ -1507,6 +1507,18 @@ func (f channelDeliveryFixture) download(rangeHeader, ifRange, claimToken string
 	return channelRequestWithCookies(f.router, http.MethodGet, f.contentPath, nil, nil, headers)
 }
 
+func TestChannelAppDownloadDisablesProxyBuffering(t *testing.T) {
+	payload := []byte("buffering-boundary")
+	fixture := newChannelDeliveryFixture(t, payload)
+	response := fixture.download("", "", fixture.claimToken)
+	if response.Code != http.StatusOK {
+		t.Fatalf("download: %d %s", response.Code, response.Body.String())
+	}
+	if got := response.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Fatalf("X-Accel-Buffering = %q, want no", got)
+	}
+}
+
 func TestChannelDeliveryRequiresClaimAndResumesMultipartRange(t *testing.T) {
 	fixture := newChannelDeliveryFixture(t, []byte("range-bound-payload"))
 	assertChannelRangeResumes(t, fixture)

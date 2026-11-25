@@ -123,3 +123,11 @@
 - 撤票、取消响应、临时副本删除与 held 预算是不同结果。source/prepared 临时副本的预算仅在实际清理完成后释放；最终内容 Delete 失败时必须保留 pending release、held 预算并阻止重新装填，不能把 Cancel 当作 Delete 成功。
 - 信道响应副本使用独立的 `.nclip-channel-response-` 目录前缀。请求结束时删除失败，由进程内清理队列继续拥有目录与对应 lease reservation，后台持 writer guard 重试，实际删除后才释放预算；重启先清扫该前缀残留再采集 `F0`。普通分享的 `.nclip-share-` 临时目录不属于信道清扫范围；旧版混用该前缀的残留不能靠前缀自动区分，须离线核验后人工处理。
 - native GET 路由必须加入 `canonicalErrors` 流式旁路，不得缓冲完整响应。浏览器路径在接收页首次 GET 前选定；选定后不得跨表示切换。UI 明示“已交给浏览器，保持本页打开”；pagehide/leave 撤票并中断下载。桌面/移动下载、慢速 Range、轮换中断、pagehide 与反代 URI/referrer 日志作为 G5/G6 验收项。
+
+## G5 addendum：移动端验收与桌面边界（2026-11-25 用户裁定）
+
+- 移动设备不作为 G5/P1a 的验收门。原“真实桌面 + 物理移动/移动休眠”一项改为 OUT OF SCOPE，不计 PASS、不再记 BLOCKED，也不再尝试 ADB/WPD 或设备连接；后续以浏览器下载为主路径。
+- 双独立桌面 profile 仍是会话隔离证据，但不等同两台物理设备。
+- 桌面/后台项继续有效：长暂停、接收端 hidden、发送端 hidden 后真实 join/放行、实际轮询间隔。超过 5 分钟的强化节流与 OS 休眠仍列为未测边界。
+- native 文件实际落盘与哈希在当前触发方式下未由实现方验证；由审阅方在无 IDM 干扰的干净浏览器 E2E 核验。该行维持 TRANSPORT PASS / FILE UNVERIFIED，不计 PASS，也不阻塞 G6。
+- 本 addendum 只记录裁定，不修改前文任何冻结语义。

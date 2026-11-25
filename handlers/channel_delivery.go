@@ -360,6 +360,7 @@ func writeChannelDownloadHeaders(c *gin.Context, plan channelResponsePlan, reque
 	c.Header("Cache-Control", "no-store")
 	c.Header("Referrer-Policy", "no-referrer")
 	c.Header("X-Content-Type-Options", "nosniff")
+	c.Header("X-Accel-Buffering", "no")
 	c.Header("Accept-Ranges", "bytes")
 	c.Header("ETag", plan.etag)
 	c.Header("Content-Type", "multipart/form-data; boundary="+plan.boundary)
