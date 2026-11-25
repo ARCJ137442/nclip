@@ -781,8 +781,15 @@ func TestAnonymousJoinAdmitStatusAndLeave(t *testing.T) {
 	closedStatus.Header.Set("X-Nclip-Seat-Token", seatToken)
 	closedStatusResponse := httptest.NewRecorder()
 	router.ServeHTTP(closedStatusResponse, closedStatus)
-	if closedStatusResponse.Code != http.StatusForbidden {
+	if closedStatusResponse.Code != http.StatusGone || strings.TrimSpace(closedStatusResponse.Body.String()) != `{"error":"join_closed"}` {
 		t.Fatalf("old seat token after next join = %d %s", closedStatusResponse.Code, closedStatusResponse.Body.String())
+	}
+	// The retained terminal belongs to the old seat; polling it must not change
+	// the replacement seat or mislabel a voluntary leave as sender rejection.
+	nextSeatAfterOldPoll := httptest.NewRecorder()
+	router.ServeHTTP(nextSeatAfterOldPoll, nextSeatStatus.Clone(nextSeatStatus.Context()))
+	if nextSeatAfterOldPoll.Code != http.StatusOK {
+		t.Fatalf("old poll changed replacement seat: %d %s", nextSeatAfterOldPoll.Code, nextSeatAfterOldPoll.Body.String())
 	}
 }
 
