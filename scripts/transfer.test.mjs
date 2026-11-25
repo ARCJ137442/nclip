@@ -236,6 +236,30 @@ test("cancel cleanup confirms deletion only after a terminal server response", a
     return new Response(JSON.stringify({ upload_id: "session-2" }), { status: 201, headers: { "Content-Type": "application/json" } });
   }, async () => assert.equal(await cleanupCanceledChannelUpload("c", { ...state, uploadID: "session-2" }), false));
 
+  const terminalCases = [
+    [404, "channel_not_found", true],
+    [410, "content_upload_closed", true],
+    [503, "content_upload_closed", false],
+    [403, "channel_not_found", false],
+    [404, "content_upload_closed", false],
+    [410, "channel_not_found", false],
+    [410, "content_closed", false],
+  ];
+  for (const [status, code, expected] of terminalCases) {
+    await withFetch(async () => new Response(JSON.stringify({ error: code }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }), async () => assert.equal(
+      await cleanupCanceledChannelUpload("c", { ...state, uploadID: `session-${status}-${code}` }),
+      expected,
+      `HTTP ${status} ${code}`,
+    ));
+  }
+
+  await withFetch(async () => { throw new TypeError("offline"); }, async () => {
+    assert.equal(await cleanupCanceledChannelUpload("c", { ...state, uploadID: "session-network" }), false);
+  });
+
   const initCanceledState = createChannelUploadState([], () => "closed-init-key");
   await withFetch(async () => new Response(JSON.stringify({ error: "content_upload_closed" }), {
     status: 410,
@@ -247,10 +271,6 @@ test("cancel cleanup confirms deletion only after a terminal server response", a
     headers: { "Content-Type": "application/json" },
   }), async () => assert.equal(await cleanupCanceledChannelUpload("c", initCanceledState), true));
 
-  await withFetch(async () => new Response(JSON.stringify({ error: "content_closed" }), {
-    status: 410,
-    headers: { "Content-Type": "application/json" },
-  }), async () => assert.equal(await cleanupCanceledChannelUpload("c", initCanceledState), false));
 });
 
 test("kick confirmation target cannot transfer to a replacement seat", () => {
