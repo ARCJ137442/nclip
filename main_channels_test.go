@@ -1638,6 +1638,51 @@ func TestChannelKickInterruptsActiveContentResponse(t *testing.T) {
 	assertChannelReceiverKicked(t, fixture)
 }
 
+func TestNativeResponseInterruptedByPageAndSenderActions(t *testing.T) {
+	for _, action := range []string{"leave", "kick", "close"} {
+		t.Run(action, func(t *testing.T) {
+			f := newChannelDeliveryFixture(t, bytes.Repeat([]byte("native"), 2048))
+			base := "/api/v1/channels/" + f.channelID
+			ticket := channelRequestWithCookies(f.router, http.MethodPost, f.contentPath+"/ticket", nil, nil, map[string]string{"X-Nclip-Seat-Token": f.seatToken, "X-Nclip-Claim-Token": f.claimToken, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin"})
+			var body struct {
+				URL string `json:"download_url"`
+			}
+			if ticket.Code != http.StatusCreated || json.Unmarshal(ticket.Body.Bytes(), &body) != nil {
+				t.Fatalf("ticket: %d", ticket.Code)
+			}
+			f.contentPath = body.URL
+			done := startActiveChannelDownload(t, f)
+			switch action {
+			case "kick":
+				kickChannelReceiver(t, f)
+			case "leave":
+				r := channelRequestWithCookies(f.router, http.MethodPost, base+"/leave", nil, nil, map[string]string{"Idempotency-Key": channelRequestID(t), "X-Nclip-Seat-Token": f.seatToken, "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin"})
+				if r.Code != http.StatusNoContent {
+					t.Fatalf("leave: %d %s", r.Code, r.Body.String())
+				}
+			case "close":
+				r := channelRequestWithCookie(f.router, http.MethodDelete, base, nil, f.senderCookie, map[string]string{"Idempotency-Key": channelRequestID(t), "Origin": "https://clip.test", "Sec-Fetch-Site": "same-origin"})
+				if r.Code != http.StatusNoContent {
+					t.Fatalf("close: %d %s", r.Code, r.Body.String())
+				}
+			}
+			select {
+			case <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("native response remained blocked")
+			}
+			old := channelRequestWithCookies(f.router, http.MethodGet, body.URL, nil, nil, nil)
+			if old.Code == http.StatusOK || old.Code == http.StatusPartialContent {
+				t.Fatal("revoked native ticket still delivers")
+			}
+			left, err := f.store.ListEphemeralPastes()
+			if err != nil || len(left) != 0 {
+				t.Fatal("native cancellation retained content", err)
+			}
+		})
+	}
+}
+
 func startActiveChannelDownload(t *testing.T, fixture channelDeliveryFixture) <-chan struct{} {
 	t.Helper()
 	writer := newKickInterruptWriter()
