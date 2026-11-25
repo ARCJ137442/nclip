@@ -1509,13 +1509,23 @@ func TestChannelDeliveryRequiresClaimAndResumesMultipartRange(t *testing.T) {
 func TestBrowserDownloadTicketResumesRawAttachmentAndLocksRepresentation(t *testing.T) {
 	payload := []byte("ticket payload")
 	fixture := newChannelDeliveryFixture(t, payload)
+	assertReceiverLogicalContentSize(t, fixture, len(payload))
+	assertRawTicketRangeAndRotation(t, fixture, payload)
+}
+
+func assertReceiverLogicalContentSize(t *testing.T, fixture channelDeliveryFixture, size int) {
+	t.Helper()
 	seatStatus := channelRequestWithCookies(fixture.router, http.MethodGet, "/api/v1/channels/"+fixture.channelID, nil, nil, map[string]string{
 		"X-Nclip-Seat-Token": fixture.seatToken,
 	})
 	var seatStatusBody map[string]any
-	if seatStatus.Code != http.StatusOK || json.Unmarshal(seatStatus.Body.Bytes(), &seatStatusBody) != nil || seatStatusBody["content_bytes"] != float64(len(payload)) {
+	if seatStatus.Code != http.StatusOK || json.Unmarshal(seatStatus.Body.Bytes(), &seatStatusBody) != nil || seatStatusBody["content_bytes"] != float64(size) {
 		t.Fatalf("authorized receiver status omitted logical size: %d %s", seatStatus.Code, seatStatus.Body.String())
 	}
+}
+
+func assertRawTicketRangeAndRotation(t *testing.T, fixture channelDeliveryFixture, payload []byte) {
+	t.Helper()
 	issue := func() *httptest.ResponseRecorder {
 		return channelRequestWithCookies(fixture.router, http.MethodPost, "/api/v1/channels/"+fixture.channelID+"/content/ticket", nil, nil, map[string]string{
 			"X-Nclip-Seat-Token":  fixture.seatToken,
@@ -1546,26 +1556,30 @@ func TestBrowserDownloadTicketResumesRawAttachmentAndLocksRepresentation(t *test
 		return channelRequestWithCookies(fixture.router, http.MethodGet, downloadURL, nil, nil, headers)
 	}
 	first := requestTicket(firstTicketBody.DownloadURL, "bytes=0-4", "")
-	if first.Code != http.StatusPartialContent || string(first.Body.Bytes()) != string(payload[:5]) || first.Header().Get("Content-Disposition") == "" || first.Header().Get("ETag") == "" {
+	if first.Code != http.StatusPartialContent || first.Body.String() != string(payload[:5]) || first.Header().Get("Content-Disposition") == "" || first.Header().Get("ETag") == "" {
 		t.Fatalf("first attachment range: %d headers=%v body=%q", first.Code, first.Header(), first.Body.Bytes())
 	}
 	if app := fixture.download("", "", fixture.claimToken); app.Code != http.StatusConflict || !strings.Contains(app.Body.String(), "delivery_mode_conflict") {
 		t.Fatalf("seat switched from attachment to app multipart: %d %s", app.Code, app.Body.String())
 	}
+	assertRawTicketRotationAndCompletion(t, fixture, payload, first, firstTicketBody.DownloadURL, issue, requestTicket)
+}
 
+func assertRawTicketRotationAndCompletion(t *testing.T, fixture channelDeliveryFixture, payload []byte, first *httptest.ResponseRecorder, firstURL string, issue func() *httptest.ResponseRecorder, requestTicket func(string, string, string) *httptest.ResponseRecorder) {
+	t.Helper()
 	secondTicket := issue()
 	var secondTicketBody struct {
 		DownloadURL string `json:"download_url"`
 	}
-	if secondTicket.Code != http.StatusCreated || json.Unmarshal(secondTicket.Body.Bytes(), &secondTicketBody) != nil || secondTicketBody.DownloadURL == firstTicketBody.DownloadURL {
+	if secondTicket.Code != http.StatusCreated || json.Unmarshal(secondTicket.Body.Bytes(), &secondTicketBody) != nil || secondTicketBody.DownloadURL == firstURL {
 		t.Fatalf("rotate browser ticket: %d %s", secondTicket.Code, secondTicket.Body.String())
 	}
-	old := requestTicket(firstTicketBody.DownloadURL, "bytes=5-", first.Header().Get("ETag"))
+	old := requestTicket(firstURL, "bytes=5-", first.Header().Get("ETag"))
 	if old.Code != http.StatusForbidden {
 		t.Fatalf("rotated ticket remained valid: %d %s", old.Code, old.Body.String())
 	}
 	last := requestTicket(secondTicketBody.DownloadURL, "bytes=5-", first.Header().Get("ETag"))
-	if last.Code != http.StatusPartialContent || string(last.Body.Bytes()) != string(payload[5:]) {
+	if last.Code != http.StatusPartialContent || last.Body.String() != string(payload[5:]) {
 		t.Fatalf("resumed attachment range: %d headers=%v body=%q", last.Code, last.Header(), last.Body.Bytes())
 	}
 	if remaining, err := fixture.store.ListEphemeralPastes(); err != nil || len(remaining) != 0 {

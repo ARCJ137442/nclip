@@ -88,6 +88,11 @@ func TestDeliveryRepresentationLocksOnFirstSuccessfulLease(t *testing.T) {
 	if _, err := manager.BeginDelivery(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(3*time.Second)); err != ErrDeliveryModeConflict {
 		t.Fatalf("cross-representation app GET should conflict: %v", err)
 	}
+	assertTicketRotationKeepsRepresentation(t, manager, record, joined, first, ticket, now)
+}
+
+func assertTicketRotationKeepsRepresentation(t *testing.T, manager *Manager, record Record, joined JoinResult, first DeliveryStart, ticket string, now time.Time) {
+	t.Helper()
 	if _, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now.Add(3*time.Second)); err != nil {
 		t.Fatalf("rotate active ticket: %v", err)
 	}

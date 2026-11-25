@@ -114,10 +114,19 @@ func (h *ChannelHandler) ContentTicketDownload(c *gin.Context) {
 		return
 	}
 	length := byteRange.end - byteRange.start + 1
-	controller := writeAttachmentHeaders(c, plan, byteRange, length, partial)
+	controller := http.NewResponseController(c.Writer)
+	complete, streamErr := h.streamTicketAttachment(c, lease, paste, plan, byteRange, length, partial, controller)
+	if streamErr != nil && !c.Writer.Written() {
+		channelDeliveryError(c, streamErr)
+	}
+	finishChannelResponseIO(c, lease, controller, streamErr)
+	h.finishTicketDelivery(lease, plan.size, complete, streamErr)
+}
+
+func (h *ChannelHandler) streamTicketAttachment(c *gin.Context, lease *channels.DeliveryLease, paste *models.Paste, plan channelAttachment, byteRange byteRange, length int64, partial bool, controller *http.ResponseController) (bool, error) {
 	var complete bool
 	var streamErr error
-	err = h.shares.service.ReadPasteStream(start.Slug, false, func(current *models.Paste, source io.Reader, size int64) error {
+	err := h.shares.service.ReadPasteStream(paste.ID, false, func(current *models.Paste, source io.Reader, size int64) error {
 		if current.ID != paste.ID || !current.IsEphemeral() || current.EphemeralChannelID != lease.ChannelID || size != plan.size {
 			return storage.ErrNotFound
 		}
@@ -127,6 +136,7 @@ func (h *ChannelHandler) ContentTicketDownload(c *gin.Context) {
 		if err := seekChannelRange(lease.Context(), source, byteRange.start); err != nil {
 			return err
 		}
+		writeAttachmentHeaders(c, plan, byteRange, length, partial)
 		complete, streamErr = streamChannelReader(h, c, lease, contextReader{ctx: lease.Context(), source: source}, length, controller)
 		return streamErr
 	})
@@ -139,8 +149,7 @@ func (h *ChannelHandler) ContentTicketDownload(c *gin.Context) {
 	if !complete && lease.Context().Err() != nil {
 		streamErr = lease.Context().Err()
 	}
-	_ = controller.SetWriteDeadline(time.Time{})
-	h.finishTicketDelivery(lease, plan.size, complete, streamErr)
+	return complete, streamErr
 }
 
 func requestedAttachmentRange(c *gin.Context, etag string, total int64) (byteRange, bool, error) {
@@ -223,6 +232,7 @@ func (h *ChannelHandler) finishTicketDelivery(lease *channels.DeliveryLease, tot
 		log.Printf("[WARN] finish ticket delivery: %v", finishErr)
 	}
 	if delivered {
+		h.manager.CleanupContentRelease(release)
 		if err := h.deleteReleasedContent(release); err != nil {
 			log.Printf("[WARN] delete ticket-delivered content: %v", err)
 		}

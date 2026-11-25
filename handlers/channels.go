@@ -242,23 +242,20 @@ func (h *ChannelHandler) authorizeContent(c *gin.Context, path string) bool {
 		return h.authorizeContentRead(c)
 	}
 	if path == "/api/v1/channels/:id/content/download/:ticket" {
-		if c.Request.Method != http.MethodGet {
-			c.AbortWithStatus(http.StatusMethodNotAllowed)
-			return false
-		}
-		return h.authorizeTicketContentRead(c)
+		return requireChannelMethod(c, http.MethodGet) && h.authorizeTicketContentRead(c)
 	}
 	if path == "/api/v1/channels/:id/content/ticket" {
-		if c.Request.Method != http.MethodPost {
-			c.AbortWithStatus(http.StatusMethodNotAllowed)
-			return false
-		}
-		return h.authorizeContentRead(c)
+		return requireChannelMethod(c, http.MethodPost) && h.authorizeContentRead(c)
 	}
+	return h.authorizeContentWrite(c, path)
+}
+
+func (h *ChannelHandler) authorizeContentWrite(c *gin.Context, path string) bool {
 	method := http.MethodPost
-	if path == "/api/v1/channels/:id/content/:uploadID/parts/:partKey" {
+	switch path {
+	case "/api/v1/channels/:id/content/:uploadID/parts/:partKey":
 		method = http.MethodPut
-	} else if path == "/api/v1/channels/:id/content/:uploadID" {
+	case "/api/v1/channels/:id/content/:uploadID":
 		method = http.MethodDelete
 	}
 	if c.Request.Method != method {
@@ -298,6 +295,14 @@ func (h *ChannelHandler) authorizeContent(c *gin.Context, path string) bool {
 		return false
 	}
 	return true
+}
+
+func requireChannelMethod(c *gin.Context, method string) bool {
+	if c.Request.Method == method {
+		return true
+	}
+	c.AbortWithStatus(http.StatusMethodNotAllowed)
+	return false
 }
 
 func (h *ChannelHandler) authorizeContentRead(c *gin.Context) bool {

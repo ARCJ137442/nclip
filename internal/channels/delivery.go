@@ -173,6 +173,15 @@ func (m *Manager) beginDeliveryLocked(record *Record, mode DeliveryMode, now tim
 	if seat == nil {
 		return DeliveryStart{}, ErrDeliveryNotReady
 	}
+	if seat.deliveryMode != DeliveryModeUnset && seat.deliveryMode != mode {
+		return DeliveryStart{}, ErrDeliveryModeConflict
+	}
+	if seat.delivery != nil {
+		return DeliveryStart{}, ErrDeliveryBusy
+	}
+	if record.ContentState != ContentHeld || record.contentSlug == "" || (seat.info.State != "paired" && seat.info.State != "released") {
+		return DeliveryStart{}, ErrDeliveryNotReady
+	}
 	if seat.info.State == "released" {
 		if !recoverReleased {
 			return DeliveryStart{}, ErrDeliveryNotReady
@@ -182,15 +191,6 @@ func (m *Manager) beginDeliveryLocked(record *Record, mode DeliveryMode, now tim
 		}
 		seat.info.State = "paired"
 		seat.releaseUntil = time.Time{}
-	}
-	if seat.info.State != "paired" || record.ContentState != ContentHeld || record.contentSlug == "" {
-		return DeliveryStart{}, ErrDeliveryNotReady
-	}
-	if seat.deliveryMode != DeliveryModeUnset && seat.deliveryMode != mode {
-		return DeliveryStart{}, ErrDeliveryModeConflict
-	}
-	if seat.delivery != nil {
-		return DeliveryStart{}, ErrDeliveryBusy
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	lease := &DeliveryLease{ChannelID: record.ID, SeatID: seat.id, Mode: mode, ctx: ctx, cancel: cancel}
@@ -212,10 +212,10 @@ func (m *Manager) SetDeliveryRange(lease *DeliveryLease, start int64) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	record, ok := m.channels[lease.ChannelID]
-	if !ok || record.seat == nil || record.seat.delivery != lease || record.seat.deliveryMode != lease.Mode || lease.canceled.Load() {
+	if !m.deliveryCurrentLocked(lease) {
 		return ErrContentClosed
 	}
+	record := m.channels[lease.ChannelID]
 	if start > record.seat.deliveredThrough {
 		return ErrDeliveryGap
 	}
@@ -290,8 +290,7 @@ func (m *Manager) ReserveDeliverySpace(lease *DeliveryLease, reservation, freeBy
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	record, ok := m.channels[lease.ChannelID]
-	if !ok || record.seat == nil || record.seat.delivery != lease || record.seat.deliveryMode != lease.Mode || lease.canceled.Load() {
+	if !m.deliveryCurrentLocked(lease) {
 		return ErrContentClosed
 	}
 	if !m.content.ready || lease.reserved != 0 {
@@ -362,7 +361,6 @@ func (m *Manager) SweepReceiverLiveness(now time.Time) []ContentRelease {
 		if seat.info.State == "paired" && now.Sub(seat.lastSeen) >= ReceiverHeartbeatTimeout {
 			if seat.delivery != nil {
 				seat.delivery.Cancel()
-				seat.delivery = nil
 			}
 			seat.info.State = "released"
 			seat.releaseUntil = now.Add(ChannelReleaseWindow)

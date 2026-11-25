@@ -319,8 +319,18 @@ func (h *ChannelHandler) ContentDownload(c *gin.Context) {
 	if !complete && lease.Context().Err() != nil {
 		streamErr = lease.Context().Err()
 	}
-	_ = controller.SetWriteDeadline(time.Time{})
+	finishChannelResponseIO(c, lease, controller, streamErr)
 	h.finishChannelDelivery(lease, prepared, total, complete, streamErr)
+}
+
+func finishChannelResponseIO(c *gin.Context, lease *channels.DeliveryLease, controller *http.ResponseController, streamErr error) {
+	if streamErr != nil && c.Writer.Written() {
+		// The headers cannot be replaced once body bytes have started. Interrupt
+		// the response instead of making a truncated transfer look successful.
+		lease.Cancel()
+		return
+	}
+	_ = controller.SetWriteDeadline(time.Time{})
 }
 
 func requestedChannelRange(c *gin.Context, plan channelResponsePlan, total int64) (byteRange, bool, error) {
@@ -405,7 +415,13 @@ func writeChannelResponseChunk(h *ChannelHandler, c *gin.Context, lease *channel
 	if written != len(buffer) {
 		return int64(written), io.ErrShortWrite
 	}
-	if err := controller.Flush(); err != nil {
+	// Gin's Flush() discards the underlying FlushError. Bypass that adapter
+	// after Write has committed Gin's status and byte accounting.
+	writer := http.ResponseWriter(c.Writer)
+	if unwrap, ok := writer.(interface{ Unwrap() http.ResponseWriter }); ok {
+		writer = unwrap.Unwrap()
+	}
+	if err := http.NewResponseController(writer).Flush(); err != nil {
 		return int64(written), err
 	}
 	return int64(written), nil
@@ -417,6 +433,7 @@ func (h *ChannelHandler) finishChannelDelivery(lease *channels.DeliveryLease, pr
 		log.Printf("[WARN] finish channel delivery: %v", finishErr)
 	}
 	if delivered {
+		h.manager.CleanupContentRelease(release)
 		if err := h.deleteReleasedContent(release); err != nil {
 			log.Printf("[WARN] delete delivered channel content: %v", err)
 		}

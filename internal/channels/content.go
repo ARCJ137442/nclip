@@ -660,6 +660,7 @@ func (m *Manager) CleanupContentRelease(release ContentRelease) {
 }
 
 func (m *Manager) ContentReleaseDeleted(release ContentRelease) {
+	m.CleanupContentRelease(release)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if release.Slug == "" {
