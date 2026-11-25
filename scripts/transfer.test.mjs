@@ -180,6 +180,48 @@ test("channel init and finalize fetch cancellation keep the aborted result", asy
   assert.equal(finalizeState.uploadID, "upload-1");
 });
 
+test("channel init and finalize response-body cancellation also stays aborted", async () => {
+  const abortingJSON = (signal, value, onStarted = () => {}) => ({
+    ok: true,
+    status: 201,
+    json: () => new Promise((resolve, reject) => {
+      onStarted();
+      if (value !== undefined) { resolve(value); return; }
+      signal.addEventListener("abort", () => reject(new DOMException("cancelled", "AbortError")), { once: true });
+    }),
+  });
+  const initState = createChannelUploadState([], () => "init-body-key");
+  const initController = new AbortController();
+  let initBodyStarted;
+  const initBodyPending = new Promise((resolve) => { initBodyStarted = resolve; });
+  await withFetch(async (_url, options) => abortingJSON(options.signal, undefined, initBodyStarted), async () => {
+    const pending = uploadChannelContent("c", initState, {}, { signal: initController.signal });
+    await initBodyPending;
+    initController.abort();
+    await assert.rejects(pending, (error) => error instanceof RequestError && error.message === "aborted");
+  });
+
+  const finalizeState = createChannelUploadState([], (() => { let i = 0; return () => `body-${++i}`; })());
+  const finalizeController = new AbortController();
+  let finalizeBodyStarted;
+  let deletes = 0;
+  const finalizeBodyPending = new Promise((resolve) => { finalizeBodyStarted = resolve; });
+  await withFetch(async (url, options = {}) => {
+    if (options.method === "DELETE") { deletes++; return new Response(null, { status: 204 }); }
+    return url.endsWith("/finalize")
+      ? abortingJSON(options.signal, undefined, finalizeBodyStarted)
+      : abortingJSON(options.signal, { upload_id: "upload-body" });
+  }, async () => {
+    const pending = uploadChannelContent("c", finalizeState, {}, { signal: finalizeController.signal });
+    await finalizeBodyPending;
+    finalizeController.abort();
+    await assert.rejects(pending, (error) => error instanceof RequestError && error.message === "aborted");
+    assert.equal(await cleanupCanceledChannelUpload("c", finalizeState), true);
+  });
+  assert.equal(finalizeState.uploadID, "upload-body");
+  assert.equal(deletes, 1);
+});
+
 test("cancel cleanup confirms deletion only after a terminal server response", async () => {
   const state = createChannelUploadState([], () => "same-init-key");
   let deletes = 0;

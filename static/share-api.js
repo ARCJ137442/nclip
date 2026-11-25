@@ -93,7 +93,7 @@ export async function uploadChannelContent(channelID, upload, headers = {}, { on
       body: JSON.stringify({ manifest: upload.manifest }),
       signal,
     });
-    const result = await response.json();
+    const result = await readResponseJSON(response);
     if (!result.upload_id) throw new RequestError(0, "invalid_upload_session");
     upload.uploadID = result.upload_id;
   }
@@ -125,7 +125,16 @@ export async function uploadChannelContent(channelID, upload, headers = {}, { on
     headers: { ...headers, "Idempotency-Key": upload.finalizeRequestID },
     signal,
   });
-  return response.json();
+  return readResponseJSON(response);
+}
+
+async function readResponseJSON(response) {
+  try {
+    return await response.json();
+  } catch (error) {
+    if (error?.name === "AbortError") throw new RequestError(0, "aborted");
+    throw error;
+  }
 }
 
 export async function abortChannelContent(channelID, upload, headers = {}) {
