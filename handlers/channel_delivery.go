@@ -37,9 +37,9 @@ type preparedChannelResponse struct {
 	plan      channelResponsePlan
 }
 
-func (p *preparedChannelResponse) close() {
+func (p *preparedChannelResponse) close() error {
 	if p == nil {
-		return
+		return nil
 	}
 	if p.source != nil {
 		_ = p.source.Remove()
@@ -48,8 +48,17 @@ func (p *preparedChannelResponse) close() {
 		_ = p.response.Remove()
 	}
 	if p.directory != "" {
-		_ = os.RemoveAll(p.directory)
+		if err := os.RemoveAll(p.directory); err != nil {
+			return err
+		}
+		if _, err := os.Stat(p.directory); !errors.Is(err, os.ErrNotExist) {
+			if err == nil {
+				return fmt.Errorf("channel response temporary directory remains")
+			}
+			return err
+		}
 	}
+	return nil
 }
 
 type countingWriter struct{ size int64 }
@@ -138,6 +147,11 @@ func (h *ChannelHandler) prepareChannelResponse(lease *channels.DeliveryLease, s
 	}()
 	prepared, err := h.materializeChannelResponse(lease, slug, paste, plan, reservation)
 	if err != nil {
+		if cleanupErr := prepared.close(); cleanupErr != nil {
+			reservationHeld = false
+			log.Printf("[WARN] failed channel materialization left temporary data; retaining reservation: %v", cleanupErr)
+			return nil, fmt.Errorf("%w; temporary cleanup failed: %v", err, cleanupErr)
+		}
 		return nil, err
 	}
 	lease.SetSource(prepared.response.File)
@@ -152,8 +166,7 @@ func (h *ChannelHandler) materializeChannelResponse(lease *channels.DeliveryLeas
 	}
 	prepared := &preparedChannelResponse{directory: directory, plan: plan}
 	if err := h.readAndBuildChannelResponse(lease, slug, paste, plan, reservation, prepared); err != nil {
-		prepared.close()
-		return nil, err
+		return prepared, err
 	}
 	return prepared, nil
 }
@@ -275,18 +288,18 @@ func (h *ChannelHandler) ContentDownload(c *gin.Context) {
 		channelDeliveryError(c, err)
 		return
 	}
+	defer func() {
+		if err := prepared.close(); err != nil {
+			log.Printf("[WARN] channel response temporary cleanup failed; retaining reservation: %v", err)
+			return
+		}
+		h.manager.ReleaseDeliverySpace(lease)
+	}()
 	if lease.Context().Err() != nil {
 		_, _, _ = h.manager.FinishDelivery(lease, prepared.response.Size, false, time.Now())
 		channelDeliveryError(c, channels.ErrContentClosed)
-		prepared.close()
-		h.manager.ReleaseDeliverySpace(lease)
 		return
 	}
-	defer func() {
-		prepared.close()
-		h.manager.ReleaseDeliverySpace(lease)
-	}()
-
 	total := prepared.response.Size
 	byteRange, partial, err := requestedChannelRange(c, prepared.plan, total)
 	if err != nil {
@@ -404,8 +417,6 @@ func (h *ChannelHandler) finishChannelDelivery(lease *channels.DeliveryLease, pr
 		log.Printf("[WARN] finish channel delivery: %v", finishErr)
 	}
 	if delivered {
-		prepared.close()
-		h.manager.ReleaseDeliverySpace(lease)
 		if err := h.deleteReleasedContent(release); err != nil {
 			log.Printf("[WARN] delete delivered channel content: %v", err)
 		}

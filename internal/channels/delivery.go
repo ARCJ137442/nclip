@@ -270,7 +270,7 @@ func (m *Manager) FinishDelivery(lease *DeliveryLease, total int64, complete boo
 	if lease.written > 0 {
 		seat.lastSeen = now
 	}
-	if complete && total > 0 && seat.deliveredThrough >= total {
+	if complete && seat.deliveredThrough >= total {
 		release := m.detachContentLocked(&record)
 		m.releaseSeatLocked(&record, "delivered", now)
 		m.channels[lease.ChannelID] = record

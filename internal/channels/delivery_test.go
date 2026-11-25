@@ -2,6 +2,7 @@ package channels
 
 import (
 	"crypto/sha256"
+	"sync"
 	"testing"
 	"time"
 
@@ -128,6 +129,76 @@ func TestTicketIssueDoesNotCancelOrReplaceAnAppLease(t *testing.T) {
 	}
 	if app.Lease.Context().Err() != nil {
 		t.Fatal("failed ticket issuance cancelled the app lease")
+	}
+}
+
+func TestTicketAndAppFirstGETCompeteForOneRepresentation(t *testing.T) {
+	now := time.Now()
+	manager, record, _, joined := heldDeliveryFixture(t, now)
+	ticket, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	var starts [2]DeliveryStart
+	var errs [2]error
+	gate := make(chan struct{})
+	wait.Add(2)
+	go func() {
+		defer wait.Done()
+		<-gate
+		starts[0], errs[0] = manager.BeginDelivery(record.ID, joined.SeatToken, joined.ClaimToken, now)
+	}()
+	go func() {
+		defer wait.Done()
+		<-gate
+		starts[1], errs[1] = manager.BeginTicketDelivery(record.ID, ticket, now)
+	}()
+	close(gate)
+	wait.Wait()
+	for i := range starts {
+		if errs[i] == nil {
+			if starts[i].Lease == nil || errs[1-i] != ErrDeliveryModeConflict {
+				t.Fatalf("first GET competition: %v", errs)
+			}
+			return
+		}
+	}
+	t.Fatalf("neither GET acquired delivery: %v", errs)
+}
+
+func TestTicketCannotCrossChannelOrSurviveKick(t *testing.T) {
+	now := time.Now()
+	manager, record, sender, joined := heldDeliveryFixture(t, now)
+	ticket, err := manager.IssueDeliveryTicket(record.ID, joined.SeatToken, joined.ClaimToken, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	createID, _ := NewRequestID()
+	other, _, _, err := manager.Create("other-sender", createID, VisibilityPublic)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.BeginTicketDelivery(other.ID, ticket, now); err != ErrUnauthorized {
+		t.Fatalf("cross-channel ticket: %v", err)
+	}
+	start, err := manager.BeginTicketDelivery(record.ID, ticket, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kickID, _ := NewRequestID()
+	state, _ := manager.Get(record.ID)
+	if _, err := manager.KickWithContent(record.ID, sender, state.seat.id, kickID, now); err != nil {
+		t.Fatal(err)
+	}
+	if start.Lease.Context().Err() == nil {
+		t.Fatal("kick did not cancel native lease")
+	}
+	if _, err := manager.BeginTicketDelivery(record.ID, ticket, now); err != ErrUnauthorized {
+		t.Fatalf("ticket after kick: %v", err)
+	}
+	if _, delivered, _ := manager.FinishDelivery(start.Lease, 0, true, now); delivered {
+		t.Fatal("late kicked lease settled delivery")
 	}
 }
 

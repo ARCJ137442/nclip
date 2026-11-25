@@ -68,6 +68,10 @@ type Record struct {
 	contentBytes   int64
 }
 
+// ContentSize exposes the held logical content size only to already
+// authorized channel status/download handlers.
+func (r Record) ContentSize() int64 { return r.contentBytes }
+
 type createResult struct {
 	visibility Visibility
 	record     Record

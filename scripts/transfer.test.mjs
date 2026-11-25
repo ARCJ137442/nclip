@@ -18,6 +18,7 @@ import {
 } from "../static/share-api.js";
 import { captureSeatTarget, isSameSeatTarget } from "../static/channel-workspace-state.js";
 import { resolveChannelSession } from "../static/channel-session-state.js";
+import { CHANNEL_BROWSER_DOWNLOAD_THRESHOLD_BYTES, shouldUseBrowserDownload, validateChannelDownloadURL } from "../static/channel-transfer-path.js";
 import { clampTTLHours, previewForItem, safePreview } from "../static/handoff.js";
 import { normalizePreferences } from "../static/preferences.js";
 
@@ -290,6 +291,18 @@ test("failed session checks stay unknown and successful retry restores the ready
   }
   const recovered = await resolveChannelSession(async () => new Response(JSON.stringify({ enabled: true, csrf_token: "csrf" }), { status: 200, headers: { "Content-Type": "application/json" } }));
   assert.deepEqual(recovered, { enabled: true, csrf_token: "csrf", status: "ready" });
+});
+
+test("browser download selection and ticket URL stay bounded to the same channel origin", () => {
+  assert.equal(shouldUseBrowserDownload(CHANNEL_BROWSER_DOWNLOAD_THRESHOLD_BYTES - 1), false);
+  assert.equal(shouldUseBrowserDownload(CHANNEL_BROWSER_DOWNLOAD_THRESHOLD_BYTES), true);
+  assert.equal(shouldUseBrowserDownload(1, false), true);
+  const channel = "/api/v1/channels/channel-id";
+  const page = "https://clip.test/c/channel-id";
+  assert.equal(validateChannelDownloadURL(`${channel}/content/download/ticket`, channel, page), true);
+  assert.equal(validateChannelDownloadURL("https://attacker.test/download/ticket", channel, page), false);
+  assert.equal(validateChannelDownloadURL(`${channel}/content/download/ticket?leak=1`, channel, page), false);
+  assert.equal(validateChannelDownloadURL(`${channel}/content/download-evil/ticket`, channel, page), false);
 });
 
 test("sender preview normalizes lines, truncates by rune, and suppresses secrets", () => {

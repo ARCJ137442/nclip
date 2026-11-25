@@ -4,6 +4,7 @@ import { decodeShare, requestBytes } from "./share-api.js";
 import { createProgress, timeParts } from "./transfer.js";
 import { renderItems, status } from "./ui.js";
 import { sizeLabel, t } from "./i18n.js";
+import { shouldUseBrowserDownload, validateChannelDownloadURL } from "./channel-transfer-path.js";
 
 const page = document.querySelector("#channel-page");
 if (page) {
@@ -20,6 +21,8 @@ if (page) {
   const resultsPanel = document.querySelector("#channel-received");
   const results = document.querySelector("#channel-received-items");
   const archiveLink = document.querySelector("#channel-download-archive");
+  const browserDownloadPanel = document.querySelector("#channel-browser-download");
+  const browserDownloadButton = document.querySelector("#channel-browser-download-button");
 
   let seatToken = "";
   let claimToken = "";
@@ -35,6 +38,10 @@ if (page) {
   let receiveController = null;
   let archiveURL = "";
   let receiveAttemptStartedAt = 0;
+  let seatGeneration = 0;
+  let browserTicketURL = "";
+  let browserTicketIssuing = false;
+  let browserDownloadStarted = false;
 
   function requestId() {
     const bytes = crypto.getRandomValues(new Uint8Array(16));
@@ -97,8 +104,13 @@ if (page) {
   }
 
   function hideLease() {
+    seatGeneration++;
     seatToken = "";
     claimToken = "";
+    browserTicketURL = "";
+    browserTicketIssuing = false;
+    browserDownloadStarted = false;
+    browserDownloadPanel.hidden = true;
     joinRequestId = "";
     leaveRequestId = "";
     leaveButton.hidden = true;
@@ -112,6 +124,7 @@ if (page) {
     if (!seatToken || completed) return;
     leaveRequestId ||= requestId();
     receiveController?.abort();
+    browserTicketURL = "";
     void fetch(`${channelURL}/leave`, {
       method: "POST",
       credentials: "same-origin",
@@ -277,6 +290,79 @@ if (page) {
     }
   }
 
+  async function prepareBrowserTicket() {
+    if (!seatToken || !claimToken || browserTicketURL || browserTicketIssuing || leaving || completed) return;
+    browserTicketIssuing = true;
+    browserDownloadButton.disabled = true;
+    browserDownloadButton.textContent = t("channelBrowserDownloadPreparing");
+    const expectedGeneration = seatGeneration;
+    const expectedSeat = seatToken;
+    try {
+      const response = await fetch(`${channelURL}/content/ticket`, {
+        method: "POST",
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: {
+          "X-Nclip-Seat-Token": expectedSeat,
+          "X-Nclip-Claim-Token": claimToken,
+        },
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error || `HTTP ${response.status}`);
+      if (expectedGeneration !== seatGeneration || expectedSeat !== seatToken) return;
+      if (!validateChannelDownloadURL(body.download_url, channelURL, location.href)) {
+        throw new Error("invalid_download_ticket_url");
+      }
+      browserTicketURL = new URL(body.download_url, location.href).href;
+      browserDownloadButton.disabled = false;
+      browserDownloadButton.textContent = t("channelBrowserDownload");
+      setState("channelBrowserDownloadReady");
+    } catch {
+      if (expectedGeneration === seatGeneration) {
+        browserDownloadButton.disabled = false;
+        browserDownloadButton.textContent = t("channelBrowserDownloadRetry");
+        setError("channelBrowserDownloadFailed");
+      }
+    } finally {
+      browserTicketIssuing = false;
+    }
+  }
+
+  async function startBrowserDownload() {
+    if (!seatToken || browserTicketIssuing || leaving || completed) return;
+    if (!browserTicketURL) {
+      const popup = window.open("about:blank", "_blank");
+      if (!popup) {
+        setError("channelBrowserDownloadPopupBlocked");
+        return;
+      }
+      const generation = seatGeneration;
+      await prepareBrowserTicket();
+      if (!browserTicketURL || generation !== seatGeneration) {
+        popup.close();
+        return;
+      }
+      popup.opener = null;
+      popup.location.replace(browserTicketURL);
+      browserDownloadStarted = true;
+      document.querySelector("#channel-browser-download-status").textContent = t("channelBrowserDownloadNote");
+      document.querySelector("#channel-browser-download-status").hidden = false;
+      browserDownloadButton.textContent = t("channelBrowserDownloadAgain");
+      return;
+    }
+    const popup = window.open(browserTicketURL, "_blank");
+    if (!popup) {
+      setError("channelBrowserDownloadPopupBlocked");
+      return;
+    }
+    popup.opener = null;
+    browserDownloadStarted = true;
+    browserDownloadButton.disabled = false;
+    browserDownloadButton.textContent = t("channelBrowserDownloadAgain");
+    document.querySelector("#channel-browser-download-status").textContent = t("channelBrowserDownloadNote");
+    document.querySelector("#channel-browser-download-status").hidden = false;
+  }
+
   async function refresh() {
     if (!seatToken || polling || completed) return;
     polling = true;
@@ -290,6 +376,12 @@ if (page) {
       if (response.status === 410) {
         const body = await response.json().catch(() => ({}));
         if (receiving && body.error === "delivery_complete") return;
+        if (browserDownloadStarted && body.error === "delivery_complete") {
+          completed = true;
+          hideLease();
+          setState("channelBrowserDownloadComplete");
+          return;
+        }
         hideLease();
         setError(body.error === "pending_expired" ? "channelPendingExpired" : "channelReceiveGone");
         return;
@@ -299,9 +391,19 @@ if (page) {
       errorLine.hidden = true;
       if (state.seat_state === "pending_admit") setState("channelWaitingApproval");
       else if (state.content_state === "uploading") {
+        browserDownloadPanel.hidden = true;
         if (!receiving) setState("channelContentUploading");
       } else if (state.content_state === "held") {
-        if (!receiving) void receiveContent();
+        const supportsInPageReceive = typeof Blob === "function" && typeof ReadableStream === "function";
+        const requiresBrowserDownload = shouldUseBrowserDownload(state.content_bytes, supportsInPageReceive);
+        browserDownloadPanel.hidden = !requiresBrowserDownload;
+        if (requiresBrowserDownload) {
+          if (!browserTicketURL && !browserTicketIssuing) void prepareBrowserTicket();
+          else if (browserDownloadStarted) setState("channelBrowserDownloadStarted");
+          else setState("channelBrowserDownloadReady");
+        } else if (!receiving) {
+          void receiveContent();
+        }
       } else if (!receiving) setState("channelWaitingContent");
     } catch {
       if (!completed && !leaving) setError("channelJoinNetwork");
@@ -313,6 +415,11 @@ if (page) {
 
   joinButton.addEventListener("click", async () => {
     completed = false;
+    browserTicketURL = "";
+    browserTicketIssuing = false;
+    browserDownloadStarted = false;
+    browserDownloadPanel.hidden = true;
+    document.querySelector("#channel-browser-download-status").hidden = true;
     resultsPanel.hidden = true;
     results.replaceChildren();
     archiveLink.replaceChildren();
@@ -346,6 +453,7 @@ if (page) {
       }
       seatToken = body.seat_token || "";
       claimToken = body.claim_token || "";
+      seatGeneration++;
       leaveButton.textContent = t("channelLeaveAndCancel");
       joinButton.hidden = true;
       leaveButton.hidden = false;
@@ -359,6 +467,7 @@ if (page) {
   });
 
   leaveButton.addEventListener("click", () => { void leave(); });
+  browserDownloadButton.addEventListener("click", startBrowserDownload);
   retryButton.addEventListener("click", () => {
     if (retryButton.dataset.action === "restart") {
       retained = [];

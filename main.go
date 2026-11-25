@@ -255,7 +255,7 @@ func setupRouterWithChannels(store storage.PasteStore, cfg *config.Config) (*gin
 	}
 
 	// Add logging and safe recovery before access gates.
-	router.Use(gin.Logger())
+	router.Use(redactedAccessLogger())
 	router.Use(jsonRecovery())
 	router.Use(canonicalErrors())
 	router.Use(gin.Recovery())
@@ -294,6 +294,8 @@ func setupRouterWithChannels(store storage.PasteStore, cfg *config.Config) (*gin
 	router.POST("/api/v1/channels/:id/heartbeat", channelHandler.Heartbeat)
 	router.POST("/api/v1/channels/:id/seat/heartbeat", channelHandler.SeatHeartbeat)
 	router.POST("/api/v1/channels/:id/leave", channelHandler.Leave)
+	router.POST("/api/v1/channels/:id/content/ticket", channelHandler.IssueContentTicket)
+	router.GET("/api/v1/channels/:id/content/download/:ticket", channelHandler.ContentTicketDownload)
 	router.GET("/api/v1/channels/:id/content", channelHandler.ContentDownload)
 	if cfg.UploadAuth && !cfg.AccountsEnabled {
 		auth := apiKeyAuth(cfg)
@@ -466,7 +468,7 @@ func canonicalErrors() gin.HandlerFunc {
 }
 
 func streamsResponse(method, path string) bool {
-	if method == http.MethodGet && strings.HasPrefix(path, "/api/v1/channels/") && strings.HasSuffix(path, "/content") {
+	if method == http.MethodGet && strings.HasPrefix(path, "/api/v1/channels/") && (strings.HasSuffix(path, "/content") || strings.Contains(path, "/content/download/")) {
 		return true
 	}
 	if strings.HasPrefix(path, "/api/v1/shares/") &&
@@ -478,6 +480,20 @@ func streamsResponse(method, path string) bool {
 	}
 	slug := strings.Trim(path, "/")
 	return method == http.MethodGet && !strings.Contains(slug, "/") && utils.IsValidSlug(slug)
+}
+
+// redactedAccessLogger logs route templates instead of request paths so
+// capability-bearing path segments, slugs and IDs are never written to logs.
+func redactedAccessLogger() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		started := time.Now()
+		c.Next()
+		route := c.FullPath()
+		if route == "" {
+			route = "<unmatched>"
+		}
+		log.Printf("[ACCESS] %s | %3d | %13v | %-7s %s", c.ClientIP(), c.Writer.Status(), time.Since(started), c.Request.Method, route)
+	}
 }
 
 // getErrorMessage extracts a suitable error message from the response body,

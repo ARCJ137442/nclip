@@ -253,6 +253,18 @@ func TestAccountChannelRequiresUploadAndPrivateReadRequiresDownload(t *testing.T
 	if denied := accountChannelCreate(router, reader, "BgYGBgYGBgYGBgYGBgYGBg", ""); denied.Code != http.StatusForbidden {
 		t.Fatalf("download-only create = %d %s", denied.Code, denied.Body.String())
 	}
+	privateTicketIssue := channelRequestWithCookie(router, http.MethodPost, "/api/v1/channels/"+channel.ID+"/content/ticket", nil, uploader.cookie, map[string]string{
+		"X-Nclip-Seat-Token":  "AQEBAQEBAQEBAQEBAQEBAQ",
+		"X-Nclip-Claim-Token": "AgICAgICAgICAgICAgICAg",
+		"Origin":              "https://clip.test", "Sec-Fetch-Site": "same-origin",
+	})
+	if privateTicketIssue.Code != http.StatusForbidden || !strings.Contains(privateTicketIssue.Body.String(), "permission_denied") {
+		t.Fatalf("private ticket issue bypassed download permission: %d %s", privateTicketIssue.Code, privateTicketIssue.Body.String())
+	}
+	privateTicketGet := channelRequestWithCookie(router, http.MethodGet, "/api/v1/channels/"+channel.ID+"/content/download/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", nil, uploader.cookie, nil)
+	if privateTicketGet.Code != http.StatusForbidden || !strings.Contains(privateTicketGet.Body.String(), "permission_denied") {
+		t.Fatalf("private ticket GET bypassed download permission: %d %s", privateTicketGet.Code, privateTicketGet.Body.String())
+	}
 	anonymousStatus := shareRequest(router, http.MethodGet, "/api/v1/channels/"+channel.ID, nil, nil)
 	if anonymousStatus.Code != http.StatusUnauthorized {
 		t.Fatalf("private status without login = %d", anonymousStatus.Code)
@@ -1436,6 +1448,73 @@ func TestChannelDeliveryRequiresClaimAndResumesMultipartRange(t *testing.T) {
 	fixture := newChannelDeliveryFixture(t, []byte("range-bound-payload"))
 	assertChannelRangeResumes(t, fixture)
 	assertChannelDeliveryComplete(t, fixture)
+}
+
+func TestBrowserDownloadTicketResumesRawAttachmentAndLocksRepresentation(t *testing.T) {
+	payload := []byte("ticket payload")
+	fixture := newChannelDeliveryFixture(t, payload)
+	seatStatus := channelRequestWithCookies(fixture.router, http.MethodGet, "/api/v1/channels/"+fixture.channelID, nil, nil, map[string]string{
+		"X-Nclip-Seat-Token": fixture.seatToken,
+	})
+	var seatStatusBody map[string]any
+	if seatStatus.Code != http.StatusOK || json.Unmarshal(seatStatus.Body.Bytes(), &seatStatusBody) != nil || seatStatusBody["content_bytes"] != float64(len(payload)) {
+		t.Fatalf("authorized receiver status omitted logical size: %d %s", seatStatus.Code, seatStatus.Body.String())
+	}
+	issue := func() *httptest.ResponseRecorder {
+		return channelRequestWithCookies(fixture.router, http.MethodPost, "/api/v1/channels/"+fixture.channelID+"/content/ticket", nil, nil, map[string]string{
+			"X-Nclip-Seat-Token":  fixture.seatToken,
+			"X-Nclip-Claim-Token": fixture.claimToken,
+			"Origin":              "https://clip.test",
+			"Sec-Fetch-Site":      "same-origin",
+		})
+	}
+	firstTicket := issue()
+	if firstTicket.Code != http.StatusCreated || firstTicket.Header().Get("Cache-Control") != "no-store" || firstTicket.Header().Get("Referrer-Policy") != "no-referrer" {
+		t.Fatalf("issue browser ticket: %d headers=%v body=%s", firstTicket.Code, firstTicket.Header(), firstTicket.Body.String())
+	}
+	var firstTicketBody struct {
+		DownloadURL string `json:"download_url"`
+	}
+	if err := json.Unmarshal(firstTicket.Body.Bytes(), &firstTicketBody); err != nil || !strings.Contains(firstTicketBody.DownloadURL, "/content/download/") || strings.Contains(firstTicketBody.DownloadURL, "?") {
+		t.Fatalf("invalid ticket download URL: %+v err=%v", firstTicketBody, err)
+	}
+
+	requestTicket := func(downloadURL, rangeHeader, ifRange string) *httptest.ResponseRecorder {
+		headers := map[string]string{"Sec-Fetch-Site": "same-origin"}
+		if rangeHeader != "" {
+			headers["Range"] = rangeHeader
+		}
+		if ifRange != "" {
+			headers["If-Range"] = ifRange
+		}
+		return channelRequestWithCookies(fixture.router, http.MethodGet, downloadURL, nil, nil, headers)
+	}
+	first := requestTicket(firstTicketBody.DownloadURL, "bytes=0-4", "")
+	if first.Code != http.StatusPartialContent || string(first.Body.Bytes()) != string(payload[:5]) || first.Header().Get("Content-Disposition") == "" || first.Header().Get("ETag") == "" {
+		t.Fatalf("first attachment range: %d headers=%v body=%q", first.Code, first.Header(), first.Body.Bytes())
+	}
+	if app := fixture.download("", "", fixture.claimToken); app.Code != http.StatusConflict || !strings.Contains(app.Body.String(), "delivery_mode_conflict") {
+		t.Fatalf("seat switched from attachment to app multipart: %d %s", app.Code, app.Body.String())
+	}
+
+	secondTicket := issue()
+	var secondTicketBody struct {
+		DownloadURL string `json:"download_url"`
+	}
+	if secondTicket.Code != http.StatusCreated || json.Unmarshal(secondTicket.Body.Bytes(), &secondTicketBody) != nil || secondTicketBody.DownloadURL == firstTicketBody.DownloadURL {
+		t.Fatalf("rotate browser ticket: %d %s", secondTicket.Code, secondTicket.Body.String())
+	}
+	old := requestTicket(firstTicketBody.DownloadURL, "bytes=5-", first.Header().Get("ETag"))
+	if old.Code != http.StatusForbidden {
+		t.Fatalf("rotated ticket remained valid: %d %s", old.Code, old.Body.String())
+	}
+	last := requestTicket(secondTicketBody.DownloadURL, "bytes=5-", first.Header().Get("ETag"))
+	if last.Code != http.StatusPartialContent || string(last.Body.Bytes()) != string(payload[5:]) {
+		t.Fatalf("resumed attachment range: %d headers=%v body=%q", last.Code, last.Header(), last.Body.Bytes())
+	}
+	if remaining, err := fixture.store.ListEphemeralPastes(); err != nil || len(remaining) != 0 {
+		t.Fatalf("completed attachment did not delete ephemeral content: remaining=%d err=%v", len(remaining), err)
+	}
 }
 
 func assertChannelRangeResumes(t *testing.T, fixture channelDeliveryFixture) {

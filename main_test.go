@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -948,6 +949,8 @@ func TestStreamingResponsesBypassErrorBuffer(t *testing.T) {
 		{http.MethodGet, "/raw/ABCDE", true},
 		{http.MethodGet, "/ABCDE", true},
 		{http.MethodGet, "/api/v1/shares/ABCDE/content", true},
+		{http.MethodGet, "/api/v1/channels/CHANNEL123/content/download/TICKETSECRET", true},
+		{http.MethodPost, "/api/v1/channels/CHANNEL123/content/ticket", false},
 		{http.MethodPost, "/api/v1/shares/ABCDE/receive", true},
 		{http.MethodGet, "/api/v1/users", false},
 		{http.MethodGet, "/admin", false},
@@ -957,5 +960,31 @@ func TestStreamingResponsesBypassErrorBuffer(t *testing.T) {
 		if got := streamsResponse(tc.method, tc.path); got != tc.want {
 			t.Errorf("streamsResponse(%s, %s) = %v, want %v", tc.method, tc.path, got, tc.want)
 		}
+	}
+}
+
+func TestRedactedAccessLoggerNeverWritesTicketPath(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var output bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&output)
+	defer log.SetOutput(previous)
+
+	router := gin.New()
+	router.Use(redactedAccessLogger())
+	router.GET("/api/v1/channels/:id/content/download/:ticket", func(c *gin.Context) { c.Status(http.StatusOK) })
+	const channelID = "CHANNEL-PRIVATE-ID"
+	const ticket = "TICKET-PRIVATE-SECRET"
+	response := httptest.NewRecorder()
+	router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/v1/channels/"+channelID+"/content/download/"+ticket, nil))
+	if response.Code != http.StatusOK {
+		t.Fatalf("ticket route = %d", response.Code)
+	}
+	logOutput := output.String()
+	if strings.Contains(logOutput, channelID) || strings.Contains(logOutput, ticket) {
+		t.Fatalf("access logger recorded path capability: %q", logOutput)
+	}
+	if !strings.Contains(logOutput, "/api/v1/channels/:id/content/download/:ticket") {
+		t.Fatalf("access logger omitted safe route template: %q", logOutput)
 	}
 }

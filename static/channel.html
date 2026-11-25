@@ -21,6 +21,10 @@
           <li data-stage="verifying" data-state="pending"><span class="stage-dot" aria-hidden="true"></span><span data-i18n="channelStageVerifying">校验</span></li>
           <li data-stage="ready" data-state="pending"><span class="stage-dot" aria-hidden="true"></span><span data-i18n="channelStageReady">可用</span></li>
         </ol>
+        <section id="channel-browser-download" class="transfer-controls" hidden>
+          <p id="channel-browser-download-status" class="hint" data-i18n="channelBrowserDownloadNote">大文件将交给浏览器下载；请保持此接收页打开，关闭或刷新会取消下载并释放席位。</p>
+          <button id="channel-browser-download-button" class="button primary" type="button" disabled data-i18n="channelBrowserDownload">交给浏览器下载</button>
+        </section>
         <section id="channel-receive-progress" class="transfer" hidden>
           <div class="transfer-head">
             <span id="channel-receive-phase" class="transfer-phase"></span>

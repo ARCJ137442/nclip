@@ -226,6 +226,8 @@ func channelRoutePath(path string) bool {
 func channelContentPath(path string) bool {
 	switch path {
 	case "/api/v1/channels/:id/content",
+		"/api/v1/channels/:id/content/ticket",
+		"/api/v1/channels/:id/content/download/:ticket",
 		"/api/v1/channels/:id/content/:uploadID/parts/:partKey",
 		"/api/v1/channels/:id/content/:uploadID/finalize",
 		"/api/v1/channels/:id/content/:uploadID":
@@ -237,6 +239,20 @@ func channelContentPath(path string) bool {
 
 func (h *ChannelHandler) authorizeContent(c *gin.Context, path string) bool {
 	if path == "/api/v1/channels/:id/content" && c.Request.Method == http.MethodGet {
+		return h.authorizeContentRead(c)
+	}
+	if path == "/api/v1/channels/:id/content/download/:ticket" {
+		if c.Request.Method != http.MethodGet {
+			c.AbortWithStatus(http.StatusMethodNotAllowed)
+			return false
+		}
+		return h.authorizeTicketContentRead(c)
+	}
+	if path == "/api/v1/channels/:id/content/ticket" {
+		if c.Request.Method != http.MethodPost {
+			c.AbortWithStatus(http.StatusMethodNotAllowed)
+			return false
+		}
 		return h.authorizeContentRead(c)
 	}
 	method := http.MethodPost
@@ -294,6 +310,26 @@ func (h *ChannelHandler) authorizeContentRead(c *gin.Context) bool {
 		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": channels.ErrChannelNotFound.Error()})
 		return false
 	}
+	if !h.authorizeChannelDownload(c, record) {
+		return false
+	}
+	if c.GetHeader(seatTokenHeader) == "" || c.GetHeader(claimTokenHeader) == "" {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": channels.ErrUnauthorized.Error()})
+		return false
+	}
+	return true
+}
+
+func (h *ChannelHandler) authorizeTicketContentRead(c *gin.Context) bool {
+	record, ok := h.manager.Get(c.Param("id"))
+	if !ok {
+		c.AbortWithStatusJSON(http.StatusNotFound, gin.H{"error": channels.ErrChannelNotFound.Error()})
+		return false
+	}
+	return h.authorizeChannelDownload(c, record)
+}
+
+func (h *ChannelHandler) authorizeChannelDownload(c *gin.Context, record channels.Record) bool {
 	if h.accounts != nil {
 		user, _, authenticated := h.accounts.requestUser(c)
 		if c.IsAborted() {
@@ -312,10 +348,6 @@ func (h *ChannelHandler) authorizeContentRead(c *gin.Context) bool {
 				return false
 			}
 		}
-	}
-	if c.GetHeader(seatTokenHeader) == "" || c.GetHeader(claimTokenHeader) == "" {
-		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": channels.ErrUnauthorized.Error()})
-		return false
 	}
 	return true
 }
@@ -646,6 +678,7 @@ func (h *ChannelHandler) Status(c *gin.Context) {
 			"seat_state":    record.Seat.State,
 			"pending_until": record.Seat.PendingUntil,
 			"content_state": record.ContentState,
+			"content_bytes": record.ContentSize(),
 		})
 		return
 	}
