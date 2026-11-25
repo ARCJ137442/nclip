@@ -218,7 +218,13 @@ func (h *ChannelHandler) channelError(c *gin.Context, err error) {
 		errors.Is(err, channels.ErrJoinClosed),
 		errors.Is(err, channels.ErrDeliveryComplete),
 		errors.Is(err, channels.ErrSeatKicked):
-		c.AbortWithStatusJSON(http.StatusGone, gin.H{"error": err.Error()})
+		body := gin.H{"error": err.Error()}
+		var closed *channels.JoinClosedError
+		if errors.As(err, &closed) && closed.Reason == "sender_rejected" {
+			body["reason"] = closed.Reason
+			setCanonicalErrorReason(c, http.StatusGone, channels.ErrJoinClosed.Error(), closed.Reason)
+		}
+		c.AbortWithStatusJSON(http.StatusGone, body)
 	case errors.Is(err, channels.ErrUnauthorized):
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": err.Error()})
 	case errors.Is(err, channels.ErrCapacity):

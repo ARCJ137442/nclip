@@ -449,7 +449,11 @@ func canonicalErrors() gin.HandlerFunc {
 			// Write canonical JSON to the original writer
 			origWriter.Header().Set("Content-Type", "application/json; charset=utf-8")
 			origWriter.WriteHeader(status)
-			out, _ := json.Marshal(gin.H{"error": msg})
+			body := gin.H{"error": msg}
+			if reason := handlers.CanonicalErrorReason(c, status, msg); reason != "" {
+				body["reason"] = reason
+			}
+			out, _ := json.Marshal(body)
 			if _, err := origWriter.Write(out); err != nil {
 				log.Printf("[ERROR] canonicalErrors: failed to write error response: %v", err)
 			}

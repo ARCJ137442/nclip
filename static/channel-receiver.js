@@ -5,6 +5,7 @@ import { createProgress, timeParts } from "./transfer.js";
 import { renderItems, status } from "./ui.js";
 import { sizeLabel, t } from "./i18n.js";
 import { shouldUseBrowserDownload, validateChannelDownloadURL } from "./channel-transfer-path.js";
+import { receiverTerminalMessage } from "./channel-receiver-state.js";
 
 const page = document.querySelector("#channel-page");
 if (page) {
@@ -383,7 +384,11 @@ if (page) {
           return;
         }
         hideLease();
-        setError(body.error === "pending_expired" ? "channelPendingExpired" : "channelReceiveGone");
+        const message = receiverTerminalMessage(response.status, body);
+        if (message === "channelRejected") {
+          setState(message);
+          errorLine.hidden = true;
+        } else setError(message);
         return;
       }
       if (!response.ok) throw new Error(`HTTP ${response.status}`);

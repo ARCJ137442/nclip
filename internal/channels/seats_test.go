@@ -1,6 +1,7 @@
 package channels
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -119,7 +120,7 @@ func TestAnonymousRejectReleasesSeatAndReplaysDecision(t *testing.T) {
 	if err != nil || !replay.Replayed {
 		t.Fatalf("reject retry = %+v, %v", replay, err)
 	}
-	if _, err := manager.ReceiverStatus(record.ID, joined.SeatToken, now.Add(3*time.Second)); err != ErrJoinClosed {
+	if _, err := manager.ReceiverStatus(record.ID, joined.SeatToken, now.Add(3*time.Second)); !errors.Is(err, ErrJoinClosed) {
 		t.Fatalf("rejected receiver status = %v", err)
 	}
 	newJoinID, _ := NewRequestID()

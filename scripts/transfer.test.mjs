@@ -20,7 +20,28 @@ import { captureSeatTarget, isSameSeatTarget } from "../static/channel-workspace
 import { resolveChannelSession } from "../static/channel-session-state.js";
 import { CHANNEL_BROWSER_DOWNLOAD_THRESHOLD_BYTES, shouldUseBrowserDownload, validateChannelDownloadURL } from "../static/channel-transfer-path.js";
 import { clampTTLHours, previewForItem, safePreview } from "../static/handoff.js";
-import { normalizePreferences } from "../static/preferences.js";
+import { normalizePreferences, preferences } from "../static/preferences.js";
+import { receiverTerminalMessage } from "../static/channel-receiver-state.js";
+import { t } from "../static/i18n.js";
+
+test("receiver rejection requires the exact terminal status, code and reason", () => {
+  for (const [status, body, expected] of [
+    [410, { error: "join_closed", reason: "sender_rejected" }, "channelRejected"],
+    [403, { error: "join_closed", reason: "sender_rejected" }, "channelReceiveGone"],
+    [410, { error: "join_closed" }, "channelReceiveGone"],
+    [410, { error: "join_closed", reason: "unknown" }, "channelReceiveGone"],
+    [410, { error: "pending_expired", reason: "sender_rejected" }, "channelPendingExpired"],
+    [410, { error: "delivery_complete", reason: "sender_rejected" }, "channelReceiveGone"],
+    [410, { error: "receiver_kicked" }, "channelReceiveGone"],
+  ]) assert.equal(receiverTerminalMessage(status, body), expected);
+  const previous = preferences.language;
+  try {
+    preferences.language = "zh";
+    assert.equal(t("channelRejected"), "发送者拒绝了本次加入。");
+    preferences.language = "en";
+    assert.equal(t("channelRejected"), "The sender rejected this join.");
+  } finally { preferences.language = previous; }
+});
 
 test("percentOf needs a total and clamps the range", () => {
   assert.equal(percentOf(0, 0), null);

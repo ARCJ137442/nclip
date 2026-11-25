@@ -43,9 +43,17 @@ type seatState struct {
 }
 
 type seatClosure struct {
+	channelID string
 	reason    string
 	expiresAt time.Time
 }
+
+// JoinClosedError preserves the existing machine code while carrying a reason
+// from the same locked, channel-bound tombstone lookup.
+type JoinClosedError struct{ Reason string }
+
+func (e *JoinClosedError) Error() string { return ErrJoinClosed.Error() }
+func (e *JoinClosedError) Unwrap() error { return ErrJoinClosed }
 
 type joinOutcome struct {
 	channelID string
@@ -262,10 +270,10 @@ func (m *Manager) ReceiverStatus(id, seatToken string, now time.Time) (Record, e
 		return Record{}, ErrChannelNotFound
 	}
 	if record.seat == nil {
-		return Record{}, m.closedSeatErrorLocked(seatToken, now)
+		return Record{}, m.closedSeatErrorLocked(id, seatToken, now)
 	}
 	if !matchHash(record.seat.seatHash, seatToken) {
-		return Record{}, ErrUnauthorized
+		return Record{}, m.closedSeatErrorLocked(id, seatToken, now)
 	}
 	if record.seat.info.State == "released" {
 		if !record.seat.releaseUntil.After(now) {
@@ -497,6 +505,7 @@ func (m *Manager) releaseSeatLocked(record *Record, reason string, now time.Time
 	}
 	m.closedJoins[seat.joinKey] = now.Add(JoinReplayRetention)
 	closure := seatClosure{
+		channelID: record.ID,
 		reason:    reason,
 		expiresAt: now.Add(JoinReplayRetention),
 	}
@@ -510,11 +519,14 @@ func seatKey(channelID, seatID string) string {
 	return channelID + "|" + seatID
 }
 
-func (m *Manager) closedSeatErrorLocked(seatToken string, now time.Time) error {
+func (m *Manager) closedSeatErrorLocked(channelID, seatToken string, now time.Time) error {
 	hash := sha256.Sum256([]byte(seatToken))
 	closure, ok := m.closedSeats[hash]
-	if !ok || !closure.expiresAt.After(now) {
+	if !ok || closure.channelID != channelID || !closure.expiresAt.After(now) {
 		return ErrUnauthorized
+	}
+	if closure.reason == "sender_rejected" {
+		return &JoinClosedError{Reason: "sender_rejected"}
 	}
 	if closure.reason == "pending_expired" {
 		return ErrPendingExpired
